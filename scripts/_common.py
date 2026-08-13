@@ -519,14 +519,23 @@ def detect_test_ticket(subject: str):
     return False, ""
 
 
-def build_description_excerpt(description: str, max_len: int = 240) -> str:
-    """Collapse whitespace/newlines into a single readable preview line, so
-    the review page can show what the person actually asked without you
-    needing to click through to Zendesk to find out."""
-    text = " ".join((description or "").split())
-    if len(text) > max_len:
-        text = text[: max_len - 1].rstrip() + "..."
-    return text
+def build_description_excerpt(description: str) -> str:
+    """Full original ticket text, shown as-is on the review page so nothing
+    the requester wrote is ever silently cut off with "..." -- deciding
+    whether a drafted reply is appropriate means seeing the whole request,
+    not a preview of it. (Kept the name "excerpt" for the stored field --
+    "description_excerpt" -- since that's the key already written into
+    existing entries in pending_drafts.json; renaming it would just make
+    already-pending tickets stop showing their text until re-posted.)
+
+    Normalizes line endings and collapses long runs of blank lines (common
+    in email-to-ticket descriptions with quoted signatures/disclaimers)
+    down to a single blank line, but otherwise preserves the text and its
+    paragraph breaks exactly as written -- the review page renders this
+    with CSS white-space: pre-wrap so those breaks still show up."""
+    text = (description or "").replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
 
 
 def shorten_subject(subject: str) -> str:
@@ -537,6 +546,48 @@ def shorten_subject(subject: str) -> str:
         return cve.group(0)
     cleaned = re.sub(r"^\[[^\]]+\]\s*", "", subject).strip()
     return cleaned or subject
+
+
+def _has_public_reply_from_other(comments: list, requester_id) -> bool:
+    """Shared predicate for "has someone other than the requester already
+    posted a public reply on this ticket" -- used both at detection time
+    (find_candidates, below) and again right before posting
+    (check_already_replied, below) so the two checks can't quietly drift
+    into checking slightly different things."""
+    return any(
+        c.get("public") and c.get("author_id") != requester_id
+        for c in comments
+    )
+
+
+def check_already_replied(client, ticket_id, requester_id, log_fn=print) -> dict:
+    """Re-checks a ticket's comments right before posting through it --
+    guards against the exact race this tool's design invites: a candidate
+    can sit in the pending queue indefinitely (there's no reject/dismiss
+    action), and in the meantime someone else (another agent, or a
+    teammate working the queue directly in Zendesk) may have already sent
+    the actual first reply. Posting our drafted acknowledgment on top of
+    that would be redundant at best and contradictory at worst.
+
+    Returns {"already_replied": bool, "reason": str}. Fails OPEN (
+    already_replied=False, with the reason explaining why it couldn't
+    check) on any lookup error -- a transient API hiccup here shouldn't
+    block every post; the worst case if it fails open is the same race
+    this function exists to catch in the first place, not something new."""
+    try:
+        comments = client.get_ticket_comments(int(ticket_id))
+    except Exception as exc:
+        reason = f"could not verify -- comment lookup failed ({exc})"
+        log_fn(f"check_already_replied(#{ticket_id}): {reason}")
+        return {"already_replied": False, "reason": reason}
+
+    others = [c for c in comments if c.get("public") and c.get("author_id") != requester_id]
+    if others:
+        return {
+            "already_replied": True,
+            "reason": f"a public reply already exists on this ticket (from user id {others[0].get('author_id')})",
+        }
+    return {"already_replied": False, "reason": ""}
 
 
 def find_candidates(client, log_fn=print) -> list:
@@ -574,11 +625,7 @@ def find_candidates(client, log_fn=print) -> list:
                 log_fn(f"Could not check comments for #{ticket['id']} ({exc}) -- skipping it this run.")
                 continue
 
-            already_replied = any(
-                c.get("public") and c.get("author_id") != ticket.get("requester_id")
-                for c in comments
-            )
-            if already_replied:
+            if _has_public_reply_from_other(comments, ticket.get("requester_id")):
                 continue
 
             candidates.append(ticket)

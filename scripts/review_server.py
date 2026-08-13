@@ -167,7 +167,7 @@ def _page(body: str, banner: str = "", auto_refresh: bool = False) -> bytes:
   a {{ color: #1a56c4; }}
   .refresh-bar {{ display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: 1rem; }}
   .refresh-bar .meta {{ margin-bottom: 0; line-height: 1.5; }}
-  .excerpt {{ font-style: italic; color: #444; background: #f7f7f7; border-left: 3px solid #ccc; padding: 0.4rem 0.6rem; margin-bottom: 0.6rem; font-size: 0.9rem; }}
+  .excerpt {{ font-style: italic; color: #444; background: #f7f7f7; border-left: 3px solid #ccc; padding: 0.4rem 0.6rem; margin-bottom: 0.6rem; font-size: 0.9rem; white-space: pre-wrap; max-height: 20rem; overflow-y: auto; }}
   .flag {{ color: #b3261e; font-weight: 600; font-style: normal; }}
   .badge-test {{ background: #666; color: white; font-size: 0.72rem; font-weight: 600; padding: 0.15rem 0.5rem; border-radius: 999px; margin-left: 0.5rem; vertical-align: middle; }}
   .auth-warning {{ background: #fdeaea; border-color: #e0a0a0; }}
@@ -545,6 +545,9 @@ class Handler(BaseHTTPRequestHandler):
         existing = _common.load_pending().get(ticket_id, {})
         subject = existing.get("subject", "")
         url = existing.get("url", "")
+        requester_id = existing.get("requester_id")
+        subject_part = f' — "{subject}"' if subject else ""
+        url_part = f" ({url})" if url else ""
 
         client = _common.make_client()
         if client.client is None:
@@ -554,6 +557,29 @@ class Handler(BaseHTTPRequestHandler):
                 f"Could not post the {kind} for #{ticket_id}: Zendesk client isn't "
                 f"authenticated right now. Left it pending -- see /reconnect and try again."
             )
+
+        # Re-check right before posting, not just at detection time -- a
+        # candidate can sit pending indefinitely (no reject/dismiss action),
+        # and someone else may have replied to it directly in Zendesk since
+        # it was first drafted. Posting our template on top of that would be
+        # redundant at best, contradictory at worst.
+        reply_check = _common.check_already_replied(client, ticket_id, requester_id, log_fn=_log)
+
+        if reply_check["already_replied"] and public:
+            def _mutate_skip(data):
+                if ticket_id in data:
+                    data[ticket_id]["status"] = "already_handled"
+                    data[ticket_id]["resolved_at"] = datetime.now().isoformat(timespec="seconds")
+                    data[ticket_id]["resolution_note"] = reply_check["reason"]
+
+            _common.update_pending(_mutate_skip)
+            _log(f"Post (public reply) for #{ticket_id} skipped: {reply_check['reason']}")
+            return (
+                f"Didn't post -- #{ticket_id}{subject_part}{url_part} already has {reply_check['reason']}. "
+                f"Pulled it out of the pending queue instead of sending a redundant reply; check the ticket "
+                f"in Zendesk if you want to see what was already said."
+            )
+
         try:
             client.post_comment(int(ticket_id), draft_text, public=public)
         except Exception as exc:
@@ -573,11 +599,16 @@ class Handler(BaseHTTPRequestHandler):
         _log(f"Posted {kind} to #{ticket_id}.")
 
         excerpt = draft_text if len(draft_text) <= 300 else draft_text[:297] + "..."
-        subject_part = f' — "{subject}"' if subject else ""
-        url_part = f" ({url})" if url else ""
+        warning = ""
+        if reply_check["already_replied"] and not public:
+            # Internal comments aren't customer-facing, so there's no
+            # redundant-reply risk worth blocking on -- but it's still worth
+            # flagging, since it means someone else already handled this
+            # ticket while it sat in the pending queue.
+            warning = f" Note: {reply_check['reason']} -- posted the internal comment anyway, just flagging it."
         return (
             f"Confirmed: {kind_label} sent to #{ticket_id}{subject_part}{url_part}. "
-            f"Text sent to Zendesk: “{excerpt}”"
+            f"Text sent to Zendesk: “{excerpt}”{warning}"
         )
 
 
