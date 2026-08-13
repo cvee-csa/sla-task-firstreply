@@ -1,0 +1,16 @@
+# Secrets -- never commit these to GitHub
+.env
+.env.*
+.zendesk_oauth_tokens.json
+.zendesk_oauth_tokens.json.lock
+
+# Runtime state and logs (regenerated automatically; nothing here is source)
+scripts/output/
+
+# Python
+__pycache__/
+*.py[oc]
+
+# Editors
+.idea/
+.vscode/

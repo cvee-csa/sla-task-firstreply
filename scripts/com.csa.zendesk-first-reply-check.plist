@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.csa.zendesk-first-reply-check</string>
+
+    <!-- python3 stays pointed at the zendesk-mcp-server repo's venv: that's
+         where zendesk_mcp_server is pip-installed (editable) alongside zenpy,
+         requests, and python-dotenv, so this script (now living in a separate
+         repo) can still `import zendesk_mcp_server` without needing its own
+         venv duplicated here. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/catherinevee/Desktop/git/zendeskmcp/zendesk-mcp-server/.venv/bin/python3</string>
+        <string>/Users/catherinevee/Desktop/git/sla-task-firstreply/scripts/first_reply_check.py</string>
+    </array>
+
+    <!-- launchd does not default cwd to the repo root. Without this key it
+         runs the script from some other directory (commonly "/"), which is
+         what broke relative-path config values like .env's
+         ZENDESK_OAUTH_TOKEN_PATH=.zendesk_oauth_tokens.json. The script now
+         resolves that path against its own location regardless, but pinning
+         WorkingDirectory here too so cwd behaves the way you'd expect if you
+         ever add something else that assumes it. -->
+    <key>WorkingDirectory</key>
+    <string>/Users/catherinevee/Desktop/git/sla-task-firstreply</string>
+
+    <!-- Fires every 120 seconds (2 minutes), 24/7. The script itself checks
+         the clock and quietly no-ops outside Mon-Fri 9am-4pm local time, so
+         this stays simple rather than enumerating every hour x weekday
+         combination in a StartCalendarInterval array. -->
+    <key>StartInterval</key>
+    <integer>120</integer>
+
+    <!-- Run once immediately when loaded, so you can confirm it works
+         right after installing instead of waiting up to an hour. -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/catherinevee/Desktop/git/sla-task-firstreply/scripts/output/launchd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/catherinevee/Desktop/git/sla-task-firstreply/scripts/output/launchd.err.log</string>
+</dict>
+</plist>

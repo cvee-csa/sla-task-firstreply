@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.csa.zendesk-review-server</string>
+
+    <!-- python3 stays pointed at the zendesk-mcp-server repo's venv, since
+         that's where zendesk_mcp_server is pip-installed (editable) alongside
+         its dependencies, so this script (now living in a separate repo) can
+         still `import zendesk_mcp_server` without a second venv. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/catherinevee/Desktop/git/zendeskmcp/zendesk-mcp-server/.venv/bin/python3</string>
+        <string>/Users/catherinevee/Desktop/git/sla-task-firstreply/scripts/review_server.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/catherinevee/Desktop/git/sla-task-firstreply</string>
+
+    <!-- This is a persistent server, not a periodic job. KeepAlive restarts
+         it if it ever crashes or you accidentally quit it; RunAtLoad starts
+         it as soon as this plist is loaded (and again on every login), so
+         http://127.0.0.1:8765/ is always reachable without you needing to
+         remember to start anything. -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/catherinevee/Desktop/git/sla-task-firstreply/scripts/output/review_server.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/catherinevee/Desktop/git/sla-task-firstreply/scripts/output/review_server.err.log</string>
+</dict>
+</plist>
