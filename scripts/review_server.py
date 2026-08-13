@@ -34,6 +34,14 @@ import _common  # noqa: E402
 
 BIND_HOST = "127.0.0.1"  # do not change to 0.0.0.0 -- see module docstring
 
+# How often the main ticket list quietly reloads itself so newly-detected
+# tickets (added by the 2-minute cron scan running in the background) show up
+# without you needing to hit the browser's reload button. This is purely a
+# local re-render of whatever's already in pending_drafts.json -- it does
+# NOT trigger a new Zendesk scan itself (that stays on the cron's own
+# schedule, or the explicit "Refresh from Zendesk now" button).
+AUTO_REFRESH_SECONDS = 60
+
 LOGO_PATH = Path(__file__).resolve().parent / "assets" / "csa-logo.png"
 
 
@@ -57,9 +65,83 @@ def _log(msg: str) -> None:
     print(f"{datetime.now().isoformat(timespec='seconds')}  {msg}", flush=True)
 
 
-def _page(body: str, banner: str = "") -> bytes:
+def _page(body: str, banner: str = "", auto_refresh: bool = False) -> bytes:
     banner_html = f'<div class="banner">{html.escape(banner)}</div>' if banner else ""
     logo_html = f'<img src="{LOGO_DATA_URI}" alt="Cloud Security Alliance" class="logo">' if LOGO_DATA_URI else ""
+    # Skips the reload while a textarea has an unsaved edit in it (tracked via
+    # a plain 'input' listener), so auto-refresh can't silently blow away
+    # something you're in the middle of writing. Reloads to the bare path
+    # (dropping any ?msg=... query string) rather than the exact current URL,
+    # so a flash banner from your last action doesn't reappear on every tick.
+    refresh_script = (
+        f"""
+<script>
+(function() {{
+  var dirty = false;
+  document.addEventListener('input', function(e) {{
+    if (e.target && e.target.tagName === 'TEXTAREA') {{ dirty = true; }}
+  }});
+  setInterval(function() {{
+    if (!dirty) {{ window.location.href = window.location.pathname; }}
+  }}, {AUTO_REFRESH_SECONDS * 1000});
+}})();
+</script>"""
+        if auto_refresh
+        else ""
+    )
+    # Ticks the "Last checked" / "Next automatic check" status-bar spans
+    # every second so they read as a live clock instead of a string frozen
+    # at page-load time. Harmless no-op on pages without these ids (the
+    # reconnect page, 404s) -- getElementById just returns null and the tick
+    # skips that span. The 60s auto-refresh above will eventually replace
+    # these with a fresh server render anyway; this just fills the gap
+    # between reloads (or entirely, if auto_refresh is off) with something
+    # that keeps moving. Safe from timezone bugs: this page is only ever
+    # opened on the same machine that renders it (127.0.0.1-only), so the
+    # server's naive local-clock ISO strings and the browser's local Date()
+    # parsing agree on what "now" means.
+    tick_script = """
+<script>
+(function() {
+  function formatDuration(totalSeconds) {
+    totalSeconds = Math.max(0, Math.round(totalSeconds));
+    var h = Math.floor(totalSeconds / 3600);
+    var m = Math.floor((totalSeconds % 3600) / 60);
+    var s = totalSeconds % 60;
+    var parts = [];
+    if (h > 0) { parts.push(h + 'h'); }
+    if (h > 0 || m > 0) { parts.push(m + 'm'); }
+    parts.push(s + 's');
+    return parts.join(' ');
+  }
+
+  function tick() {
+    var now = Date.now();
+
+    var lastEl = document.getElementById('last-checked');
+    if (lastEl && lastEl.dataset.iso) {
+      var lastMs = new Date(lastEl.dataset.iso).getTime();
+      var agoSeconds = (now - lastMs) / 1000;
+      lastEl.textContent = agoSeconds < 1 ? 'just now' : formatDuration(agoSeconds) + ' ago';
+    }
+
+    var nextEl = document.getElementById('next-check');
+    if (nextEl && nextEl.dataset.iso) {
+      var targetMs = new Date(nextEl.dataset.iso).getTime();
+      var remainingSeconds = (targetMs - now) / 1000;
+      if (remainingSeconds <= 0) {
+        nextEl.textContent = 'any moment now';
+      } else {
+        var prefix = nextEl.dataset.precise === '1' ? 'in ' : '~in ';
+        nextEl.textContent = prefix + formatDuration(remainingSeconds);
+      }
+    }
+  }
+
+  tick();
+  setInterval(tick, 1000);
+})();
+</script>"""
     return f"""<!DOCTYPE html>
 <html>
 <head>
@@ -99,6 +181,8 @@ def _page(body: str, banner: str = "") -> bytes:
 </div>
 {banner_html}
 {body}
+{refresh_script}
+{tick_script}
 </body>
 </html>""".encode("utf-8")
 
@@ -106,14 +190,28 @@ def _page(body: str, banner: str = "") -> bytes:
 def _status_bar() -> str:
     last_checked = _common.last_scan_completed_at()
     last_checked_text = html.escape(last_checked) if last_checked else "never yet"
+    next_target = _common.next_scan_target()
+    next_check_text = html.escape(_common.next_scan_description())
     counts = _common.summary_counts()
     summary = (
         f'{counts["pending"]} pending &middot; '
         f'{counts["posted_today"]} posted today'
     )
+    # data-* attributes carry the raw machine-readable values (both server
+    # and browser are the same local machine, so no timezone conversion is
+    # needed) for tick.js (see _page()) to turn into a live "X ago" / "in Xm
+    # Ys" display. The text nodes themselves are the static fallback -- what
+    # shows if JS is disabled, and what's briefly visible before the first
+    # tick runs on page load.
+    last_checked_attr = f' data-iso="{html.escape(last_checked)}"' if last_checked else ""
+    next_check_attr = (
+        f' data-iso="{html.escape(next_target["target_iso"])}" data-precise="{"1" if next_target["precise"] else "0"}"'
+        if next_target["target_iso"]
+        else ""
+    )
     return f"""
 <div class="refresh-bar">
-  <div class="meta">{summary}<br>Last checked: {last_checked_text} &middot; <a href="/reconnect">Zendesk OAuth</a></div>
+  <div class="meta">{summary}<br>Last checked: <span id="last-checked"{last_checked_attr}>{last_checked_text}</span> &middot; Next automatic check: <span id="next-check"{next_check_attr}>{next_check_text}</span> &middot; <a href="/reconnect">Zendesk OAuth</a></div>
   <form method="post" action="/refresh">
     <button class="refresh" type="submit">Refresh from Zendesk now</button>
   </form>
@@ -313,7 +411,7 @@ class Handler(BaseHTTPRequestHandler):
             else '<p class="empty">Nothing waiting on you right now.</p>'
         )
         body = _auth_warning_html() + _status_bar() + ticket_html
-        self._send_html(_page(body, banner=banner))
+        self._send_html(_page(body, banner=banner, auto_refresh=True))
 
     def do_POST(self):
         parsed = urlparse(self.path)

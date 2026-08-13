@@ -11,7 +11,7 @@ import json
 import os
 import re
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time as dtime, timedelta, timezone
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -319,6 +319,92 @@ def last_scan_completed_at() -> str:
         return json.loads(LAST_SCAN_FILE.read_text()).get("completed_at", "")
     except Exception:
         return ""
+
+
+# --- business hours + "next automatic check" estimate -----------------------
+# The source of truth for when first_reply_check.py actually runs its scan
+# (as opposed to firing every CRON_INTERVAL_SECONDS and immediately no-oping).
+# Lives here, not duplicated in first_reply_check.py, for the same reason
+# everything else in this file does -- two copies of "what counts as business
+# hours" is exactly the kind of drift that caused the launchd OAuth-path bug.
+
+BUSINESS_HOURS = range(9, 17)  # 9am - 4pm local, last check starts at 4pm
+BUSINESS_WEEKDAYS = range(0, 5)  # Mon=0 ... Fri=4
+
+# Mirrors com.csa.zendesk-first-reply-check.plist's StartInterval. launchd
+# reads that value from the plist itself, not from here -- this constant only
+# feeds the "next automatic check" estimate below, so if the plist's interval
+# is ever changed again, update this too or the estimate will quietly drift
+# out of sync with what's actually scheduled.
+CRON_INTERVAL_SECONDS = 120
+
+
+def in_business_hours(when=None) -> bool:
+    when = when or datetime.now()
+    return when.weekday() in BUSINESS_WEEKDAYS and when.hour in BUSINESS_HOURS
+
+
+def _next_business_hours_start(after: datetime) -> datetime:
+    """First moment strictly after `after` that falls inside business hours
+    -- i.e. when the automated check will next actually run if `after` is
+    currently outside Mon-Fri 9am-4pm. Walks forward day by day (capped at a
+    week, comfortably covering any weekend) rather than hardcoding "add 3
+    days if it's Friday"-style special cases."""
+    day = after.date()
+    for offset in range(8):
+        candidate_date = day + timedelta(days=offset)
+        if candidate_date.weekday() not in BUSINESS_WEEKDAYS:
+            continue
+        candidate_start = datetime.combine(candidate_date, dtime(hour=BUSINESS_HOURS.start))
+        if candidate_start > after:
+            return candidate_start
+    return after + timedelta(days=1)  # unreachable in practice; safe fallback
+
+
+def next_scan_target(now=None) -> dict:
+    """Machine-readable answer to "when does the next automatic check run" --
+    the shared source of truth behind both next_scan_description() (the
+    static human string) and the review page's live JS countdown. Returns:
+      {"target_iso": <isoformat string, or None>, "precise": <bool>}
+    "precise" means target_iso is an exact moment launchd will actually
+    resume (outside business hours, business hours start is fixed); when
+    False it's an estimate derived from the last completed scan, since
+    launchd's StartInterval timer is phased from whenever the job was last
+    loaded, not from a fixed clock boundary -- there's no way to know the
+    exact second it'll next fire from outside that process. target_iso is
+    None only when we're inside business hours but have no last-scan
+    timestamp to estimate from yet (e.g. right after install)."""
+    now = now or datetime.now()
+    if not in_business_hours(now):
+        next_start = _next_business_hours_start(now)
+        return {"target_iso": next_start.isoformat(timespec="seconds"), "precise": True}
+
+    last = last_scan_completed_at()
+    if last:
+        try:
+            estimate = datetime.fromisoformat(last) + timedelta(seconds=CRON_INTERVAL_SECONDS)
+            if estimate > now:
+                return {"target_iso": estimate.isoformat(timespec="seconds"), "precise": False}
+        except Exception:
+            pass
+    return {"target_iso": None, "precise": False}
+
+
+def next_scan_description() -> str:
+    """Human-readable answer to "when does the next automatic check run" --
+    shown on the review page (as a fallback / no-JS text) so waiting for a
+    ticket to appear doesn't feel like a black box. Built on top of
+    next_scan_target() so the underlying calendar/estimate logic lives in
+    exactly one place."""
+    now = datetime.now()
+    target = next_scan_target(now)
+    if target["target_iso"] is None:
+        return "within the next couple of minutes"
+
+    target_dt = datetime.fromisoformat(target["target_iso"])
+    if target["precise"]:
+        return f"resumes {target_dt.strftime('%a %-I:%M %p')} (outside business hours)"
+    return f"around {target_dt.strftime('%-I:%M:%S %p')}"
 
 
 def guess_requester_name(client, requester_id: int, description: str, log_fn=print):
