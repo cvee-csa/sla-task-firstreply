@@ -1,0 +1,5 @@
+# Additional dependencies needed only to run tests/ -- not needed to run
+# review_server.py/first_reply_check.py themselves. See requirements.txt for
+# the runtime dependencies.
+-r requirements.txt
+pytest==9.1.1

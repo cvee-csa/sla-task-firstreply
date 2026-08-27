@@ -1,0 +1,23 @@
+# Runtime dependencies for scripts/_common.py and scripts/review_server.py.
+#
+# python-dotenv reads .env at startup (see _common.py's own load_dotenv call).
+# Pinned to the version this project was last verified against -- without a
+# pin here, "works on my machine today" isn't something anyone else (or this
+# same machine, a year from now) could reproduce if a newer release changed
+# behavior. Bump this deliberately, not by accident, if you upgrade it.
+python-dotenv==1.2.2
+
+# zendesk_mcp_server (scripts/_common.py's `from zendesk_mcp_server.zendesk_client
+# import ZendeskClient`) is NOT listed here on purpose -- it isn't a published
+# PyPI package, it's a separate sibling project of this one, installed
+# locally (commonly as an editable install: `pip install -e ../zendesk-mcp-server`
+# or wherever your checkout of it lives). There's no version number to pin
+# against the way there is for a PyPI release; if you want this documented
+# for reproducibility, the closest equivalent is recording which commit of
+# that sibling repo this was last verified against, e.g.:
+#   git -C ../zendesk-mcp-server rev-parse HEAD
+# and noting the result here as a comment.
+#
+# tests/ do NOT need the real zendesk_mcp_server installed at all -- they
+# import a trivial stand-in from tests/stub_pkg/ instead. See requirements-dev.txt
+# and tests/conftest.py.

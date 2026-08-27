@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.csa.zendesk-watchdog</string>
+
+    <!-- Deliberately plain system python3, NOT the zendesk-mcp-server venv.
+         watchdog.py has zero third-party dependencies on purpose, so it
+         keeps working even if that venv breaks again (that's the whole
+         point of it). If /usr/bin/python3 doesn't exist on this Mac for
+         some reason, point this at any other python3: nothing here needs
+         a specific interpreter or any installed package. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>/Users/catherinevee/Desktop/git/sla-task-firstreply/scripts/watchdog.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/catherinevee/Desktop/git/sla-task-firstreply</string>
+
+    <!-- Checks every 5 minutes: is review_server actually answering HTTP
+         requests, and has first_reply_check completed a scan recently
+         during business hours. Fires a macOS notification on a new
+         problem (or a still-unresolved one after a 30-minute cooldown,
+         see watchdog.py) and again once things recover. RunAtLoad so a
+         problem already present at boot/login gets flagged within seconds
+         instead of waiting for the first 5-minute tick. -->
+    <key>StartInterval</key>
+    <integer>300</integer>
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/catherinevee/Desktop/git/sla-task-firstreply/scripts/output/watchdog.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/catherinevee/Desktop/git/sla-task-firstreply/scripts/output/watchdog.err.log</string>
+</dict>
+</plist>
