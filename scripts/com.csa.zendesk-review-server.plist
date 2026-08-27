@@ -18,6 +18,22 @@
     <key>WorkingDirectory</key>
     <string>/Users/catherinevee/Desktop/git/sla-task-firstreply</string>
 
+    <!-- The venv's own editable-install pointer for zendesk_mcp_server
+         (a .pth file in its site-packages, pointing at the sibling repo's
+         src/ dir) isn't getting picked up automatically at interpreter
+         startup, for reasons that didn't fully resolve on inspection.
+         Confirmed via a plain terminal repro that a manual PYTHONPATH
+         pointed straight at src/ fixes the import every time, so this
+         makes that fix permanent for this launchd job specifically,
+         without depending on the editable install resolving on its own.
+         If the editable install starts working again on its own later,
+         this is harmless: Python just sees the same directory twice. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONPATH</key>
+        <string>/Users/catherinevee/Desktop/git/zendeskmcp/zendesk-mcp-server/src</string>
+    </dict>
+
     <!-- This is a persistent server, not a periodic job. KeepAlive restarts
          it if it ever crashes or you accidentally quit it; RunAtLoad starts
          it as soon as this plist is loaded (and again on every login), so

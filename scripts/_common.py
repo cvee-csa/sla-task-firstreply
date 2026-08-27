@@ -10,7 +10,13 @@ import fcntl
 import json
 import os
 import re
+import subprocess
 import sys
+import threading
+import time as time_module
+import urllib.error
+import urllib.request
+import uuid
 from datetime import datetime, time as dtime, timedelta, timezone
 from pathlib import Path
 
@@ -29,6 +35,12 @@ OUTPUT_DIR = Path(__file__).resolve().parent / "output"
 OUTPUT_DIR.mkdir(exist_ok=True)
 PENDING_FILE = OUTPUT_DIR / "pending_drafts.json"
 PENDING_LOCK_FILE = OUTPUT_DIR / "pending_drafts.json.lock"
+PENDING_ARCHIVE_FILE = OUTPUT_DIR / "pending_drafts_archive.json"
+
+# How long a resolved (posted/dismissed/already_handled, or a done personal
+# task) entry stays in its live file before archive_old_pending()/
+# archive_old_personal_tasks() move it out -- see those functions below.
+ARCHIVE_AFTER_DAYS = 30
 
 REVIEW_SERVER_PORT = int(os.getenv("ZENDESK_REVIEW_PORT", "8765"))
 REVIEW_SERVER_URL = f"http://127.0.0.1:{REVIEW_SERVER_PORT}/"
@@ -55,7 +67,32 @@ def resolve_token_path() -> str:
     return str(path)
 
 
+def _harden_file_permissions(path) -> None:
+    """Best-effort chmod to owner-read/write-only (0600) for a file that
+    holds OAuth tokens or auth state -- plain write_text() (or
+    zendesk_client.py's own token-file writes, which this project
+    deliberately never modifies) both leave a file at whatever the process
+    umask happens to allow, which on a shared/multi-user Mac account could
+    be group- or world-readable. Never raises -- a permissions tweak
+    failing shouldn't break anything it's just trying to harden, and a
+    missing path (nothing written yet) is a no-op, not an error."""
+    try:
+        if os.path.exists(path):
+            os.chmod(path, 0o600)
+    except Exception:
+        pass
+
+
 def make_client() -> ZendeskClient:
+    # The shared oauth token file (see resolve_token_path -- also read and
+    # refreshed by the sibling zendesk-mcp-server project) is written by
+    # zendesk_client.py's own OAuth methods, not by this file, so there's
+    # no write_text() call here to attach a chmod to directly. Instead,
+    # opportunistically harden it every time a client is constructed --
+    # cheap (a single stat+chmod syscall), and review_server.py builds a
+    # fresh client on essentially every request, so this runs often enough
+    # to matter shortly after any token refresh.
+    _harden_file_permissions(resolve_token_path())
     return ZendeskClient(
         subdomain=os.getenv("ZENDESK_SUBDOMAIN"),
         email=os.getenv("ZENDESK_EMAIL"),
@@ -67,6 +104,24 @@ def make_client() -> ZendeskClient:
         oauth_token_path=resolve_token_path(),
         timeout=int(os.getenv("ZENDESK_TIMEOUT_SECONDS", "30")),
     )
+
+
+def _atomic_write_json(path: Path, data) -> None:
+    """Writes JSON to `path` atomically: serialize to a sibling `.tmp` file
+    in the same directory, then os.replace() it over the real path.
+    os.replace is atomic on POSIX -- the destination is always either the
+    old complete file or the new complete file, never a half-written one
+    -- so a crash or a full disk mid-write can't leave pending_drafts.json
+    / personal_tasks.json truncated the way a plain write_text() call
+    could. That matters here specifically because load_pending() /
+    load_personal_tasks() both fail open with a broad except-return-{} on
+    a parse error, which would otherwise silently make every tracked
+    ticket/task vanish with nothing logged. Always called from inside the
+    relevant file's own lock (update_pending/update_personal_tasks), so
+    there's no separate locking concern here -- just the write itself."""
+    tmp_path = path.parent / f"{path.name}.tmp"
+    tmp_path.write_text(json.dumps(data, indent=2))
+    os.replace(tmp_path, path)
 
 
 def _pending_lock():
@@ -87,19 +142,212 @@ def load_pending() -> dict:
     return {}
 
 
+# Per-request memoization for load_pending()/load_personal_tasks(), used
+# ONLY by the read-only rendering call sites below (pending_items,
+# posted_today_items, summary_counts, recent_replied_items,
+# draft_personal_tasks, open_personal_tasks, completed_personal_tasks) --
+# never by update_pending/update_personal_tasks, the candidate-scan
+# function, or any of the pre-mutation freshness checks
+# (promote/complete/quick-solve_personal_task, reconcile_personal_tasks).
+# Those all keep calling load_pending()/load_personal_tasks() directly, so
+# a read-modify-write -- or a decision about whether to make a live
+# Zendesk call -- always sees the true current file, never a snapshot
+# cached earlier in the same request.
+#
+# Rendering "/" alone calls the equivalent of load_pending() four separate
+# times today (the pending-count badge, the main queue itself, "Replied
+# today", and the worked-on sidebar's local half) -- each re-reading and
+# re-json.loads-ing the identical file from disk. /tasks (and /overview)
+# do the same to personal_tasks.json for their nav badge count and page
+# body. This collapses each back down to one real read per request.
+#
+# threading.local rather than a plain module-level dict: review_server.py's
+# ThreadingHTTPServer hands each incoming request its own new thread (not
+# a reused pool), so this already starts empty on every request -- but
+# clear_request_cache() (called at the top of do_GET/do_POST regardless)
+# makes that explicit rather than relying on it silently, in case the
+# server's threading model ever changes.
+_request_cache = threading.local()
+
+
+def _cached_load_pending() -> dict:
+    """load_pending(), memoized for the lifetime of one request -- see the
+    comment above _request_cache."""
+    cached = getattr(_request_cache, "pending", None)
+    if cached is None:
+        cached = load_pending()
+        _request_cache.pending = cached
+    return cached
+
+
+def clear_request_cache() -> None:
+    """Called once at the top of every incoming request (see
+    review_server.py's do_GET/do_POST) so each request gets its own fresh
+    read of each store the first time it's actually needed, never one left
+    over from an earlier request on the same worker thread."""
+    _request_cache.pending = None
+    _request_cache.personal_tasks = None
+
+
 def update_pending(mutate_fn) -> None:
     """Read-modify-write the pending store under an exclusive lock, so the
     cron script (adding new candidates every 2 minutes) and the review server
     (marking approve/reject whenever you click) can never clobber each
     other's concurrent writes. mutate_fn receives the current dict and
-    mutates it in place."""
+    mutates it in place.
+
+    Clears _request_cache's memoized copy (see _cached_load_pending) right
+    after writing -- not just at a request boundary. review_server.py's
+    real request lifecycle never reads via the cache and then writes
+    within that same request today, so this is currently a pure safety
+    net rather than something the happy path depends on -- but it's what
+    makes _cached_load_pending correct for ANY caller, not just one that's
+    careful to only ever run inside a single do_GET/do_POST: two writes in
+    a row from the same thread (the test suite calling add_personal_task
+    twice, a script, a future change to how requests are dispatched) would
+    otherwise keep serving the FIRST call's now-stale snapshot forever,
+    since nothing else would ever clear it."""
     lock_file = _pending_lock()
     try:
         data = load_pending()
         mutate_fn(data)
-        PENDING_FILE.write_text(json.dumps(data, indent=2))
+        _atomic_write_json(PENDING_FILE, data)
     finally:
         lock_file.close()
+    clear_request_cache()
+
+
+# review_server.py's _post() (posting a public reply or internal comment)
+# does a real Zendesk write (client.post_comment) that must never happen
+# twice for the same ticket -- but like promote_personal_task/
+# complete_personal_task above, it can't just check-then-mutate entirely
+# under update_pending's own file lock, since that lock is only taken for
+# the final "mark posted" write, not for the live post_comment call itself
+# (holding a file lock across a network call would block every other
+# unrelated pending-ticket mutation for however long Zendesk takes to
+# respond). Two overlapping POSTs for the same ticket_id -- a double-click
+# before the page's own button-disable JS fires, or a browser retrying a
+# slow request -- are a real scenario on this ThreadingHTTPServer, not just
+# a theoretical one: without this guard, both could pass the
+# already-replied check and both call post_comment, posting the same reply
+# twice. This in-process guard (reset on restart, irrelevant across two
+# separate processes) closes that window: only one thread at a time may be
+# mid-post for a given ticket_id. Deliberately a separate set from
+# _personal_task_actions_in_progress above -- ticket ids and personal-task
+# local ids are different id spaces, and keeping them in separate guards
+# means a coincidental string collision between the two could never cause
+# one action to block an unrelated other.
+_pending_ticket_action_lock = threading.Lock()
+_pending_ticket_actions_in_progress: set = set()
+
+
+def _begin_pending_ticket_action(ticket_id: str) -> bool:
+    """Returns True if the caller may proceed (and must call
+    _end_pending_ticket_action(ticket_id) in a finally block once done),
+    False if another thread is already mid-post for this same ticket_id."""
+    with _pending_ticket_action_lock:
+        if ticket_id in _pending_ticket_actions_in_progress:
+            return False
+        _pending_ticket_actions_in_progress.add(ticket_id)
+        return True
+
+
+def _end_pending_ticket_action(ticket_id: str) -> None:
+    with _pending_ticket_action_lock:
+        _pending_ticket_actions_in_progress.discard(ticket_id)
+
+
+def _archive_terminal_entries(live_path: Path, archive_path: Path, lock_fn, is_archivable, entry_timestamp, after_days: int, log_fn=print) -> int:
+    """Shared mechanics behind archive_old_pending()/
+    archive_old_personal_tasks() below: pending_drafts.json and
+    personal_tasks.json only ever grew before this -- nothing removed a
+    resolved entry (posted/dismissed/already_handled, or a completed
+    personal task) from the live file, so both crept larger the longer
+    this tool stayed in daily use, and every single mutation's
+    read-modify-write under fcntl had correspondingly more to read and
+    write each time.
+
+    Under the given file's own lock, splits its dict into entries to keep
+    and entries that are both archivable (per is_archivable) and older
+    than after_days (per entry_timestamp, parsed as an isoformat string --
+    an entry with no usable timestamp is left alone rather than guessed
+    at), moves the old ones into archive_path (a flat list -- nothing
+    reads it back programmatically, it's a human-browsable history file,
+    not a second live store this tool has to keep correct), then
+    atomically rewrites the live file with only what's left. History is
+    moved, never deleted outright.
+
+    Returns how many entries were archived (0 if nothing qualified,
+    including if live_path doesn't exist yet, or if it exists but can't be
+    parsed -- that's left for load_pending()/load_personal_tasks()'s own
+    fail-open handling to deal with, not this function's problem to fix)."""
+    if not live_path.exists():
+        return 0
+
+    cutoff = datetime.now() - timedelta(days=after_days)
+    lock_file = lock_fn()
+    try:
+        try:
+            data = json.loads(live_path.read_text())
+        except Exception as exc:
+            log_fn(f"_archive_terminal_entries({live_path.name}): couldn't read the live file, skipping this pass ({exc})")
+            return 0
+
+        to_archive = {}
+        for key, entry in list(data.items()):
+            if not is_archivable(entry):
+                continue
+            ts = entry_timestamp(entry)
+            if not ts:
+                continue
+            try:
+                when = datetime.fromisoformat(ts)
+            except Exception:
+                continue
+            if when < cutoff:
+                to_archive[key] = data.pop(key)
+
+        if not to_archive:
+            return 0
+
+        existing_archive = []
+        if archive_path.exists():
+            try:
+                existing_archive = json.loads(archive_path.read_text())
+            except Exception as exc:
+                log_fn(f"_archive_terminal_entries({live_path.name}): existing archive file was unreadable, starting a fresh one ({exc})")
+                existing_archive = []
+        existing_archive.extend(to_archive.values())
+
+        _atomic_write_json(archive_path, existing_archive)
+        _atomic_write_json(live_path, data)
+        return len(to_archive)
+    finally:
+        lock_file.close()
+
+
+def archive_old_pending(after_days: int = ARCHIVE_AFTER_DAYS, log_fn=print) -> int:
+    """Moves pending_drafts.json entries in a terminal status (posted,
+    dismissed, already_handled) whose resolving timestamp is older than
+    after_days into pending_drafts_archive.json. Never touches a
+    still-"pending" entry no matter how old -- "every candidate stays on
+    the page until you act on it" (see the design principle of the same
+    name) means archiving only ever applies to entries already resolved
+    one way or another. Called from scan_and_merge(), so it runs on both
+    the 2-minute cron tick and a manual Refresh -- the same two places
+    everything else in this file's detection logic already runs from."""
+    def is_archivable(entry):
+        return entry.get("status") in ("posted", "dismissed", "already_handled")
+
+    def entry_timestamp(entry):
+        return entry.get("posted_at") or entry.get("dismissed_at") or entry.get("resolved_at") or entry.get("created_at")
+
+    count = _archive_terminal_entries(
+        PENDING_FILE, PENDING_ARCHIVE_FILE, _pending_lock, is_archivable, entry_timestamp, after_days, log_fn=log_fn,
+    )
+    if count:
+        log_fn(f"Archived {count} resolved ticket(s) from pending_drafts.json (older than {after_days} days).")
+    return count
 
 
 def merge_candidates(drafted_candidates: list) -> list:
@@ -132,8 +380,24 @@ def merge_candidates(drafted_candidates: list) -> list:
 
 
 def pending_items() -> list:
-    data = load_pending()
+    data = _cached_load_pending()
     return [v for v in data.values() if v.get("status") == "pending"]
+
+
+def posted_today_items() -> list:
+    """Every ticket actually posted through this tool (public reply or
+    internal comment) today, most-recent first -- the data behind the
+    review page's "Replied today" section. Deliberately scoped to `posted`
+    only (not dismissed or already_handled elsewhere) since those weren't
+    something you replied to; see summary_counts()'s posted_today count for
+    the same underlying filter used elsewhere on the page."""
+    data = _cached_load_pending()
+    today = datetime.now().date().isoformat()
+    items = [
+        v for v in data.values()
+        if v.get("status") == "posted" and (v.get("posted_at") or "").startswith(today)
+    ]
+    return sorted(items, key=lambda i: i.get("posted_at", ""), reverse=True)
 
 
 # --- failure-notification throttling --------------------------------------
@@ -192,6 +456,7 @@ def mark_auth_ok() -> None:
     AUTH_STATE_FILE.write_text(
         json.dumps({"ok": True, "checked_at": datetime.now().isoformat(timespec="seconds")})
     )
+    _harden_file_permissions(AUTH_STATE_FILE)
 
 
 def mark_auth_broken(reason: str) -> None:
@@ -200,6 +465,7 @@ def mark_auth_broken(reason: str) -> None:
             {"ok": False, "reason": reason, "checked_at": datetime.now().isoformat(timespec="seconds")}
         )
     )
+    _harden_file_permissions(AUTH_STATE_FILE)
 
 
 def auth_status() -> dict:
@@ -241,6 +507,7 @@ def save_oauth_pending(authorization_url: str, state: str) -> None:
             }
         )
     )
+    _harden_file_permissions(OAUTH_PENDING_FILE)
 
 
 def load_oauth_pending() -> dict:
@@ -274,6 +541,562 @@ def clear_oauth_pending() -> None:
 # OAuth-path bug earlier this session.
 
 IT_OPERATIONS_GROUP_ID = 7783360594455
+
+# The IT-Security queue -- a separate group from IT-Operations above. Only
+# used for the review page's read-only "recent activity" column (see
+# fetch_recent_tickets, below); unlike IT_OPERATIONS_GROUP_ID, nothing here
+# feeds find_candidates/build_drafts, since that column doesn't draft or
+# post replies, just shows what's recently come in.
+IT_SECURITY_GROUP_ID = 4780342046231
+IT_SECURITY_COLUMN_LIMIT = int(os.getenv("IT_SECURITY_COLUMN_LIMIT", "5"))  # how
+# many recent IT-Security tickets the column shows -- overridable via .env
+# rather than a hardcoded 5 at the review_server.py call site, for whoever
+# wants a longer (or shorter) read-only glance at that queue.
+
+# Tag applied to every personal-task ticket created via create_personal_task
+# (below) -- checked by find_candidates() above to keep a self-created,
+# self-assigned to-do from ever being mistaken for a customer ticket
+# awaiting a first reply, regardless of which group Zendesk files it under
+# (Zendesk auto-assigns a group at creation time; this tool doesn't control
+# or need to know which one).
+PERSONAL_TASK_TAG = "personal_task"
+
+# Everything below mirrors this project's sibling "Zendesk Personal Task
+# Tracker" Claude skill (a conversational skill that does the same job via
+# chat) -- the /tasks page is meant to behave like that skill, not
+# reinvent its own recipe. These three custom-field ids live on the
+# "IT Requests" Zendesk ticket form; Department and Ticket Allocation never
+# vary (always IT / CSA for this one user's personal tasks), so they're
+# fixed values here rather than anything the page asks for. Estimated
+# minutes is the one per-task value, entered on the "Make Zendesk Ticket
+# from Task" form (not the earlier "Add task" draft form) since it's
+# Zendesk-ticket metadata a quick local draft doesn't need yet -- matching
+# the skill's own "ask for it when creating the ticket" framing.
+PERSONAL_TASK_DEPARTMENT_FIELD_ID = 8510083340695
+PERSONAL_TASK_EST_MINUTES_FIELD_ID = 29450755118359
+PERSONAL_TASK_ALLOCATION_FIELD_ID = 42288679067287
+PERSONAL_TASK_DEPARTMENT_VALUE = "it"
+PERSONAL_TASK_PRIORITY = "low"
+PERSONAL_TASK_EST_MINUTES_MAX = 1440  # 24 hours -- a personal task ticket is
+# a quick to-do, not a multi-day project; this just catches an obvious
+# fat-fingered value (e.g. an extra zero) before it becomes ticket metadata,
+# not a claim that 24h is some meaningful policy limit.
+
+# Ticket Allocation used to be a fixed "csa" value -- it's now a choice on
+# the promote form, between the two allocations this Zendesk instance
+# actually has configured for that field. NOTE: "csaif"'s exact value is
+# an assumption (matching "csa"'s existing lowercase-tag convention, not
+# independently confirmed against this Zendesk instance's real field
+# configuration) -- if promoting with Allocation=CSAIF ever comes back
+# with a Zendesk field-value error, this is the one constant to fix.
+PERSONAL_TASK_ALLOCATION_CSA = "csa"
+PERSONAL_TASK_ALLOCATION_CSAIF = "csaif"
+PERSONAL_TASK_ALLOCATION_VALUE = PERSONAL_TASK_ALLOCATION_CSA  # default/legacy value
+PERSONAL_TASK_ALLOCATION_CHOICES = (PERSONAL_TASK_ALLOCATION_CSA, PERSONAL_TASK_ALLOCATION_CSAIF)
+PERSONAL_TASK_ALLOCATION_LABELS = {
+    PERSONAL_TASK_ALLOCATION_CSA: "CSA",
+    PERSONAL_TASK_ALLOCATION_CSAIF: "CSAIF",
+}
+
+# The two comments the skill posts automatically -- "no need to ask the
+# user" -- immediately after every ticket it creates: an internal note
+# first, then a public reply. promote_personal_task() below posts both,
+# in this order, right after create_ticket succeeds.
+PERSONAL_TASK_RECEIVED_NOTE = "Ticket has been received"
+PERSONAL_TASK_RECEIVED_REPLY = "Ticket has been received for processing."
+
+# Assignee/Requester on the promote form are now a choice too, between
+# this tool's own account ("self" -- Catherine Vee, resolved via
+# ZENDESK_EMAIL, exactly as before this choice existed) and a shared
+# "IT-Operations" Zendesk account, resolved via a NEW env var,
+# ZENDESK_IT_OPERATIONS_EMAIL (see resolve_it_operations_agent_id below).
+# That env var isn't set by this tool -- add it to this project's own
+# .env with the shared account's email for the "IT-Operations" choice to
+# actually resolve to something; left unset, choosing it fails clearly
+# (see resolve_personal_task_identity) rather than silently falling back
+# to self.
+PERSONAL_TASK_IDENTITY_SELF = "self"
+PERSONAL_TASK_IDENTITY_IT_OPERATIONS = "it_operations"
+PERSONAL_TASK_IDENTITY_CHOICES = (PERSONAL_TASK_IDENTITY_SELF, PERSONAL_TASK_IDENTITY_IT_OPERATIONS)
+PERSONAL_TASK_IDENTITY_LABELS = {
+    PERSONAL_TASK_IDENTITY_SELF: "Catherine Vee",
+    PERSONAL_TASK_IDENTITY_IT_OPERATIONS: "IT-Operations",
+}
+
+# Category on a personal task used to be free text -- it's now a closed
+# choice of two, since the whole point of picking one is that it gets
+# auto-filled onto the subject box as a bracketed leading tag (see
+# review_server.py's _category_select_html and its paired "change"
+# listener in interaction_script). A fixed, known set of tags is what
+# makes that auto-fill predictable; free text couldn't drive it the same
+# way. Nothing here migrates an existing task's older free-typed category
+# string -- add_personal_task/edit_personal_task still accept and store
+# whatever string they're given, same as before.
+PERSONAL_TASK_CATEGORY_CHOICES = ("[Documentation]", "[Configuration]")
+
+
+def _personal_task_custom_fields(est_mins, allocation=None) -> list:
+    """The three IT Requests custom fields Zendesk expects on every
+    personal-task ticket -- required both when creating it and again when
+    solving it (the skill notes Zendesk rejects a solve that omits any
+    one of them). est_mins may be None for a task promoted before this
+    field existed in this tool; in that case the field is left out of the
+    list entirely rather than sent as a made-up value. allocation
+    defaults to PERSONAL_TASK_ALLOCATION_VALUE (CSA) when not given --
+    covers tasks promoted before Allocation was a per-task choice."""
+    allocation = allocation or PERSONAL_TASK_ALLOCATION_VALUE
+    fields = [
+        {"id": PERSONAL_TASK_DEPARTMENT_FIELD_ID, "value": PERSONAL_TASK_DEPARTMENT_VALUE},
+        {"id": PERSONAL_TASK_ALLOCATION_FIELD_ID, "value": allocation},
+    ]
+    if est_mins is not None:
+        fields.append({"id": PERSONAL_TASK_EST_MINUTES_FIELD_ID, "value": est_mins})
+    return fields
+
+
+# Both resolve_own_agent_id and resolve_it_operations_agent_id (below) used
+# to make a live search_users() call on every single invocation -- once per
+# scan, once per post, once per /tasks page load, even once per
+# fetch_recent_tickets() call for the IT-Security column -- with no caching
+# at all, unlike fetch_recent_tickets' own _security_ticket_cache just below
+# it. This shared cache/helper gives both the same treatment.
+AGENT_ID_CACHE_TTL_SECONDS = 120  # matches SECURITY_CACHE_TTL_SECONDS's cadence
+_agent_id_cache: dict = {}  # email -> {"id": int|None, "resolved_at": datetime}
+# review_server.py serves every request on its own thread (ThreadingHTTPServer),
+# so this cache's own read-check-then-write is a real concurrent-access path,
+# not just a theoretical one -- two nearly-simultaneous requests for the same
+# email could otherwise both see a cache miss and both call search_users.
+# This lock guards only the dict read and the dict write below, never the
+# search_users() call itself -- holding it across a live network call would
+# serialize every unrelated email lookup for however long Zendesk takes to
+# respond, the same "don't lock across the slow part" reasoning
+# update_pending's own file lock already uses for post_comment (see its
+# comment above _pending_ticket_action_lock). A plain dict assignment is a
+# single atomic step in CPython, so once the lock is released, no reader can
+# ever observe a torn/partial write -- this doesn't fully dedupe two threads
+# racing to fill a cold cache (both can still independently call
+# search_users), it just guarantees the cache itself is always either the old
+# complete state or the new complete one, never something in between.
+_agent_id_cache_lock = threading.Lock()
+
+
+def _resolve_agent_id_by_email(client, email: str, log_fn=print):
+    """Looks up which Zendesk user id `email` resolves to, via
+    search_users-then-confirm-the-exact-email-matches (search_users can
+    return near-matches, not just exact ones). Serves a cached id within
+    AGENT_ID_CACHE_TTL_SECONDS of the last successful lookup for that
+    email, with zero Zendesk API calls on a cache hit. A failed lookup
+    (search_users raises) is NOT cached -- a transient API hiccup should
+    be retried on the very next call, not stuck returning None for the
+    rest of the cache window. Returns None if nothing matches (also
+    cached, since that's a real answer -- "no such user" -- not a
+    transient failure)."""
+    now = datetime.now()
+    with _agent_id_cache_lock:
+        cached = _agent_id_cache.get(email)
+        if cached and (now - cached["resolved_at"]).total_seconds() < AGENT_ID_CACHE_TTL_SECONDS:
+            return cached["id"]
+
+    try:
+        matches = client.search_users(email)
+    except Exception as exc:
+        log_fn(f"_resolve_agent_id_by_email({email}): search_users failed ({exc})")
+        return None
+
+    resolved_id = None
+    for user in matches:
+        if (user.get("email") or "").lower() == email.lower():
+            resolved_id = user.get("id")
+            break
+    with _agent_id_cache_lock:
+        _agent_id_cache[email] = {"id": resolved_id, "resolved_at": now}
+    return resolved_id
+
+
+def resolve_it_operations_agent_id(client, log_fn=print):
+    """Resolves the shared "IT-Operations" Zendesk account -- the
+    Assignee/Requester identity choice that isn't "Catherine Vee" --
+    from the ZENDESK_IT_OPERATIONS_EMAIL env var, via the same cached
+    _resolve_agent_id_by_email lookup resolve_own_agent_id uses for
+    ZENDESK_EMAIL. Returns None (not an exception) if that env var is
+    unset, search_users is unreachable, or no matching user is found --
+    resolve_personal_task_identity turns a None here into a clear
+    "add this to your .env" error rather than silently falling back to
+    self."""
+    email = os.getenv("ZENDESK_IT_OPERATIONS_EMAIL", "")
+    if not email:
+        return None
+    return _resolve_agent_id_by_email(client, email, log_fn=log_fn)
+
+
+def resolve_personal_task_identity(client, choice: str, own_agent_id, log_fn=print):
+    """Resolves a promote form's Assignee/Requester choice ("self" or
+    "it_operations") to an actual Zendesk user id -- both requester_id
+    and assignee_id must be real Zendesk users (not a group), so
+    "IT-Operations" resolves to the shared account above rather than the
+    IT-Operations Zendesk *group* this tool already tracks elsewhere
+    (IT_OPERATIONS_GROUP_ID) -- that's a ticket's queue, not a person,
+    and can't stand in for a requester or assignee id.
+
+    Returns (user_id, error) -- error is None on success, or a
+    human-readable string explaining what to fix (an unresolved
+    ZENDESK_EMAIL for "self", or an unset/unresolved
+    ZENDESK_IT_OPERATIONS_EMAIL for "it_operations") when user_id is
+    None."""
+    if choice == PERSONAL_TASK_IDENTITY_IT_OPERATIONS:
+        it_ops_id = resolve_it_operations_agent_id(client, log_fn=log_fn)
+        if it_ops_id is None:
+            return None, "Could not resolve the IT-Operations account -- add ZENDESK_IT_OPERATIONS_EMAIL to your .env."
+        return it_ops_id, None
+    if own_agent_id is None:
+        return None, "Could not resolve your own Zendesk account from ZENDESK_EMAIL -- check that .env value."
+    return own_agent_id, None
+
+# The sibling sla-report-slack repo -- a separate, independently-deployed
+# tool (its own GitHub Actions cron, its own Gmail-based daily email) that
+# tracks IT-Operations SLA compliance and already does the actual
+# breach/due-soon classification work. The /sla page (see load_sla_summary,
+# below, and review_server.py's _render_sla_page) reads its precomputed
+# daily snapshots rather than re-deriving SLA math here -- exactly the
+# anti-duplication principle noted above for IT_OPERATIONS_GROUP_ID, applied
+# across repos instead of across files. Assumes both repos are checked out
+# as sibling folders (as they are on this Mac); if that ever changes, this
+# is the one place to update.
+SLA_REPO_ROOT = REPO_ROOT.parent / "sla-report-slack"
+SLA_HISTORY_PATH = SLA_REPO_ROOT / "data" / "sla_history.json"
+SLA_DASHBOARD_PATH = SLA_REPO_ROOT / "sla_dashboard.html"
+
+# Whose personal activity the /sla page's "Your activity" charts are scoped
+# to -- a name, not a Zendesk id, because that's how sla_history.json's own
+# per-day agent_activity/solved_by_agent dicts key each agent (matching
+# whatever display name Zendesk had for them at report time). Overridable
+# via env var since this whole file is otherwise agent-identity-agnostic
+# (resolve_own_agent_id resolves an id from ZENDESK_EMAIL, not a name), but
+# defaults to this tool's one actual user.
+SLA_AGENT_NAME = os.getenv("SLA_AGENT_NAME", "Catherine Vee")
+
+SLA_REPO_GIT_PULL_TIMEOUT_SECONDS = 30  # a plain `git pull --ff-only` against
+# an already-cloned repo should be fast -- this only needs to catch a
+# genuinely stuck network call or a credential prompt with nothing to answer
+# it, not a long-running scan. (An earlier version of this feature shelled
+# out to run sla-report-slack's own scan script directly -- see git history
+# -- but that needed a second, locally-stored copy of Zendesk API + Gmail
+# OAuth credentials this project doesn't otherwise use, and sent a live
+# email on every click. Replaced with this git-pull approach: it needs no
+# Zendesk or Gmail credentials at all, at the cost of only ever showing
+# whatever sla-report-slack's own scheduled job -- or someone manually
+# triggering it on GitHub -- has already committed, rather than forcing a
+# fresh Zendesk fetch on demand.)
+
+
+def pull_sla_report_data(log_fn=print) -> dict:
+    """The /sla page's "Check for newer data" button. Runs a plain
+    `git pull --ff-only` in the sibling sla-report-slack checkout, picking
+    up whatever that repo's own weekdays-9am GitHub Actions job (or a
+    manual workflow_dispatch run, triggered on GitHub itself) has already
+    pushed to `main` -- nothing here ever calls Zendesk or Gmail directly.
+
+    `--ff-only` is deliberate: this tool treats that repo as read-only (it
+    never commits here), so a fast-forward should always be possible unless
+    something unexpected has diverged the local clone -- and if it has,
+    failing loudly is much better than this function quietly creating a
+    merge commit in a repo it doesn't own. GIT_TERMINAL_PROMPT=0 makes an
+    auth problem fail fast with a clear message instead of hanging on a
+    credential prompt that has no terminal to answer it.
+
+    Always returns a dict, never raises:
+      ok      -- whether the pull succeeded (an already-up-to-date pull
+                 counts as ok)
+      changed -- whether HEAD actually moved (False for both a no-op pull
+                 and a failed one)
+      output  -- combined stdout/stderr, for a "what happened" detail line
+      error   -- a human-readable reason when ok is False
+    """
+    if not SLA_REPO_ROOT.exists():
+        return {"ok": False, "changed": False, "output": "", "error": f"sla-report-slack isn't checked out at {SLA_REPO_ROOT}."}
+    if not (SLA_REPO_ROOT / ".git").exists():
+        return {"ok": False, "changed": False, "output": "", "error": f"{SLA_REPO_ROOT} doesn't look like a git checkout (no .git folder)."}
+
+    def _head():
+        try:
+            r = subprocess.run(
+                ["git", "-C", str(SLA_REPO_ROOT), "rev-parse", "HEAD"],
+                capture_output=True, text=True, timeout=10,
+            )
+            return r.stdout.strip() if r.returncode == 0 else None
+        except Exception:
+            return None
+
+    before = _head()
+    log_fn(f"Pulling latest sla-report-slack data (git -C {SLA_REPO_ROOT} pull --ff-only)")
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(SLA_REPO_ROOT), "pull", "--ff-only"],
+            capture_output=True,
+            text=True,
+            timeout=SLA_REPO_GIT_PULL_TIMEOUT_SECONDS,
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+        )
+    except subprocess.TimeoutExpired:
+        log_fn(f"sla-report-slack git pull timed out after {SLA_REPO_GIT_PULL_TIMEOUT_SECONDS}s")
+        return {
+            "ok": False, "changed": False, "output": "",
+            "error": f"Timed out after {SLA_REPO_GIT_PULL_TIMEOUT_SECONDS}s -- GitHub may be unreachable, or a credential prompt is stuck.",
+        }
+    except Exception as exc:
+        log_fn(f"sla-report-slack git pull failed to start: {exc}")
+        return {"ok": False, "changed": False, "output": "", "error": f"Could not run git: {exc}"}
+
+    output = (proc.stdout or "") + (proc.stderr or "")
+    if proc.returncode != 0:
+        # Surfaces git's own error verbatim (auth failure, diverged history,
+        # network unreachable, etc.) rather than a generic "failed" message.
+        tail = output.strip().splitlines()[-1] if output.strip() else f"exit code {proc.returncode}"
+        log_fn(f"sla-report-slack git pull failed: {tail}")
+        return {"ok": False, "changed": False, "output": output, "error": tail}
+
+    after = _head()
+    changed = bool(before and after and before != after)
+    log_fn(f"sla-report-slack git pull succeeded (changed={changed}).")
+    return {"ok": True, "changed": changed, "output": output, "error": None}
+
+
+# --- The /sla page's second, heavier refresh button: actually trigger
+# sla-report-slack's own GitHub Actions workflow (rather than only waiting
+# for its weekdays-9am schedule, or someone clicking "Run workflow" on
+# GitHub directly), then pull the result once it's done. Deliberately kept
+# as a SEPARATE button from pull_sla_report_data() above, not a replacement
+# for it -- this one is slower (bounded by how long that workflow's own run
+# takes) and, unlike the plain git-pull button, DOES cause a real Zendesk
+# scan and DOES send sla-report-slack's own daily email, because that
+# workflow's "Run SLA report" step hardcodes DRY_RUN: "false" regardless of
+# how the run was triggered. Needs a GitHub token (see
+# SLA_REPORT_GITHUB_TOKEN below) instead of Zendesk/Gmail credentials --
+# those stay exactly where they already live, in sla-report-slack's own
+# GitHub Secrets, used only by the workflow run on GitHub's servers, never
+# read or copied by this project.
+SLA_REPORT_GITHUB_TOKEN = os.getenv("SLA_REPORT_GITHUB_TOKEN", "")
+# A personal access token scoped to the sla-report-slack repo, added to THIS
+# project's own .env (never typed into this file or committed anywhere).
+# Needs permission to dispatch workflow runs and read Actions run status on
+# that one repo: a classic PAT needs the `repo` scope if sla-report-slack is
+# private (or `public_repo` if it's public); a fine-grained token needs
+# "Actions: Read and write" on that repo specifically.
+SLA_REPORT_GITHUB_REPO = os.getenv("SLA_REPORT_GITHUB_REPO", "cvee-csa/sla-report-slack")
+SLA_REPORT_WORKFLOW_FILE = "sla-report.yml"
+SLA_REPORT_WORKFLOW_REF = "main"
+
+SLA_WORKFLOW_POLL_INTERVAL_SECONDS = 8
+SLA_WORKFLOW_MAX_CONSECUTIVE_POLL_ERRORS = 3  # See trigger_sla_report_workflow's
+# two polling loops below: a REQUEST-level error (bad/expired token, repo or
+# workflow name rejected, a persistent network failure -- anything where
+# _github_api_request itself returns a non-2xx status or no status at all)
+# is fundamentally different from "the run just isn't there/isn't done yet",
+# which is the expected, repeatedly-true-until-it-isn't state most polls
+# see. Treating both the same way (silently sleep and retry until the whole
+# SLA_WORKFLOW_TRIGGER_TIMEOUT_SECONDS elapses) means a persistent failure
+# -- one that will clearly never resolve itself, like a revoked token --
+# only ever surfaces after the FULL timeout, as a generic "couldn't find
+# the run"/"still running" message with no hint of the real cause. Bailing
+# out after this many CONSECUTIVE request-level errors (reset back to zero
+# by any successful request, even one that just says "not found yet") lets
+# a real, persistent problem surface in seconds instead of minutes, while a
+# single transient blip (one dropped connection, one rate-limit hiccup) is
+# still tolerated exactly as before.
+
+SLA_WORKFLOW_TRIGGER_TIMEOUT_SECONDS = 240  # Bounds the ENTIRE dispatch ->
+# find-the-run -> wait-for-completion cycle, not just one HTTP call. A
+# workflow_dispatch run of this scan script has historically finished in
+# well under a minute, so 4 minutes leaves real margin for GitHub Actions
+# runner queueing without leaving the button's own "still working" state
+# (and the HTTP request it's waiting on) hanging indefinitely if something
+# upstream is genuinely stuck.
+
+
+def _github_api_request(path: str, method: str = "GET", body: dict = None, timeout: int = 15):
+    """One shared helper for every GitHub REST call trigger_sla_report_workflow
+    needs, so auth headers and error handling live in exactly one place.
+    Returns (status_code, parsed_json_or_None, error_str_or_None). Never
+    raises for an HTTP error response (only for something lower-level like a
+    DNS/connect failure) -- callers turn a 401/404/etc. into a clear message
+    without needing their own try/except at every call site."""
+    url = f"https://api.github.com{path}"
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method)
+    req.add_header("Authorization", f"Bearer {SLA_REPORT_GITHUB_TOKEN}")
+    req.add_header("Accept", "application/vnd.github+json")
+    req.add_header("X-GitHub-Api-Version", "2022-11-28")
+    req.add_header("User-Agent", "sla-task-firstreply-local-tool")
+    if data is not None:
+        req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+            return resp.status, (json.loads(raw) if raw else None), None
+    except urllib.error.HTTPError as exc:
+        raw = exc.read()
+        try:
+            parsed = json.loads(raw) if raw else None
+        except Exception:
+            parsed = None
+        detail = (parsed or {}).get("message") if isinstance(parsed, dict) else None
+        return exc.code, parsed, (detail or f"HTTP {exc.code}")
+    except Exception as exc:
+        return None, None, str(exc)
+
+
+def trigger_sla_report_workflow(log_fn=print) -> dict:
+    """The /sla page's "Run full refresh" button: dispatches
+    sla-report-slack's sla-report.yml via the workflow_dispatch API it
+    already exposes for manual runs on GitHub itself, waits for that run to
+    finish, then calls pull_sla_report_data() to sync the result into this
+    Mac's checkout -- the workflow run only ever updates the GitHub remote,
+    same as any other trigger of that workflow.
+
+    Both polling loops below bail out early (well before
+    SLA_WORKFLOW_TRIGGER_TIMEOUT_SECONDS elapses) after
+    SLA_WORKFLOW_MAX_CONSECUTIVE_POLL_ERRORS consecutive request-level
+    failures -- a revoked token, a typo'd repo/workflow name, or a
+    persistent network problem surfaces in seconds with the actual error,
+    rather than only after the full timeout with a generic "couldn't find
+    the run"/"still running" message that doesn't hint at the real cause.
+    An ordinary "200 but nothing to report yet" response resets that
+    counter, so a single transient blip is still tolerated exactly as
+    before.
+
+    Always returns a dict, never raises:
+      ok         -- whether the whole trigger-wait-pull cycle succeeded
+      changed    -- whether the follow-up pull actually moved HEAD
+      conclusion -- the workflow run's own conclusion ("success",
+                    "failure", "cancelled", ...), or None if it never
+                    reached "completed" within the timeout
+      run_url    -- the run's github.com URL once known, so a failure
+                    message can link straight to its logs
+      error      -- a human-readable reason when ok is False
+    """
+    if not SLA_REPORT_GITHUB_TOKEN:
+        return {
+            "ok": False, "changed": False, "conclusion": None, "run_url": None,
+            "error": "No SLA_REPORT_GITHUB_TOKEN set -- add one to this project's own .env to use this button.",
+        }
+
+    dispatch_time = datetime.now(timezone.utc)
+    log_fn(f"Dispatching {SLA_REPORT_WORKFLOW_FILE} on {SLA_REPORT_GITHUB_REPO} (workflow_dispatch)")
+    status, _parsed, err = _github_api_request(
+        f"/repos/{SLA_REPORT_GITHUB_REPO}/actions/workflows/{SLA_REPORT_WORKFLOW_FILE}/dispatches",
+        method="POST", body={"ref": SLA_REPORT_WORKFLOW_REF},
+    )
+    if status != 204:
+        log_fn(f"workflow_dispatch failed: {err}")
+        return {
+            "ok": False, "changed": False, "conclusion": None, "run_url": None,
+            "error": f"Couldn't start the workflow: {err}",
+        }
+
+    # workflow_dispatch itself returns no run id, so the new run has to be
+    # found by polling the runs list for one created at/after the moment we
+    # just dispatched it (a few seconds of slack for clock skew between here
+    # and GitHub's own clock).
+    deadline = time_module.monotonic() + SLA_WORKFLOW_TRIGGER_TIMEOUT_SECONDS
+    run = None
+    consecutive_errors = 0
+    last_err = None
+    while time_module.monotonic() < deadline:
+        status, parsed, err = _github_api_request(
+            f"/repos/{SLA_REPORT_GITHUB_REPO}/actions/workflows/{SLA_REPORT_WORKFLOW_FILE}/runs"
+            f"?event=workflow_dispatch&per_page=5"
+        )
+        if status == 200 and parsed:
+            consecutive_errors = 0
+            for candidate in parsed.get("workflow_runs", []):
+                try:
+                    created_dt = datetime.strptime(
+                        candidate.get("created_at", ""), "%Y-%m-%dT%H:%M:%SZ"
+                    ).replace(tzinfo=timezone.utc)
+                except ValueError:
+                    continue
+                if created_dt >= dispatch_time - timedelta(seconds=10):
+                    run = candidate
+                    break
+        else:
+            # status is None (a lower-level connect/DNS/timeout failure) or
+            # a real non-2xx HTTP response -- distinct from the ordinary
+            # "200 but no matching run yet" case above, and worth counting
+            # toward an early bail-out (see SLA_WORKFLOW_MAX_CONSECUTIVE_POLL_ERRORS).
+            consecutive_errors += 1
+            last_err = err
+            log_fn(f"Polling for the dispatched run failed ({err}) -- {consecutive_errors} consecutive error(s) so far.")
+            if consecutive_errors >= SLA_WORKFLOW_MAX_CONSECUTIVE_POLL_ERRORS:
+                return {
+                    "ok": False, "changed": False, "conclusion": None, "run_url": None,
+                    "error": f"Couldn't check for the dispatched run: {last_err}",
+                }
+        if run:
+            break
+        time_module.sleep(SLA_WORKFLOW_POLL_INTERVAL_SECONDS)
+
+    if not run:
+        log_fn("Never found the dispatched run -- it may still be queued behind other runs.")
+        return {
+            "ok": False, "changed": False, "conclusion": None, "run_url": None,
+            "error": (
+                f"Started the workflow but couldn't find its run within "
+                f"{SLA_WORKFLOW_TRIGGER_TIMEOUT_SECONDS}s -- check "
+                f"https://github.com/{SLA_REPORT_GITHUB_REPO}/actions directly."
+            ),
+        }
+
+    run_id = run["id"]
+    run_url = run.get("html_url")
+    log_fn(f"Found run {run_id} ({run_url}) -- waiting for it to complete.")
+    conclusion = None
+    consecutive_errors = 0
+    last_err = None
+    while time_module.monotonic() < deadline:
+        status, parsed, err = _github_api_request(
+            f"/repos/{SLA_REPORT_GITHUB_REPO}/actions/runs/{run_id}"
+        )
+        if status == 200 and parsed:
+            consecutive_errors = 0
+            if parsed.get("status") == "completed":
+                conclusion = parsed.get("conclusion")
+                run_url = parsed.get("html_url", run_url)
+                break
+        else:
+            consecutive_errors += 1
+            last_err = err
+            log_fn(f"Polling run {run_id}'s status failed ({err}) -- {consecutive_errors} consecutive error(s) so far.")
+            if consecutive_errors >= SLA_WORKFLOW_MAX_CONSECUTIVE_POLL_ERRORS:
+                return {
+                    "ok": False, "changed": False, "conclusion": None, "run_url": run_url,
+                    "error": f"Couldn't check run {run_id}'s status: {last_err} -- see {run_url}.",
+                }
+        time_module.sleep(SLA_WORKFLOW_POLL_INTERVAL_SECONDS)
+
+    if conclusion is None:
+        log_fn(f"Workflow run {run_id} hadn't completed within {SLA_WORKFLOW_TRIGGER_TIMEOUT_SECONDS}s.")
+        return {
+            "ok": False, "changed": False, "conclusion": None, "run_url": run_url,
+            "error": (
+                f"The workflow is still running after {SLA_WORKFLOW_TRIGGER_TIMEOUT_SECONDS}s -- "
+                f"it'll finish on its own; check {run_url} or click \"Check for newer data\" shortly."
+            ),
+        }
+
+    if conclusion != "success":
+        log_fn(f"Workflow run {run_id} finished with conclusion={conclusion}.")
+        return {
+            "ok": False, "changed": False, "conclusion": conclusion, "run_url": run_url,
+            "error": f'The workflow finished with status "{conclusion}" -- see {run_url}.',
+        }
+
+    log_fn(f"Workflow run {run_id} succeeded -- pulling the result locally.")
+    pull_result = pull_sla_report_data(log_fn=log_fn)
+    return {
+        "ok": pull_result["ok"], "changed": pull_result["changed"],
+        "conclusion": conclusion, "run_url": run_url,
+        "error": pull_result["error"],
+    }
 
 # How far back each scan looks for candidate tickets. Widened from the
 # original 24h: a ticket that arrives and ages past this window before this
@@ -548,19 +1371,97 @@ def shorten_subject(subject: str) -> str:
     return cleaned or subject
 
 
-def _has_public_reply_from_other(comments: list, requester_id) -> bool:
-    """Shared predicate for "has someone other than the requester already
-    posted a public reply on this ticket" -- used both at detection time
-    (find_candidates, below) and again right before posting
-    (check_already_replied, below) so the two checks can't quietly drift
+def resolve_assignee_name(client, assignee_id, log_fn=print):
+    """Direct get_user(assignee_id) lookup for the "someone else is already
+    working this" badge -- mirrors resolve_requester_name's reliable path,
+    but with no text-parsing fallback needed: assignee_id is an exact
+    numeric id straight from the ticket (Zendesk's own "Assignee" field),
+    so there's no first-name-collision risk to guard against the way there
+    is for a name merely mentioned in ticket text.
+
+    Returns the assignee's display name, or None on any failure (missing
+    id, a 404, or an API error) -- callers fall back to showing the bare
+    id in that case rather than leaving the badge out entirely."""
+    if not assignee_id:
+        return None
+    try:
+        user = client.get_user(assignee_id)
+    except Exception as exc:
+        log_fn(f"get_user({assignee_id}) failed while resolving assignee name ({exc})")
+        return None
+    return user.get("name")
+
+
+def resolve_own_agent_id(client, log_fn=print):
+    """Resolves this tool's own Zendesk user id -- the account configured
+    via ZENDESK_EMAIL -- so _has_public_reply_from_other (below) can
+    recognize a reply posted by that account as a genuine agent reply even
+    on a ticket where the requester happens to be the SAME account (e.g. a
+    self-created test ticket, where you're both the requester and the one
+    replying). Without this, "author_id != requester_id" is the only
+    signal available, and it silently fails in exactly that self-
+    referential case: our own reply looks identical to "the requester
+    talking to themselves," so nothing ever recognizes the ticket as
+    answered -- this was the root cause behind ticket #156314 getting
+    re-flagged as a fresh candidate on every scan despite already having
+    our reply on it.
+
+    Returns None (not an exception) on any failure -- ZENDESK_EMAIL unset,
+    search_users unreachable, or no matching user found -- so callers
+    degrade to the plain author_id != requester_id check, which is exactly
+    this tool's original (imperfect, but not new) behavior rather than a
+    new failure mode. Resolved via the cached _resolve_agent_id_by_email
+    lookup (see its docstring, above resolve_it_operations_agent_id) --
+    this used to be a live search_users() call on every single
+    invocation."""
+    email = os.getenv("ZENDESK_EMAIL", "")
+    if not email:
+        return None
+    return _resolve_agent_id_by_email(client, email, log_fn=log_fn)
+
+
+def _first_public_reply_from_other(comments: list, requester_id, agent_user_id=None):
+    """The single source of truth behind "has someone other than the
+    requester already posted a public reply on this ticket" -- both
+    _has_public_reply_from_other (the plain yes/no used at detection time)
+    and check_already_replied (which also wants to name who, right before
+    posting) go through this one predicate, rather than each independently
+    re-deriving the same author_id comparison. That used to not be true:
+    check_already_replied had its own inline copy of this exact condition,
+    which only stayed correct by luck rather than by construction -- the
+    kind of duplication this project has been burned by once already (see
+    the launchd OAuth-path bug this README mentions).
+
+    A public comment counts as an existing reply if it's from anyone other
+    than the requester (the original signal), OR if it's from this tool's
+    own configured agent account (agent_user_id, from
+    resolve_own_agent_id) -- even when that account happens to equal
+    requester_id. That second clause only ever matters for self-created
+    test tickets where the same Zendesk account is both requester and
+    replying agent; for every normal ticket (a real customer's account
+    differs from the agent's) it changes nothing, since author_id !=
+    requester_id already covers it.
+
+    Returns the first matching comment dict, or None if there isn't one."""
+    for c in comments:
+        if c.get("public") and (
+            c.get("author_id") != requester_id
+            or (agent_user_id is not None and c.get("author_id") == agent_user_id)
+        ):
+            return c
+    return None
+
+
+def _has_public_reply_from_other(comments: list, requester_id, agent_user_id=None) -> bool:
+    """Plain yes/no wrapper around _first_public_reply_from_other -- see
+    that function's docstring for the full rationale. Used both at
+    detection time (find_candidates, below) and again right before posting
+    (check_already_replied, below), so the two checks can't quietly drift
     into checking slightly different things."""
-    return any(
-        c.get("public") and c.get("author_id") != requester_id
-        for c in comments
-    )
+    return _first_public_reply_from_other(comments, requester_id, agent_user_id=agent_user_id) is not None
 
 
-def check_already_replied(client, ticket_id, requester_id, log_fn=print) -> dict:
+def check_already_replied(client, ticket_id, requester_id, agent_user_id=None, log_fn=print) -> dict:
     """Re-checks a ticket's comments right before posting through it --
     guards against the exact race this tool's design invites: a candidate
     can sit in the pending queue indefinitely (there's no reject/dismiss
@@ -581,27 +1482,63 @@ def check_already_replied(client, ticket_id, requester_id, log_fn=print) -> dict
         log_fn(f"check_already_replied(#{ticket_id}): {reason}")
         return {"already_replied": False, "reason": reason}
 
-    others = [c for c in comments if c.get("public") and c.get("author_id") != requester_id]
-    if others:
+    match = _first_public_reply_from_other(comments, requester_id, agent_user_id=agent_user_id)
+    if match:
         return {
             "already_replied": True,
-            "reason": f"a public reply already exists on this ticket (from user id {others[0].get('author_id')})",
+            "reason": f"a public reply already exists on this ticket (from user id {match.get('author_id')})",
         }
     return {"already_replied": False, "reason": ""}
 
 
-def find_candidates(client, log_fn=print) -> list:
+def find_candidates(client, log_fn=print, agent_user_id=None) -> list:
+    # Ticket ids already tracked locally (pending, posted, dismissed, or
+    # already_handled) are skipped outright, before even fetching their
+    # comments. We already have ground truth for these from our own records
+    # -- re-deriving "did we already reply" from live Zendesk comments via
+    # _has_public_reply_from_other() is not just wasted work, it's actively
+    # unreliable for them: that check only recognizes a reply as "already
+    # handled" when it comes from a different author_id than the requester,
+    # which breaks for any ticket where the requester and the replying agent
+    # happen to share a Zendesk user id (e.g. self-created test tickets).
+    # Without this, such a ticket gets re-flagged as a "candidate" on every
+    # single scan forever, even though merge_candidates() correctly refuses
+    # to re-add it -- producing a confusing "N candidate(s) found, 0 new"
+    # with nothing to show for it.
+    already_tracked = set(load_pending().keys())
+
     cutoff = datetime.now(timezone.utc) - timedelta(hours=LOOKBACK_HOURS)
     candidates = []
     page = 1
-    while True:
-        result = client.get_tickets(
-            group_id=IT_OPERATIONS_GROUP_ID,
-            sort_by="created_at",
-            sort_order="desc",
-            per_page=25,
-            page=page,
-        )
+    per_page = 25
+    # Sorted newest-first and stopped as soon as a ticket older than
+    # LOOKBACK_HOURS shows up, so in ordinary use this never gets anywhere
+    # near Zendesk's own 1000-result search cap the way an untargeted scan
+    # (fetch_flagged_tickets, which has no time-window filter at all) can.
+    # Still worth a defensive backstop rather than an unbounded `while
+    # True`, though, for the same reason fetch_flagged_tickets has one: an
+    # IT-Operations group busy enough to create over 1000 tickets within
+    # LOOKBACK_HOURS would otherwise page straight into that cap and raise
+    # a 422 from inside the try/except below anyway, just needlessly late.
+    max_page = ZENDESK_SEARCH_RESULT_CAP // per_page
+    while page <= max_page:
+        try:
+            result = client.get_tickets(
+                group_id=IT_OPERATIONS_GROUP_ID,
+                sort_by="created_at",
+                sort_order="desc",
+                per_page=per_page,
+                page=page,
+            )
+        except Exception as exc:
+            # One page failing shouldn't discard every candidate already
+            # found on the pages that DID work this run -- same fail-open
+            # posture as a single ticket's comments failing to fetch below,
+            # and the same one fetch_flagged_tickets uses for its own
+            # per-page failures.
+            log_fn(f"find_candidates(): page {page} failed ({exc}) -- "
+                   f"stopping with {len(candidates)} candidate(s) already found this run.")
+            break
         tickets = result.get("tickets", [])
         if not tickets:
             break
@@ -614,7 +1551,14 @@ def find_candidates(client, log_fn=print) -> list:
                 break
             if ticket.get("status") not in ("new", "open"):
                 continue
-            if "personal_task" in (ticket.get("tags") or []):
+            # Personal to-do tickets (see create_personal_task, below) are
+            # self-requested and self-assigned, which would otherwise look
+            # exactly like "a candidate with no reply yet" to the checks
+            # below -- excluded by tag rather than by group, since this
+            # tool doesn't control which group Zendesk files them under.
+            if PERSONAL_TASK_TAG in (ticket.get("tags") or []):
+                continue
+            if str(ticket["id"]) in already_tracked:
                 continue
 
             try:
@@ -625,7 +1569,7 @@ def find_candidates(client, log_fn=print) -> list:
                 log_fn(f"Could not check comments for #{ticket['id']} ({exc}) -- skipping it this run.")
                 continue
 
-            if _has_public_reply_from_other(comments, ticket.get("requester_id")):
+            if _has_public_reply_from_other(comments, ticket.get("requester_id"), agent_user_id=agent_user_id):
                 continue
 
             candidates.append(ticket)
@@ -633,23 +1577,35 @@ def find_candidates(client, log_fn=print) -> list:
         if stop_paging or not result.get("has_more"):
             break
         page += 1
+    else:
+        # Loop condition (page <= max_page) went false rather than an
+        # in-loop `break` -- every page we did fetch was still full of
+        # tickets newer than the lookback cutoff, meaning this scan hit the
+        # defensive cap without ever reaching the point it normally stops
+        # at. Extremely unlikely (would need over max_page*per_page tickets
+        # created in the group within LOOKBACK_HOURS) but worth a log line
+        # rather than silently looking like a complete, cutoff-bounded scan.
+        log_fn(f"find_candidates(): stopped at the {max_page}-page safety cap without reaching a ticket "
+               f"older than the {LOOKBACK_HOURS}h lookback -- results may be incomplete this run.")
 
     return candidates
 
 
-# Rotated across drafts so replies don't all open with the identical line --
-# keyed off the ticket id (below) rather than a persisted counter, so the
-# rotation needs no shared state file/lock between the cron script and a
-# manual refresh, and survives restarts with no bookkeeping at all.
-GREETING_TEMPLATES = ["Hey {name}", "Hey howdy {name}", "Hi {name}"]
+# Every draft opens with the same "Hey {name}!" line -- the requester's
+# name called out directly is the whole point (that's what "tags" them into
+# the reply, in the sense that matters here: it's addressed to them by name,
+# not a generic "Hi there"), so unlike most of this file's other rotated
+# templates (see e.g. the confirmation-toast wording elsewhere), there's
+# nothing to rotate here -- varying the ONE line whose job is to name the
+# requester would undercut that, not add variety worth having. Kept as its
+# own function (rather than inlined into build_drafts) so its one job --
+# "turn a display name into the fixed greeting line" -- stays independently
+# testable and easy to find.
+def _pick_greeting(display_name: str) -> str:
+    return f"Hey {display_name}!"
 
 
-def _pick_greeting(ticket_id: int, display_name: str) -> str:
-    template = GREETING_TEMPLATES[ticket_id % len(GREETING_TEMPLATES)]
-    return f"{template.format(name=display_name)},"
-
-
-def build_drafts(client, candidates: list, log_fn=print) -> list:
+def build_drafts(client, candidates: list, agent_user_id=None, log_fn=print) -> list:
     """Turn raw Zendesk ticket dicts (from find_candidates) into the
     drafted-reply dicts merge_candidates() expects."""
     drafted = []
@@ -660,15 +1616,26 @@ def build_drafts(client, candidates: list, log_fn=print) -> list:
         )
         subject = shorten_subject(ticket["subject"])
         is_test_ticket, test_tag = detect_test_ticket(ticket["subject"])
+        # "Someone else is already working this" badge: Zendesk's own
+        # Assignee field, already included free-of-charge in every ticket
+        # payload get_tickets/get_ticket return -- no extra API call needed
+        # to detect it. Only counts as "other" when it's set to someone
+        # other than this tool's own configured agent account (an
+        # unassigned ticket, or one assigned to us, isn't "someone else").
+        assignee_id = ticket.get("assignee_id")
+        assigned_to_other = bool(assignee_id) and assignee_id != agent_user_id
+        assignee_name = (
+            resolve_assignee_name(client, assignee_id, log_fn=log_fn) if assigned_to_other else None
+        )
         # Quoting the subject as a title ("...about “X”") rather than folding
         # it into the sentence ("...regarding X") avoids the grammatical
         # collision between the fixed template and a raw ticket title that
         # was never written to complete a sentence -- that mismatch was the
         # real source of the stiff, mismatched tone people were noticing.
         display_name = name if name_confidence == "confirmed" else "there"
-        greeting = _pick_greeting(ticket["id"], display_name)
+        greeting = _pick_greeting(display_name)
         draft = (
-            f"{greeting} thank you for reaching out about “{subject}”. "
+            f"{greeting} Thanks for reaching out about “{subject}”. "
             f"We've received your request, and someone from our IT Operations "
             f"team will follow up with you shortly."
         )
@@ -683,6 +1650,25 @@ def build_drafts(client, candidates: list, log_fn=print) -> list:
                 "description_excerpt": build_description_excerpt(description),
                 "is_test_ticket": is_test_ticket,
                 "test_tag": test_tag,
+                "assignee_id": assignee_id,
+                "assignee_name": assignee_name,
+                "assigned_to_other": assigned_to_other,
+                # Already included free-of-charge in every ticket payload
+                # get_tickets returns -- no extra API call needed, same as
+                # assignee_id above -- just never surfaced on a card before.
+                "priority": ticket.get("priority"),
+                # This is Zendesk's own updated_at, not this tool's local
+                # "first seen" created_at (set separately, in
+                # merge_candidates) -- captured here as the initial value
+                # for a brand-new candidate, then kept fresh
+                # every scan by recheck_pending_for_assignment (which
+                # already fetches this exact ticket via get_ticket for the
+                # assignee badge, so refreshing this alongside it costs
+                # nothing extra). Lets a ticket with genuine Zendesk-side
+                # activity -- a note added, a field changed -- but no
+                # reply yet, read differently from one that's been
+                # completely silent since this tool first saw it.
+                "updated_at": ticket.get("updated_at"),
                 "draft": draft,
                 "url": ticket_url(ticket["id"]),
             }
@@ -695,9 +1681,15 @@ def summary_counts() -> dict:
     waiting on you, and how many you already acted on today (posted or
     rejected), so opening the page after being away gives you situational
     awareness in one glance instead of counting cards."""
-    data = load_pending()
+    data = _cached_load_pending()
     today = datetime.now().date().isoformat()
-    counts = {"pending": 0, "posted_today": 0, "rejected_today": 0}
+    counts = {
+        "pending": 0,
+        "posted_today": 0,
+        "rejected_today": 0,
+        "removed_today": 0,
+        "already_handled_today": 0,
+    }
     for v in data.values():
         status = v.get("status")
         if status == "pending":
@@ -706,19 +1698,1923 @@ def summary_counts() -> dict:
             counts["posted_today"] += 1
         elif status == "rejected" and (v.get("rejected_at") or "").startswith(today):
             counts["rejected_today"] += 1
+        elif status == "dismissed" and (v.get("dismissed_at") or "").startswith(today):
+            counts["removed_today"] += 1
+        elif status == "already_handled" and (v.get("resolved_at") or "").startswith(today):
+            counts["already_handled_today"] += 1
     return counts
+
+
+def recheck_pending_for_replies(client, log_fn=print, agent_user_id=None) -> list:
+    """Catches the exact race this tool's design invites, proactively --
+    not just at the moment you click Public Reply (see check_already_replied,
+    used by review_server.py's _post() as a last-second safety net). A
+    ticket can sit pending indefinitely (there's no time limit, only a
+    human decision), and in that window someone else -- another agent, or a
+    teammate working the queue directly in Zendesk -- may reply for real
+    before you ever act on it here. Run on every scan (cron tick or manual
+    refresh), this walks every currently-pending item and re-checks its
+    comments directly, so the review page reflects reality without you
+    needing to click anything first.
+
+    Returns the list of pending entries that were just transitioned out of
+    "pending" because of this, so the caller can log/notify with the actual
+    ticket details -- not just a count."""
+    newly_handled = []
+
+    def _mutate(data):
+        for ticket_id, entry in data.items():
+            if entry.get("status") != "pending":
+                continue
+            result = check_already_replied(
+                client, ticket_id, entry.get("requester_id"), agent_user_id=agent_user_id, log_fn=log_fn
+            )
+            if result["already_replied"]:
+                entry["status"] = "already_handled"
+                entry["resolved_at"] = datetime.now().isoformat(timespec="seconds")
+                entry["resolution_note"] = result["reason"]
+                newly_handled.append(dict(entry))
+
+    update_pending(_mutate)
+    return newly_handled
+
+
+def recheck_pending_for_assignment(client, log_fn=print, agent_user_id=None) -> None:
+    """Refreshes each pending ticket's "someone else is already working
+    this" badge on every scan, the same way recheck_pending_for_replies
+    refreshes reply state above -- a ticket can sit pending for a while,
+    and whether a colleague has since picked it up (or dropped it) directly
+    in Zendesk is exactly the kind of thing a stale card would miss.
+
+    Also refreshes updated_at (see build_drafts' initial capture of it) off
+    the exact same get_ticket call, at no extra cost -- so the ticket
+    card's "updated Nh ago" text reflects genuine ongoing Zendesk-side
+    activity (a note added, a field changed) for as long as the ticket
+    sits pending, not just a one-time snapshot from whenever this tool
+    first saw it.
+
+    Purely cosmetic, unlike recheck_pending_for_replies: an assignee
+    showing up doesn't change this ticket's pending status or pull it from
+    the queue -- it's a heads-up for the human reviewing (so a duplicate
+    reply isn't drafted on top of someone actively working it), not an
+    automatic resolution the way an actual reply is. No return value --
+    nothing here is worth a notification the way a newly-handled ticket is,
+    this just keeps the badge (and updated_at) current for whenever the
+    page is next loaded.
+
+    Fails per-ticket, not per-scan: one ticket's get_ticket call erroring
+    (a transient API hiccup, or the ticket having since been deleted)
+    leaves that entry's existing assignee info (and updated_at) untouched
+    and moves on, rather than discarding a refresh already in progress for
+    every other pending ticket this scan."""
+    def _mutate(data):
+        for ticket_id, entry in data.items():
+            if entry.get("status") != "pending":
+                continue
+            try:
+                ticket = client.get_ticket(int(ticket_id))
+            except Exception as exc:
+                log_fn(f"recheck_pending_for_assignment(#{ticket_id}): get_ticket failed ({exc}) -- leaving assignee info as-is")
+                continue
+            assignee_id = ticket.get("assignee_id")
+            assigned_to_other = bool(assignee_id) and assignee_id != agent_user_id
+            entry["assignee_id"] = assignee_id
+            entry["assigned_to_other"] = assigned_to_other
+            entry["updated_at"] = ticket.get("updated_at")
+            entry["assignee_name"] = (
+                resolve_assignee_name(client, assignee_id, log_fn=log_fn) if assigned_to_other else None
+            )
+
+    update_pending(_mutate)
 
 
 def scan_and_merge(client, log_fn=print):
     """One full detect-and-draft pass: find candidates, draft replies, merge
-    into the pending store. Returns (candidates, new_items) so the caller
-    can log/notify/summarize however fits its own context -- this is the
-    single shared implementation used by both the 2-minute cron tick and the
-    review page's manual Refresh button."""
-    candidates = find_candidates(client, log_fn=log_fn)
+    into the pending store, re-check every already-pending ticket for
+    someone else having replied first in the meantime, AND refresh whether
+    each pending ticket now shows a Zendesk assignee other than us. Returns
+    (candidates, new_items, handled_elsewhere) so the caller can
+    log/notify/summarize however fits its own context -- this is the single
+    shared implementation used by both the 2-minute cron tick and the
+    review page's manual Refresh button.
+
+    Resolves this tool's own agent user id once per scan (not once per
+    ticket) and threads it through to find_candidates,
+    recheck_pending_for_replies, AND recheck_pending_for_assignment, so a
+    self-created test ticket's own reply is correctly recognized as
+    "already answered" -- see resolve_own_agent_id's docstring for why
+    that's not already implied by author_id != requester_id alone -- and so
+    a ticket assigned to this tool's own account never mislabels itself as
+    "assigned to someone else". Also archives resolved entries older than
+    ARCHIVE_AFTER_DAYS out of pending_drafts.json on the way out (see
+    archive_old_pending) -- piggybacking on the same cadence as everything
+    else here rather than needing its own separate schedule."""
+    agent_user_id = resolve_own_agent_id(client, log_fn=log_fn)
+    candidates = find_candidates(client, log_fn=log_fn, agent_user_id=agent_user_id)
     new_items = []
     if candidates:
-        drafted = build_drafts(client, candidates, log_fn=log_fn)
+        drafted = build_drafts(client, candidates, agent_user_id=agent_user_id, log_fn=log_fn)
         new_items = merge_candidates(drafted)
+    handled_elsewhere = recheck_pending_for_replies(client, log_fn=log_fn, agent_user_id=agent_user_id)
+    recheck_pending_for_assignment(client, log_fn=log_fn, agent_user_id=agent_user_id)
+    archive_old_pending(log_fn=log_fn)
     mark_scan_completed()
-    return candidates, new_items
+    return candidates, new_items, handled_elsewhere
+
+
+def recent_replied_items(limit: "int | None" = 10) -> list:
+    """The N most recently posted tickets (public reply or internal
+    comment) through this tool, regardless of which calendar day they went
+    out -- a longer-running, day-independent complement to
+    posted_today_items() above (which resets every midnight and only
+    covers today). Same 'posted' scope -- excludes dismissed and
+    already-handled-elsewhere entries, since those aren't replies you
+    actually sent -- and same most-recent-first order.
+
+    limit=None returns every locally-tracked posted item, uncapped -- used
+    by fetch_recently_worked_on (below) to merge this tool's own local
+    history against a live Zendesk scan before applying the real display
+    limit to the combined list, rather than to this function's local-only
+    slice on its own."""
+    data = _cached_load_pending()
+    items = [v for v in data.values() if v.get("status") == "posted"]
+    items.sort(key=lambda i: i.get("posted_at", ""), reverse=True)
+    return items if limit is None else items[:limit]
+
+
+# A get_ticket_comments() call is one extra Zendesk request per candidate
+# ticket -- WORKED_ON_COMMENT_CHECK_LIMIT caps how many NOT-already-
+# locally-known tickets get that extra check on a single live scan (see
+# fetch_recently_worked_on), so a quiet stretch with dozens of recently-
+# updated-for-other-reasons tickets in the group can't turn one page load
+# into dozens of sequential API calls. WORKED_ON_SCAN_PAGES/
+# WORKED_ON_TICKET_PER_PAGE bound the cheaper get_tickets() paging itself,
+# same shape (and same reason -- get_tickets() can only filter by a single
+# group_id) as FLAGGED_TICKET_SCAN_PAGES/SOLVED_TICKET_SCAN_PAGES above.
+WORKED_ON_SCAN_PAGES = int(os.getenv("WORKED_ON_SCAN_PAGES", "10"))
+WORKED_ON_TICKET_PER_PAGE = 100
+WORKED_ON_COMMENT_CHECK_LIMIT = int(os.getenv("WORKED_ON_COMMENT_CHECK_LIMIT", "40"))
+RECENTLY_WORKED_ON_LIMIT = 30  # matches the sidebar's own display limit -- a
+# named constant rather than a bare literal so fetch_recently_worked_on and
+# _render_worked_on_sidebar can't quietly drift apart the way the sidebar's
+# limit and its seed data already once did (see run_server_worked_on.py).
+_worked_on_cache: dict = {}
+# Literal 120 rather than referencing SECURITY_CACHE_TTL_SECONDS directly --
+# that constant is defined further down this file (in the IT-Security
+# section, below), after this block, so referencing it here would be a
+# forward reference that fails at import time. Same value, same reasoning:
+# the same 2-minute cadence as every other read-only Zendesk-backed panel.
+WORKED_ON_CACHE_TTL_SECONDS = 120
+_worked_on_cache_lock = threading.Lock()
+
+
+def _zendesk_ts_to_local_iso(ts: str) -> str:
+    """Normalizes a Zendesk-sourced UTC timestamp to a naive LOCAL-time
+    isoformat string at seconds precision -- exactly the format
+    update_pending's own posted_at already uses
+    (datetime.now().isoformat(timespec='seconds')) -- so a discovered
+    Zendesk item and a locally-posted one sort and render identically once
+    merged in fetch_recently_worked_on. Handles both shapes this codebase's
+    two Zendesk timestamp sources actually produce: a raw ticket-level JSON
+    string ending in 'Z' (as elsewhere in this file), and
+    get_ticket_comments()'s own str(datetime) rendering of a comment's
+    created_at ('2026-08-20 15:57:50+00:00' -- no 'Z', but still a valid
+    fromisoformat input once present). Returns '' on anything unparseable
+    rather than raising, the same fail-quiet posture _updated_age/
+    _solved_age (in review_server.py) already use for the same reason."""
+    if not ts:
+        return ""
+    try:
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        return dt.astimezone().replace(tzinfo=None).isoformat(timespec="seconds")
+    except Exception:
+        return ""
+
+
+def _most_recent_own_comment(comments: list, agent_user_id):
+    """The latest comment (public OR internal) authored by this tool's own
+    configured Zendesk account, or None. Deliberately not restricted to
+    public-only -- an internal-note-only reply sent directly in Zendesk is
+    still work done on the ticket, and excluding it here would make this
+    look like a public-replies-only feature when nothing else on this
+    panel makes that distinction either (recent_replied_items shows both
+    kinds already)."""
+    own = [c for c in comments if c.get("author_id") == agent_user_id]
+    if not own:
+        return None
+    own.sort(key=lambda c: c.get("created_at") or "", reverse=True)
+    return own[0]
+
+
+def fetch_recently_worked_on(client, limit: int = RECENTLY_WORKED_ON_LIMIT, log_fn=print, force: bool = False) -> dict:
+    """Returns {"items": [...], "capped": bool, "zendesk_unavailable": bool}
+    -- the union of recent_replied_items() (replies sent THROUGH this tool)
+    and a live scan of the IT-Operations group for tickets NOT already in
+    that local set that carry a comment authored by this tool's own
+    configured Zendesk account -- i.e. a reply sent directly in Zendesk,
+    bypassing this tool entirely, that pending_drafts.json would otherwise
+    have no record of at all. Merged and sorted most-recent-first, capped
+    at `limit`.
+
+    This is the one place on the main page ("/") that now touches Zendesk
+    at all -- see the "GET / never touches Zendesk" design principle in
+    the README, which this function deliberately narrows rather than
+    removes: the local half of the result (recent_replied_items) is always
+    computed first and returned on its own the moment anything about the
+    live half goes wrong, so "/" still never actually BREAKS over Zendesk
+    being unreachable, it just quietly stops finding outside-the-tool
+    replies until the connection's back -- zendesk_unavailable=True is how
+    the caller knows to say so.
+
+    capped=True means the live scan hit its own page-depth
+    (WORKED_ON_SCAN_PAGES) or per-scan comment-check
+    (WORKED_ON_COMMENT_CHECK_LIMIT) budget before covering every recently-
+    updated ticket in the group -- there could be an outside-the-tool reply
+    further back this pass didn't reach yet.
+
+    Known simplification: a ticket already tracked locally (you replied to
+    it at least once through this tool) is never re-checked against
+    Zendesk, so a LATER reply sent directly in Zendesk on that same ticket
+    won't bump its position or move its timestamp forward here -- it'll
+    still show at the tool-recorded time of your last reply through this
+    tool specifically. Scoped to IT-Operations only, the same restriction
+    fetch_flagged_tickets/fetch_recently_solved_tickets already live with
+    and for the identical reason (get_tickets() takes one group_id or
+    none)."""
+    global _worked_on_cache
+    now = datetime.now()
+    with _worked_on_cache_lock:
+        cached = _worked_on_cache or None
+        if (
+            not force and cached and cached.get("limit") == limit
+            and (now - cached["fetched_at"]).total_seconds() < WORKED_ON_CACHE_TTL_SECONDS
+        ):
+            return {"items": cached["items"], "capped": cached["capped"], "zendesk_unavailable": cached["zendesk_unavailable"]}
+
+    local_items = recent_replied_items(limit=None)
+    local_ids = {str(i.get("ticket_id")) for i in local_items}
+
+    if client.client is None:
+        items = local_items[:limit]
+        with _worked_on_cache_lock:
+            _worked_on_cache = {"items": items, "fetched_at": now, "capped": False, "zendesk_unavailable": True, "limit": limit}
+        return {"items": items, "capped": False, "zendesk_unavailable": True}
+
+    try:
+        agent_user_id = resolve_own_agent_id(client, log_fn=log_fn)
+        if agent_user_id is None:
+            raise RuntimeError(
+                "could not resolve this tool's own Zendesk account (ZENDESK_EMAIL unset, or search_users unreachable)"
+            )
+
+        discovered = []
+        capped = False
+        checked = 0
+        page = 1
+        max_page = min(WORKED_ON_SCAN_PAGES, ZENDESK_SEARCH_RESULT_CAP // WORKED_ON_TICKET_PER_PAGE)
+        while page <= max_page:
+            try:
+                result = client.get_tickets(
+                    group_id=IT_OPERATIONS_GROUP_ID,
+                    sort_by="updated_at",
+                    sort_order="desc",
+                    per_page=WORKED_ON_TICKET_PER_PAGE,
+                    page=page,
+                )
+            except Exception as exc:
+                log_fn(f"fetch_recently_worked_on() page {page} failed ({exc}) -- "
+                       f"stopping with {len(discovered)} outside-the-tool repl(y/ies) already found")
+                capped = True
+                break
+            tickets = result.get("tickets", [])
+            if not tickets:
+                break
+
+            hit_check_limit = False
+            for ticket in tickets:
+                tid = str(ticket.get("id"))
+                if tid in local_ids:
+                    continue
+                if checked >= WORKED_ON_COMMENT_CHECK_LIMIT:
+                    hit_check_limit = True
+                    break
+                checked += 1
+                try:
+                    comments = client.get_ticket_comments(ticket.get("id"))
+                except Exception as exc:
+                    log_fn(f"fetch_recently_worked_on(): get_ticket_comments(#{tid}) failed ({exc}), skipping")
+                    continue
+                own_comment = _most_recent_own_comment(comments, agent_user_id)
+                if not own_comment:
+                    continue
+                name, name_confidence, _ = resolve_requester_name(
+                    client, ticket.get("requester_id"), ticket.get("description") or "", log_fn=log_fn
+                )
+                discovered.append(
+                    {
+                        "ticket_id": ticket.get("id"),
+                        "subject": ticket.get("subject", ""),
+                        "url": ticket_url(ticket.get("id")),
+                        # Raw name + a separate name_confidence field, NOT
+                        # the None-if-unconfirmed shape fetch_recent_tickets/
+                        # fetch_flagged_tickets/fetch_recently_solved_tickets
+                        # use above -- this item flows into
+                        # _render_worked_on_sidebar's _requester_avatar_prefix,
+                        # which (like build_drafts' own local "posted"
+                        # entries) expects to do its own confirmed-only gate
+                        # off name_confidence, not a pre-filtered value.
+                        "requester_name": name,
+                        "name_confidence": name_confidence,
+                        "posted_at": _zendesk_ts_to_local_iso(own_comment.get("created_at", "")),
+                        "posted_public": bool(own_comment.get("public")),
+                    }
+                )
+
+            if hit_check_limit:
+                capped = True
+                break
+            if not result.get("has_more"):
+                break
+            page += 1
+        else:
+            capped = True
+
+        merged = local_items + discovered
+        merged.sort(key=lambda i: i.get("posted_at", ""), reverse=True)
+        items = merged[:limit]
+        with _worked_on_cache_lock:
+            _worked_on_cache = {"items": items, "fetched_at": now, "capped": capped, "zendesk_unavailable": False, "limit": limit}
+        return {"items": items, "capped": capped, "zendesk_unavailable": False}
+    except Exception as exc:
+        log_fn(f"fetch_recently_worked_on() failed ({exc})")
+        if cached:
+            return {"items": cached["items"], "capped": cached["capped"], "zendesk_unavailable": cached["zendesk_unavailable"]}
+        return {"items": local_items[:limit], "capped": False, "zendesk_unavailable": True}
+
+
+# --- IT-Security "recent activity" column -----------------------------
+# A read-only companion panel, distinct from the IT-Operations working
+# queue above: no candidate filtering, no already-replied check, no
+# drafting, no persistence to pending_drafts.json. Just the N most
+# recently created tickets in a group, however Zendesk has them right now
+# (any status), enriched with resolved requester/assignee names so the
+# review page can show something more useful than raw ids.
+
+_security_ticket_cache: dict = {}
+SECURITY_CACHE_TTL_SECONDS = 120  # matches the cron scan's own cadence --
+# no point re-fetching more often than the underlying data actually
+# changes upstream at that rate; a cache hit costs zero Zendesk API calls,
+# which matters here because unlike the rest of this page, GET / previously
+# never touched Zendesk at all just to render.
+# Guards the dict read and the dict write only, same reasoning as
+# _agent_id_cache_lock just above -- never held across the live get_tickets()
+# call itself (or the per-ticket resolve_requester_name/resolve_assignee_name
+# calls below it), so a slow Zendesk response never blocks an unrelated
+# group_id's own cache read. The per-key assignment below was already a
+# single atomic step even without this lock, so what this actually buys is
+# consistency with the other caches plus a narrower (not fully eliminated)
+# window for two threads to both see a stale/missing entry and both fetch.
+_security_ticket_cache_lock = threading.Lock()
+
+
+def fetch_recent_tickets(client, group_id, limit: int = 5, log_fn=print, force: bool = False) -> dict:
+    """Returns {"items": [...], "error": str|None}. "items" entries have:
+    ticket_id, subject, status, url, requester_name (or None if
+    unconfirmed), requester_id, assignee_id, assignee_name (or None if
+    unassigned/unresolved), already_ours (bool -- assignee_id matches this
+    tool's own configured account).
+
+    A dict rather than a bare list so the caller can distinguish
+    "genuinely zero tickets" from "couldn't fetch, here's what we last
+    had (or nothing at all)" -- collapsing those into an empty list either
+    way would make a transient API hiccup look identical to "the queue is
+    actually empty," and the review page shouldn't claim that.
+
+    Serves a cached result within SECURITY_CACHE_TTL_SECONDS of the last
+    successful fetch, with no client/network interaction at all on a cache
+    hit. On a cache miss with auth broken, or a live fetch that errors,
+    falls back to the last successful result if one exists (better than
+    blanking an already-fetched, still-probably-accurate list just because
+    a refresh happened to land at a bad moment) -- consistent with this
+    tool's fail-open posture elsewhere (a failed post leaves the draft
+    intact, a failed reply-check fails open rather than blocking a post)."""
+    now = datetime.now()
+    with _security_ticket_cache_lock:
+        cached = _security_ticket_cache.get(group_id)
+        if not force and cached and (now - cached["fetched_at"]).total_seconds() < SECURITY_CACHE_TTL_SECONDS:
+            return {"items": cached["items"], "error": None}
+
+    if client.client is None:
+        if cached:
+            return {"items": cached["items"], "error": None}
+        return {"items": [], "error": "Zendesk isn't connected right now -- see the reconnect banner above."}
+
+    try:
+        agent_user_id = resolve_own_agent_id(client, log_fn=log_fn)
+        result = client.get_tickets(
+            group_id=group_id, sort_by="created_at", sort_order="desc", per_page=limit, page=1
+        )
+        tickets = (result.get("tickets") or [])[:limit]
+        items = []
+        for ticket in tickets:
+            name, name_confidence, _ = resolve_requester_name(
+                client, ticket.get("requester_id"), ticket.get("description") or "", log_fn=log_fn
+            )
+            assignee_id = ticket.get("assignee_id")
+            already_ours = bool(assignee_id) and agent_user_id is not None and assignee_id == agent_user_id
+            assignee_name = resolve_assignee_name(client, assignee_id, log_fn=log_fn) if assignee_id else None
+            items.append(
+                {
+                    "ticket_id": ticket.get("id"),
+                    "subject": ticket.get("subject", ""),
+                    "status": ticket.get("status", ""),
+                    "url": ticket_url(ticket.get("id")),
+                    "requester_name": name if name_confidence == "confirmed" else None,
+                    "requester_id": ticket.get("requester_id"),
+                    "assignee_id": assignee_id,
+                    "assignee_name": assignee_name,
+                    "already_ours": already_ours,
+                }
+            )
+        with _security_ticket_cache_lock:
+            _security_ticket_cache[group_id] = {"items": items, "fetched_at": now}
+        return {"items": items, "error": None}
+    except Exception as exc:
+        log_fn(f"fetch_recent_tickets(group={group_id}) failed ({exc})")
+        if cached:
+            return {"items": cached["items"], "error": None}
+        return {"items": [], "error": f"Could not load recent tickets ({exc})."}
+
+
+def cached_security_ticket_count(group_id) -> int:
+    """Best-effort item count from whatever's already sitting in
+    fetch_recent_tickets' own cache for this group, WITHOUT triggering a
+    fetch of its own -- unlike that function, this never calls Zendesk (no
+    client parameter, even). Returns 0 on a cold/expired cache, same as
+    "genuinely nothing to badge" -- there's no separate "unknown" state
+    worth distinguishing here the way fetch_recent_tickets' own {"error":
+    ...} does, since a header badge that's merely absent reads fine either
+    way (compare _top_nav_html's sla_breached, which does the same
+    "unavailable means no badge" collapse).
+
+    This exists for review_server._top_nav_html's IT-Security nav badge,
+    which renders on EVERY page via _page() -- calling fetch_recent_tickets
+    itself from there would mean a page with nothing to do with
+    IT-Security (say, /tasks) could still trigger a live Zendesk call (plus
+    per-ticket requester/assignee name resolution) just because this
+    group's 120-second cache happened to expire. Reading the cache instead
+    keeps the badge free everywhere except the one real cost site
+    (visiting /security itself, which already pays for the fetch it needs
+    regardless): the badge shows the last real count for as long as that
+    visit's cache stays warm, and quietly disappears once it goes stale,
+    rather than forcing a fresh scan just to answer a header's badge."""
+    with _security_ticket_cache_lock:
+        cached = _security_ticket_cache.get(group_id)
+        if not cached or (datetime.now() - cached["fetched_at"]).total_seconds() >= SECURITY_CACHE_TTL_SECONDS:
+            return 0
+        return len(cached["items"])
+
+
+# "block"/"standup" tags mean something different from "needs a first
+# reply": a ticket can carry either tag regardless of its status, its
+# assignee, or whether this tool (or anyone) has already replied to it --
+# none of which find_candidates()/the pending queue would surface, since
+# that queue deliberately excludes anything already replied to. This is a
+# second, independent read-only view over the same IT_OPERATIONS_GROUP_ID
+# group, the same "no drafting, no persistence" posture as
+# fetch_recent_tickets just above, just scoped by tag instead of by group
+# and "most recent."
+FLAGGED_TICKET_TAGS = ("block", "standup")
+# ZendeskClient.get_tickets() has no "any ticket with this tag" filter --
+# it only builds a plain "type:ticket group_id:N" search query -- so this
+# has to page through the group's own tickets and check each one's own
+# "tags" list in Python (already included free in every ticket payload).
+FLAGGED_TICKET_PER_PAGE = 100
+# Zendesk's own /search.json endpoint (which get_tickets(group_id=...) uses
+# internally) hard-caps total results at 1000 regardless of page size --
+# requesting a page whose offset would exceed that comes back as a real
+# error (a 422 Unprocessable Entity, not an empty "no more results" page),
+# discovered the hard way against the real IT-Operations queue, which
+# apparently has 1000+ tickets matching "type:ticket group_id:N". This is a
+# hard ceiling on the *Search* API specifically -- there's no cursor-based
+# workaround for it the way Zendesk's incremental-export endpoints have --
+# so FLAGGED_TICKET_SCAN_PAGES below is clamped to never even request a
+# page past it, rather than relying on catching the resulting error.
+ZENDESK_SEARCH_RESULT_CAP = 1000
+# A further, independently configurable safety cap on top of the hard
+# ceiling above (not a way to exceed it -- see the clamp in
+# fetch_flagged_tickets) against turning a cache-miss refresh into an
+# unnecessarily long scan for a smaller queue; see the "capped" field this
+# returns for when either cap was actually hit.
+FLAGGED_TICKET_SCAN_PAGES = int(os.getenv("FLAGGED_TICKET_SCAN_PAGES", "10"))
+_flagged_ticket_cache: dict = {}
+FLAGGED_CACHE_TTL_SECONDS = SECURITY_CACHE_TTL_SECONDS  # same cadence as the other read-only Zendesk-derived panel
+# Same reasoning as _security_ticket_cache_lock -- guards the dict read and
+# the dict replacement, never the multi-page get_tickets() scan itself. This
+# one matters slightly more than the other two: the old refresh code did
+# `_flagged_ticket_cache.clear()` followed by a separate `.update(...)` call,
+# two visible steps rather than one -- a concurrent reader landing in that
+# gap would see a genuinely empty dict and report "cold cache" even though a
+# refresh was mid-flight and about to repopulate it a moment later (a header
+# badge flickering to "no badge" mid-refresh, not just a wasted duplicate
+# fetch). Replacing the whole cache with one `global`-reassignment under this
+# lock, instead of clear()-then-update(), closes that window: any reader
+# either sees the complete old cache or the complete new one, never a gap
+# between them.
+_flagged_ticket_cache_lock = threading.Lock()
+
+
+def fetch_flagged_tickets(client, log_fn=print, force: bool = False) -> dict:
+    """Returns {"items": [...], "error": str|None, "capped": bool} -- every
+    non-terminal (not solved/closed) IT-Operations ticket tagged "block" or
+    "standup" (FLAGGED_TICKET_TAGS), regardless of who it's assigned to.
+    Each item has the same shape fetch_recent_tickets' items do, plus
+    "matched_tags": a sorted list of which of FLAGGED_TICKET_TAGS this
+    ticket actually carries (usually one, occasionally both).
+
+    Sorted by *updated_at* rather than created_at (unlike find_candidates()
+    and fetch_recent_tickets above) specifically so a ticket that's old but
+    was just tagged today still sorts near the front of the scan instead of
+    being buried under its original creation date -- created_at ordering
+    would make an old ticket that just got flagged effectively invisible
+    until the scan depth was raised.
+
+    A single page failing partway through (Zendesk's own 1000-result search
+    cap, or a transient API hiccup) stops the scan right there and returns
+    whatever was already found from the pages that DID work, marked
+    "capped": True -- it does NOT discard the whole result the way letting
+    that error propagate up would. Cached the same way fetch_recent_tickets()
+    is otherwise (FLAGGED_CACHE_TTL_SECONDS, falling back to the last
+    successful result on a total failure rather than blanking an
+    already-populated list)."""
+    global _flagged_ticket_cache
+    now = datetime.now()
+    with _flagged_ticket_cache_lock:
+        cached = _flagged_ticket_cache or None
+        if not force and cached and (now - cached["fetched_at"]).total_seconds() < FLAGGED_CACHE_TTL_SECONDS:
+            return {"items": cached["items"], "error": None, "capped": cached["capped"]}
+
+    if client.client is None:
+        if cached:
+            return {"items": cached["items"], "error": None, "capped": cached["capped"]}
+        return {"items": [], "error": "Zendesk isn't connected right now -- see the reconnect banner above.", "capped": False}
+
+    try:
+        agent_user_id = resolve_own_agent_id(client, log_fn=log_fn)
+        tag_set = set(FLAGGED_TICKET_TAGS)
+        items = []
+        capped = False
+        page = 1
+        # Never actually requests a page whose offset would exceed Zendesk's
+        # own ZENDESK_SEARCH_RESULT_CAP -- FLAGGED_TICKET_SCAN_PAGES can only
+        # narrow the scan further than that, never widen it past the hard
+        # ceiling.
+        max_page = min(FLAGGED_TICKET_SCAN_PAGES, ZENDESK_SEARCH_RESULT_CAP // FLAGGED_TICKET_PER_PAGE)
+        while page <= max_page:
+            try:
+                result = client.get_tickets(
+                    group_id=IT_OPERATIONS_GROUP_ID,
+                    sort_by="updated_at",
+                    sort_order="desc",
+                    per_page=FLAGGED_TICKET_PER_PAGE,
+                    page=page,
+                )
+            except Exception as exc:
+                # One page failing shouldn't discard everything already
+                # gathered from the pages that DID work -- stop scanning
+                # here and surface what we have, the same fail-open posture
+                # find_candidates() uses for a single ticket's comments
+                # failing to fetch (skip it, keep going with the rest).
+                log_fn(f"fetch_flagged_tickets() page {page} failed ({exc}) -- "
+                       f"stopping with {len(items)} item(s) already found")
+                capped = True
+                break
+            tickets = result.get("tickets", [])
+            if not tickets:
+                break
+            for ticket in tickets:
+                if ticket.get("status") in ("solved", "closed"):
+                    continue
+                matched = sorted(tag_set & set(ticket.get("tags") or []))
+                if not matched:
+                    continue
+                name, name_confidence, _ = resolve_requester_name(
+                    client, ticket.get("requester_id"), ticket.get("description") or "", log_fn=log_fn
+                )
+                assignee_id = ticket.get("assignee_id")
+                already_ours = bool(assignee_id) and agent_user_id is not None and assignee_id == agent_user_id
+                assignee_name = resolve_assignee_name(client, assignee_id, log_fn=log_fn) if assignee_id else None
+                items.append(
+                    {
+                        "ticket_id": ticket.get("id"),
+                        "subject": ticket.get("subject", ""),
+                        "status": ticket.get("status", ""),
+                        "url": ticket_url(ticket.get("id")),
+                        "requester_name": name if name_confidence == "confirmed" else None,
+                        "requester_id": ticket.get("requester_id"),
+                        "assignee_id": assignee_id,
+                        "assignee_name": assignee_name,
+                        "already_ours": already_ours,
+                        "matched_tags": matched,
+                    }
+                )
+            if not result.get("has_more"):
+                break
+            page += 1
+        else:
+            # Loop condition (page <= max_page) went false rather than an
+            # in-loop `break` -- meaning Zendesk still had at least one
+            # more page we didn't fetch (either FLAGGED_TICKET_SCAN_PAGES
+            # or the hard ZENDESK_SEARCH_RESULT_CAP stopped us first).
+            capped = True
+
+        with _flagged_ticket_cache_lock:
+            _flagged_ticket_cache = {"items": items, "fetched_at": now, "capped": capped}
+        return {"items": items, "error": None, "capped": capped}
+    except Exception as exc:
+        log_fn(f"fetch_flagged_tickets() failed ({exc})")
+        if cached:
+            return {"items": cached["items"], "error": None, "capped": cached["capped"]}
+        return {"items": [], "error": f"Could not load flagged tickets ({exc}).", "capped": False}
+
+
+def cached_flagged_ticket_count() -> int:
+    """Best-effort item count from whatever's already sitting in
+    fetch_flagged_tickets' own cache, WITHOUT triggering a fetch of its
+    own -- see cached_security_ticket_count just above fetch_recent_tickets
+    for the identical reasoning, doubly so here: fetch_flagged_tickets can
+    page through up to FLAGGED_TICKET_SCAN_PAGES pages (1000 tickets) of
+    the IT-Operations group on a cold cache, which is not a cost any page
+    render having nothing to do with Blocked/Standup should ever risk
+    paying just to draw a header badge. Returns 0 on a cold/expired cache."""
+    with _flagged_ticket_cache_lock:
+        cached = _flagged_ticket_cache
+        if not cached or (datetime.now() - cached["fetched_at"]).total_seconds() >= FLAGGED_CACHE_TTL_SECONDS:
+            return 0
+        return len(cached["items"])
+
+
+# A read-only "what have I already closed out" look-back, the same "no
+# drafting, no persistence" posture as fetch_recent_tickets/
+# fetch_flagged_tickets above -- just filtered by status+assignee instead
+# of by group ("recent activity") or tag ("block"/"standup").
+RECENTLY_SOLVED_LIMIT = 40
+SOLVED_TICKET_PER_PAGE = 100
+# Same scan-depth safety cap fetch_flagged_tickets uses, and the same
+# reason: ZendeskClient.get_tickets() can only filter by a single group_id
+# via the Search API (see the comment above FLAGGED_TICKET_TAGS) -- there's
+# no "status:solved assignee_id:N" query it can build directly, so this has
+# to page through the IT-Operations group's own tickets (sorted by
+# updated_at, most recent first) and check each one's status/assignee in
+# Python. Overridable via .env for the same reason FLAGGED_TICKET_SCAN_PAGES
+# is.
+SOLVED_TICKET_SCAN_PAGES = int(os.getenv("SOLVED_TICKET_SCAN_PAGES", "10"))
+_solved_ticket_cache: dict = {}
+SOLVED_CACHE_TTL_SECONDS = SECURITY_CACHE_TTL_SECONDS  # same cadence as the other read-only Zendesk-derived panels
+# Same reasoning as _flagged_ticket_cache_lock -- guards the dict read and
+# the one-shot replacement, never the multi-page get_tickets() scan itself.
+_solved_ticket_cache_lock = threading.Lock()
+
+
+def fetch_recently_solved_tickets(client, limit: int = RECENTLY_SOLVED_LIMIT, log_fn=print, force: bool = False) -> dict:
+    """Returns {"items": [...], "error": str|None, "capped": bool} -- the
+    last `limit` tickets in the IT-Operations group that are BOTH
+    status=="solved" AND assigned to this tool's own configured Zendesk
+    account (resolve_own_agent_id), most recently touched first. Every
+    item's "already_ours" is always True and "assignee_name" is always
+    None (there's nothing to resolve -- it's definitionally this account),
+    kept on each item only so _render_readonly_ticket_row (shared with
+    /security and /flagged) doesn't need a special case for this page.
+
+    Scoped to IT_OPERATIONS_GROUP_ID specifically, the same restriction
+    fetch_flagged_tickets already lives with and for the identical reason:
+    ZendeskClient.get_tickets() only supports filtering by a single
+    group_id (via the Search API), not by assignee+status directly -- so
+    this pages through that one group's tickets sorted by *updated_at*
+    (a solved ticket's own last-touched time, doubling as a reasonable
+    proxy for "when it was solved" -- there's no separate solved_at field
+    in the payload) and filters in Python, the same shape
+    fetch_flagged_tickets already uses for its own tag filtering. A ticket
+    solved in some OTHER group this account might also have access to
+    won't appear here -- if that's ever needed, it'd mean scanning every
+    group (or the whole account with no group filter at all), a much
+    bigger and slower scan than this page's use case has asked for so far.
+
+    Stops paging as soon as `limit` matches are found (sorted most-recent-
+    first, so anything past that point is guaranteed older) -- this is NOT
+    the same as "capped": capped only becomes True if the scan hit
+    SOLVED_TICKET_SCAN_PAGES/ZENDESK_SEARCH_RESULT_CAP (or a page fetch
+    outright failed) before finding `limit` matches, meaning there could
+    be more further back that this scan didn't reach. Cached the same way
+    fetch_flagged_tickets is (SOLVED_CACHE_TTL_SECONDS, falling back to the
+    last successful result on a total failure)."""
+    global _solved_ticket_cache
+    now = datetime.now()
+    with _solved_ticket_cache_lock:
+        cached = _solved_ticket_cache or None
+        if (
+            not force and cached and cached.get("limit") == limit
+            and (now - cached["fetched_at"]).total_seconds() < SOLVED_CACHE_TTL_SECONDS
+        ):
+            return {"items": cached["items"], "error": None, "capped": cached["capped"]}
+
+    if client.client is None:
+        if cached:
+            return {"items": cached["items"], "error": None, "capped": cached["capped"]}
+        return {"items": [], "error": "Zendesk isn't connected right now -- see the reconnect banner above.", "capped": False}
+
+    try:
+        agent_user_id = resolve_own_agent_id(client, log_fn=log_fn)
+        if agent_user_id is None:
+            raise RuntimeError(
+                "could not resolve this tool's own Zendesk account (ZENDESK_EMAIL unset, or search_users unreachable)"
+            )
+
+        items = []
+        capped = False
+        page = 1
+        # Never actually requests a page whose offset would exceed Zendesk's
+        # own ZENDESK_SEARCH_RESULT_CAP -- SOLVED_TICKET_SCAN_PAGES can only
+        # narrow the scan further than that, never widen it past the hard
+        # ceiling (same clamp fetch_flagged_tickets uses).
+        max_page = min(SOLVED_TICKET_SCAN_PAGES, ZENDESK_SEARCH_RESULT_CAP // SOLVED_TICKET_PER_PAGE)
+        while page <= max_page:
+            try:
+                result = client.get_tickets(
+                    group_id=IT_OPERATIONS_GROUP_ID,
+                    sort_by="updated_at",
+                    sort_order="desc",
+                    per_page=SOLVED_TICKET_PER_PAGE,
+                    page=page,
+                )
+            except Exception as exc:
+                log_fn(f"fetch_recently_solved_tickets() page {page} failed ({exc}) -- "
+                       f"stopping with {len(items)} item(s) already found")
+                capped = True
+                break
+            tickets = result.get("tickets", [])
+            if not tickets:
+                break
+            for ticket in tickets:
+                if ticket.get("status") != "solved" or ticket.get("assignee_id") != agent_user_id:
+                    continue
+                name, name_confidence, _ = resolve_requester_name(
+                    client, ticket.get("requester_id"), ticket.get("description") or "", log_fn=log_fn
+                )
+                items.append(
+                    {
+                        "ticket_id": ticket.get("id"),
+                        "subject": ticket.get("subject", ""),
+                        "status": ticket.get("status", ""),
+                        "url": ticket_url(ticket.get("id")),
+                        "requester_name": name if name_confidence == "confirmed" else None,
+                        "requester_id": ticket.get("requester_id"),
+                        "assignee_id": ticket.get("assignee_id"),
+                        "assignee_name": None,
+                        "already_ours": True,
+                        "solved_at": ticket.get("updated_at", ""),
+                    }
+                )
+                if len(items) >= limit:
+                    break
+            if len(items) >= limit:
+                break
+            if not result.get("has_more"):
+                break
+            page += 1
+        else:
+            # Loop condition (page <= max_page) went false rather than an
+            # in-loop `break` -- meaning Zendesk still had at least one more
+            # page we didn't fetch, and we still hadn't found `limit`
+            # matches yet.
+            capped = True
+
+        with _solved_ticket_cache_lock:
+            _solved_ticket_cache = {"items": items, "fetched_at": now, "capped": capped, "limit": limit}
+        return {"items": items, "error": None, "capped": capped}
+    except Exception as exc:
+        log_fn(f"fetch_recently_solved_tickets() failed ({exc})")
+        if cached:
+            return {"items": cached["items"], "error": None, "capped": cached["capped"]}
+        return {"items": [], "error": f"Could not load recently solved tickets ({exc}).", "capped": False}
+
+
+def claim_ticket(client, ticket_id, agent_user_id, log_fn=print) -> dict:
+    """Self-assigns a ticket to this tool's own configured Zendesk account
+    -- the direct complement to the "also being worked on" badge above:
+    that badge flags someone else already having a ticket, this lets you
+    take an unclaimed one (or knowingly take over an assigned one)
+    without leaving this page. Just another Zendesk assignee change --
+    indistinguishable from doing the same thing by hand in Zendesk's own
+    UI, easily reversible, nothing posted or destroyed -- so this makes
+    the API call directly rather than needing its own confirm-page
+    interstitial the way an already-replied post does; the review page's
+    own Claim button asks first when it's about to take over someone
+    else's ticket (see _render_ticket).
+
+    If this ticket is one of ours (tracked in pending_drafts.json), updates
+    that entry's assignee fields in place so the badge and draft box
+    reflect the claim immediately, without waiting for the next scan's
+    recheck_pending_for_assignment to catch up -- mirrors the pattern
+    _post() and _dismiss() already use for updating local state right
+    after a Zendesk-side action succeeds. For an IT-Security column ticket
+    (never tracked locally), there's nothing to update here -- the change
+    exists only in Zendesk, and that column's own cache picks it up on its
+    next refresh.
+
+    Returns {"ok": True, "error": None} on success, or {"ok": False,
+    "error": str} on failure -- the caller decides how to phrase the
+    banner."""
+    try:
+        client.update_ticket(int(ticket_id), assignee_id=agent_user_id)
+    except Exception as exc:
+        log_fn(f"claim_ticket(#{ticket_id}) failed: {exc}")
+        return {"ok": False, "error": str(exc)}
+
+    def _mutate(data):
+        entry = data.get(str(ticket_id))
+        if entry is not None:
+            entry["assignee_id"] = agent_user_id
+            entry["assigned_to_other"] = False
+            entry["assignee_name"] = None
+
+    update_pending(_mutate)
+    log_fn(f"Claimed #{ticket_id} -- now assigned to this tool's own account.")
+    return {"ok": True, "error": None}
+
+
+# --- Personal task tickets --------------------------------------------
+# A lightweight personal to-do list, entirely separate from the
+# IT-Operations pending-reply workflow above -- with a deliberate two-step
+# lifecycle rather than every jotted task becoming a Zendesk ticket the
+# instant it's typed:
+#   draft -> just a local note, nothing in Zendesk yet (add_personal_task)
+#   open  -> promoted into a real, self-requested/self-assigned Zendesk
+#            ticket via the /tasks page's own "Make Zendesk Ticket from
+#            Task" button (promote_personal_task) -- typed "task", one of
+#            Zendesk's own native ticket types alongside
+#            question/incident/problem, and tagged PERSONAL_TASK_TAG so
+#            find_candidates() never mistakes it for a customer ticket
+#            awaiting a first reply (see that function's own check)
+#   done  -> the ticket was marked solved, either via this page's own
+#            "Mark done" button or directly in Zendesk (complete_personal_
+#            task / reconcile_personal_tasks)
+# A draft can also be discarded outright (discard_personal_task) without
+# ever touching Zendesk -- there's nothing there yet to lose track of.
+#
+# All three states share one local record, personal_tasks.json, mirroring
+# pending_drafts.json's own load/update pattern (see
+# _pending_lock/load_pending/update_pending above). Keyed by a locally-
+# generated id (not the eventual ticket id -- a draft doesn't have one yet)
+# so a task's identity is stable across its whole lifecycle. Once
+# promoted, an "open" entry is deliberately NOT read back from Zendesk via
+# a group-scoped query the way the IT-Security column is
+# (fetch_recent_tickets): get_tickets()'s only filter is a single
+# group_id, and there's no guarantee these tickets land in a group this
+# tool already queries -- Zendesk auto-assigns a group at creation based
+# on account defaults, not something this tool controls. Looking these up
+# by the ticket ids already recorded here (via the existing single-ticket
+# get_ticket()) sidesteps that entirely, and needs no changes to the
+# shared zendesk_client.py library at all.
+PERSONAL_TASKS_FILE = OUTPUT_DIR / "personal_tasks.json"
+PERSONAL_TASKS_LOCK_FILE = OUTPUT_DIR / "personal_tasks.json.lock"
+PERSONAL_TASKS_ARCHIVE_FILE = OUTPUT_DIR / "personal_tasks_archive.json"
+
+
+def _personal_tasks_lock():
+    lock_file = open(PERSONAL_TASKS_LOCK_FILE, "w")
+    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+    return lock_file
+
+
+def load_personal_tasks() -> dict:
+    """Plain (unlocked) read, same tradeoff as load_pending() above -- fine
+    for rendering the /tasks page. Mutate only through
+    update_personal_tasks()."""
+    if PERSONAL_TASKS_FILE.exists():
+        try:
+            return json.loads(PERSONAL_TASKS_FILE.read_text())
+        except Exception:
+            return {}
+    return {}
+
+
+def _cached_load_personal_tasks() -> dict:
+    """load_personal_tasks(), memoized for the lifetime of one request --
+    see the comment above _request_cache (near load_pending(), above).
+    Used only by draft_personal_tasks()/open_personal_tasks()/
+    completed_personal_tasks() -- never by update_personal_tasks() or the
+    pre-mutation freshness checks in promote/complete/quick-solve_personal_task
+    or reconcile_personal_tasks(), which all still call
+    load_personal_tasks() directly."""
+    cached = getattr(_request_cache, "personal_tasks", None)
+    if cached is None:
+        cached = load_personal_tasks()
+        _request_cache.personal_tasks = cached
+    return cached
+
+
+def update_personal_tasks(mutate_fn) -> None:
+    """Read-modify-write personal_tasks.json under an exclusive lock --
+    same reasoning as update_pending() above, in case two of these actions
+    (an add, a promote, a mark-done, a reconcile pass) ever land close
+    together. Also clears _request_cache's memoized copy right after
+    writing -- see update_pending()'s docstring for why that matters
+    beyond just the real HTTP request lifecycle."""
+    lock_file = _personal_tasks_lock()
+    try:
+        data = load_personal_tasks()
+        mutate_fn(data)
+        _atomic_write_json(PERSONAL_TASKS_FILE, data)
+    finally:
+        lock_file.close()
+    clear_request_cache()
+
+
+def draft_personal_tasks() -> list:
+    """The /tasks page's "not yet in Zendesk" list -- every locally-saved
+    task that hasn't been promoted to a real ticket yet, in manual-reorder
+    order (see move_personal_task_draft): highest `position` first. A
+    fresh draft's position is one higher than any existing draft's (see
+    add_personal_task), so with no reordering at all this still comes out
+    newest-first, exactly as before manual reordering existed -- entries
+    saved before `position` existed default to 0 and simply sort as if
+    they were the oldest."""
+    data = _cached_load_personal_tasks()
+    items = [v for v in data.values() if v.get("status") == "draft"]
+    return sorted(items, key=lambda i: i.get("position", 0), reverse=True)
+
+
+def open_personal_tasks() -> list:
+    """The /tasks page's "open" list -- every locally-tracked task that
+    HAS been promoted to a real Zendesk ticket and not yet marked done,
+    newest first. Purely a local-store read (like pending_items() above),
+    no Zendesk call here -- see reconcile_personal_tasks() for the one
+    place this store's status gets refreshed from Zendesk itself."""
+    data = _cached_load_personal_tasks()
+    items = [v for v in data.values() if v.get("status") == "open"]
+    return sorted(items, key=lambda i: i.get("created_at", ""), reverse=True)
+
+
+def completed_personal_tasks(limit: int = 10) -> list:
+    """The /tasks page's "Recently completed" collapsible -- the most
+    recently done tasks, most-recent first, capped at `limit` the same way
+    recent_replied_items() caps the main queue's "Last N replies" section.
+    Purely a local-store read; a task only ever lands here via
+    complete_personal_task() or reconcile_personal_tasks() flipping its
+    status to "done"."""
+    data = _cached_load_personal_tasks()
+    items = [v for v in data.values() if v.get("status") == "done"]
+    items.sort(key=lambda i: i.get("completed_at", ""), reverse=True)
+    return items[:limit]
+
+
+def _parse_est_mins(est_mins) -> tuple:
+    """Shared parsing/validation for the optional Estimated minutes value,
+    used both when saving a draft (optional there) and when promoting one
+    (required there). Blank/None is accepted as "not given" (returns
+    (None, None)); anything else must be a whole number greater than 0 and
+    no more than PERSONAL_TASK_EST_MINUTES_MAX -- catching an obvious
+    fat-fingered value (e.g. 99999999) before it becomes ticket metadata,
+    the same way the lower bound already catches 0/negative. Returns
+    (parsed_int_or_None, error_or_None) -- never raises."""
+    if est_mins in (None, ""):
+        return None, None
+    try:
+        parsed = int(est_mins)
+        if parsed <= 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        return None, "Estimated minutes must be a whole number greater than 0 (or left blank)."
+    if parsed > PERSONAL_TASK_EST_MINUTES_MAX:
+        return None, f"Estimated minutes can't be more than {PERSONAL_TASK_EST_MINUTES_MAX} ({PERSONAL_TASK_EST_MINUTES_MAX // 60} hours)."
+    return parsed, None
+
+
+def add_personal_task(subject: str, notes: str, est_mins=None, category: str = "", log_fn=print) -> dict:
+    """Saves a personal task as a local-only draft -- no Zendesk call at
+    all. This is deliberately the ONLY thing "Add task" does now: the
+    first version of this feature created a real Zendesk ticket
+    immediately on every add, which turned out to be too eager for
+    quickly jotting down an idea that might not be worth tracking as a
+    ticket. Creating the actual ticket is a separate, explicit action --
+    see promote_personal_task().
+
+    est_mins is OPTIONAL here (unlike at promote time, where it's
+    required) -- if you already know roughly how long something will
+    take when you jot it down, saving it now pre-fills the promote form's
+    Estimated minutes input later instead of asking you to remember it a
+    second time; leave it blank and the promote form just starts empty,
+    exactly as before this existed. category is a short, purely local
+    label (e.g. "ISP", "Reporting") for scanning a longer drafts list at a
+    glance -- never sent to Zendesk.
+
+    Every new draft gets a `position` one higher than any existing
+    draft's, so draft_personal_tasks()'s default (unreordered) view is
+    still newest-first, same as before manual reordering existed -- see
+    move_personal_task_draft() for how that value changes afterward.
+
+    Returns {"ok": True, "local_id": str, "error": None} on success, or
+    {"ok": False, "error": str} if the subject is blank or est_mins is
+    given but invalid; never raises."""
+    subject = (subject or "").strip()
+    if not subject:
+        return {"ok": False, "error": "A task needs a subject."}
+
+    est_mins_int, est_mins_error = _parse_est_mins(est_mins)
+    if est_mins_error:
+        return {"ok": False, "error": est_mins_error}
+
+    local_id = uuid.uuid4().hex[:12]
+
+    def _mutate(data):
+        existing_positions = [v.get("position", 0) for v in data.values() if v.get("status") == "draft"]
+        position = (max(existing_positions) + 1) if existing_positions else 0
+        data[local_id] = {
+            "local_id": local_id,
+            "subject": subject,
+            "notes": (notes or "").strip(),
+            "category": (category or "").strip(),
+            "status": "draft",
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "ticket_id": None,
+            "ticket_created_at": None,
+            "est_mins": est_mins_int,
+            "position": position,
+        }
+
+    update_personal_tasks(_mutate)
+    log_fn(f"Saved task draft {local_id}: {subject}")
+    return {"ok": True, "local_id": local_id, "error": None}
+
+
+def edit_personal_task(local_id: str, subject: str, notes: str, est_mins=None, category: str = "", log_fn=print) -> dict:
+    """"Edit" on a draft row -- updates subject/notes/est_mins/category on
+    an existing draft in place, so fixing a typo or adding a detail
+    doesn't mean discarding and re-adding the whole task from scratch.
+    Refuses to edit anything that isn't still a draft -- once a task is
+    promoted, its subject/description already exist for real in Zendesk,
+    so changing them here would just silently drift out of sync with the
+    actual ticket; edit those directly in Zendesk instead.
+
+    Returns {"ok": True, "error": None} on success, or {"ok": False,
+    "error": str}; never raises.
+
+    Guarded by _begin_personal_task_action/_end_personal_task_action, the
+    same in-process guard promote_personal_task/complete_personal_task/
+    quick_solve_personal_task use -- not because this function itself makes
+    any network call (it doesn't), but because promote_personal_task's own
+    "still a draft?" check happens on an unlocked read, well before its
+    live Zendesk create_ticket call finishes and it writes "open" back.
+    Without this guard, an edit landing in that window would rewrite
+    subject/notes/est_mins on a draft that a moment later gets promoted
+    with the OLD (pre-edit) values already captured into local variables --
+    leaving the Zendesk ticket's actual subject/description permanently out
+    of sync with what this tool shows. Taking the same guard here closes
+    that window: the edit either finishes well before the promote starts,
+    or waits until the promote (and its own guard) is done and re-reads the
+    then-current status."""
+    subject = (subject or "").strip()
+    if not subject:
+        return {"ok": False, "error": "A task needs a subject."}
+
+    est_mins_int, est_mins_error = _parse_est_mins(est_mins)
+    if est_mins_error:
+        return {"ok": False, "error": est_mins_error}
+
+    if not _begin_personal_task_action(local_id):
+        return {"ok": False, "error": "This task is currently being promoted or solved -- please wait a moment and refresh."}
+
+    try:
+        result = {"ok": False, "error": "No such task."}
+
+        def _mutate(data):
+            nonlocal result
+            entry = data.get(local_id)
+            if entry is None:
+                result = {"ok": False, "error": "No such task."}
+                return
+            if entry.get("status") != "draft":
+                result = {"ok": False, "error": "This task already has a Zendesk ticket -- edit it directly in Zendesk instead."}
+                return
+            entry["subject"] = subject
+            entry["notes"] = (notes or "").strip()
+            entry["category"] = (category or "").strip()
+            entry["est_mins"] = est_mins_int
+            result = {"ok": True, "error": None}
+
+        update_personal_tasks(_mutate)
+        if result["ok"]:
+            log_fn(f"Edited task draft {local_id}.")
+        return result
+    finally:
+        _end_personal_task_action(local_id)
+
+
+def move_personal_task_draft(local_id: str, direction: str, log_fn=print) -> dict:
+    """"Move up"/"Move down" on a draft row -- manually reorders the
+    "Not yet in Zendesk" list. Implemented as a plain swap of `position`
+    with whichever neighboring draft is currently adjacent in the
+    displayed (position-descending) order, rather than renumbering the
+    whole list -- simpler, and every other draft's relative order is
+    left untouched. A no-op (ok=True, nothing changes) if the draft is
+    already at the top/bottom -- there's nothing to swap with in that
+    direction. Refuses anything that isn't currently a draft.
+
+    Returns {"ok": True, "error": None} on success (including the no-op
+    case), or {"ok": False, "error": str}; never raises.
+
+    Guarded by _begin_personal_task_action/_end_personal_task_action, same
+    reasoning as edit_personal_task above -- swapping `position` with a
+    neighbor while that neighbor (or this draft itself) is mid-promote in
+    another thread could otherwise land in between promote's own unlocked
+    "still a draft?" read and its later write, reordering a draft that's
+    about to stop being one."""
+    if direction not in ("up", "down"):
+        return {"ok": False, "error": "Invalid direction."}
+
+    if not _begin_personal_task_action(local_id):
+        return {"ok": False, "error": "This task is currently being promoted or solved -- please wait a moment and refresh."}
+
+    try:
+        result = {"ok": False, "error": "No such task."}
+
+        def _mutate(data):
+            nonlocal result
+            entry = data.get(local_id)
+            if entry is None:
+                result = {"ok": False, "error": "No such task."}
+                return
+            if entry.get("status") != "draft":
+                result = {"ok": False, "error": "Only drafts can be reordered."}
+                return
+            drafts = sorted(
+                (v for v in data.values() if v.get("status") == "draft"),
+                key=lambda i: i.get("position", 0), reverse=True,
+            )
+            idx = next((i for i, d in enumerate(drafts) if d["local_id"] == local_id), None)
+            if idx is None:
+                result = {"ok": False, "error": "No such task."}
+                return
+            neighbor_idx = idx - 1 if direction == "up" else idx + 1
+            if neighbor_idx < 0 or neighbor_idx >= len(drafts):
+                result = {"ok": True, "error": None}
+                return
+            neighbor = drafts[neighbor_idx]
+            entry["position"], neighbor["position"] = neighbor.get("position", 0), entry.get("position", 0)
+            result = {"ok": True, "error": None}
+
+        update_personal_tasks(_mutate)
+        return result
+    finally:
+        _end_personal_task_action(local_id)
+
+
+def discard_personal_task(local_id: str, log_fn=print) -> dict:
+    """Removes a draft task that was never promoted to a real ticket --
+    there's nothing in Zendesk to lose track of, unlike an "open" task
+    (which always has a real ticket behind it, and can only be closed out
+    via complete_personal_task, never silently untracked here). Refuses to
+    discard anything that isn't still a draft, so this can never be used
+    to make an already-created ticket quietly disappear from the list.
+
+    Returns {"ok": True, "error": None} on success, or {"ok": False,
+    "error": str}; never raises.
+
+    Guarded by _begin_personal_task_action/_end_personal_task_action, same
+    reasoning as edit_personal_task above -- this is the more serious case
+    of the two: promote_personal_task reads a draft, then makes its live
+    create_ticket/update_ticket calls, and only writes "open" back at the
+    very end. A discard landing in that window would find the entry still
+    "draft" (promote hasn't flipped it yet) and delete it outright -- and
+    when promote's own final write later runs, it finds nothing left to
+    update (its target-not-None guard just no-ops), leaving a real,
+    already-created Zendesk ticket with no local record of it at all. This
+    guard closes that window the same way it closes the double-promote one."""
+    if not _begin_personal_task_action(local_id):
+        return {"ok": False, "error": "This task is currently being promoted or solved -- please wait a moment and refresh."}
+
+    try:
+        result = {"ok": False, "error": "No such task."}
+
+        def _mutate(data):
+            nonlocal result
+            entry = data.get(local_id)
+            if entry is None:
+                result = {"ok": False, "error": "No such task."}
+                return
+            if entry.get("status") != "draft":
+                result = {
+                    "ok": False,
+                    "error": f"This task already has a Zendesk ticket (#{entry.get('ticket_id')}) -- use Mark done instead.",
+                }
+                return
+            del data[local_id]
+            result = {"ok": True, "error": None}
+
+        update_personal_tasks(_mutate)
+        if result["ok"]:
+            log_fn(f"Discarded task draft {local_id}.")
+        return result
+    finally:
+        _end_personal_task_action(local_id)
+
+
+# promote_personal_task/complete_personal_task both do real Zendesk writes
+# (create_ticket / update_ticket) that must never happen twice for the same
+# local task -- but they can't just check-then-mutate under
+# update_personal_tasks' file lock the way every other action above does,
+# since holding that lock across a live network call would block every
+# other unrelated task mutation for however long Zendesk takes to respond.
+# review_server.py runs on a ThreadingHTTPServer (see main() there), so two
+# overlapping requests for the same local_id are a real scenario -- a
+# double-click before the page's own button-disable JS fires, or a browser
+# retrying a slow request -- not just a theoretical race. This in-process
+# guard (reset on restart, and irrelevant across two separate processes,
+# neither of which is a real scenario for this single-instance,
+# launchd-managed, localhost tool) closes that specific window: only one
+# thread at a time may be mid-promote/mid-complete for a given local_id.
+_personal_task_action_lock = threading.Lock()
+_personal_task_actions_in_progress: set = set()
+
+
+def _begin_personal_task_action(local_id: str) -> bool:
+    """Returns True if the caller may proceed (and must call
+    _end_personal_task_action(local_id) in a finally block once done),
+    False if another thread is already mid-action on this same local_id."""
+    with _personal_task_action_lock:
+        if local_id in _personal_task_actions_in_progress:
+            return False
+        _personal_task_actions_in_progress.add(local_id)
+        return True
+
+
+def _end_personal_task_action(local_id: str) -> None:
+    with _personal_task_action_lock:
+        _personal_task_actions_in_progress.discard(local_id)
+
+
+def promote_personal_task(
+    client, local_id: str, agent_user_id, est_mins,
+    identity_assignee=None, identity_requester=None, allocation=None,
+    log_fn=print,
+) -> dict:
+    """"Make Zendesk Ticket from Task" -- takes an existing local draft
+    (see add_personal_task) and creates the real Zendesk ticket for it,
+    following the same recipe as the sibling "Zendesk Personal Task
+    Tracker" Claude skill: priority "low", type="task", tagged
+    PERSONAL_TASK_TAG so find_candidates() never mistakes it for a
+    customer ticket awaiting a first reply, and the IT Requests form's
+    three custom fields set via _personal_task_custom_fields(est_mins,
+    allocation). Also always filed under the IT_OPERATIONS_GROUP_ID group
+    (set via a follow-up update_ticket call, since create_ticket has no
+    group_id parameter) regardless of which Assignee/Requester identity is
+    chosen -- so every promoted task reads as "IT-Operations / <assignee>"
+    in Zendesk, the same group/agent pairing its own UI shows.
+
+    identity_assignee/identity_requester (each PERSONAL_TASK_IDENTITY_SELF
+    or PERSONAL_TASK_IDENTITY_IT_OPERATIONS, defaulting to SELF -- the
+    only option that existed before this choice did) are resolved
+    independently via resolve_personal_task_identity, so Assignee and
+    Requester don't have to match each other. allocation
+    (PERSONAL_TASK_ALLOCATION_CSA or _CSAIF, defaulting to CSA) feeds
+    straight into _personal_task_custom_fields.
+
+    description falls back to the subject itself when notes is blank, so
+    the ticket body is never empty -- Zendesk requires a non-empty
+    description to create a ticket at all.
+
+    Refuses to promote a task that already has a ticket (idempotency
+    guard against a double-click creating two tickets for one draft) --
+    the local entry's status is the source of truth for whether this has
+    already happened, checked and flipped under the same lock as every
+    other mutation here. Also validates est_mins/identity/allocation
+    itself rather than trusting the web form's own required attributes
+    and fixed <select> options, since those are only a UI nicety a raw
+    request could still arrive without honoring.
+
+    Deliberately does NOT post PERSONAL_TASK_RECEIVED_NOTE/
+    PERSONAL_TASK_RECEIVED_REPLY at creation time -- unlike the sibling
+    Claude skill, this tool defers both comments until the ticket is
+    actually solved (see quick_solve_personal_task), so a freshly-created
+    personal task ticket sits quietly with no public/internal activity
+    until someone deliberately closes it out.
+
+    On success, updates the local entry in place (status "open",
+    ticket_id/ticket_created_at/est_mins/allocation/assignee_identity/
+    requester_identity set -- the last three so complete_personal_task
+    can resend the same allocation at solve time) so the /tasks page's
+    open list picks it up immediately. Returns {"ok": True,
+    "ticket_id": int, "url": str, "error": None, "warning": str|None} on
+    success, or {"ok": False, "error": str} on failure (missing draft,
+    already promoted, an unresolved identity, invalid est_mins/allocation,
+    or the Zendesk create call itself failing); never raises.
+
+    Guarded by _begin_personal_task_action/_end_personal_task_action (see
+    those functions' comment above) against two overlapping requests for
+    the same local_id both passing the "still a draft?" check below before
+    either has written "open" back -- a real scenario on this server's
+    ThreadingHTTPServer, not just a theoretical one. That guard is what
+    actually makes "checked under the same lock as every other mutation
+    here" true for the live-Zendesk-write step; update_personal_tasks'
+    file lock alone only protects the final status flip, not the
+    create_ticket call in between."""
+    if not _begin_personal_task_action(local_id):
+        return {"ok": False, "error": "This task is already being promoted -- please wait a moment and refresh."}
+
+    try:
+        identity_assignee = identity_assignee or PERSONAL_TASK_IDENTITY_SELF
+        identity_requester = identity_requester or PERSONAL_TASK_IDENTITY_SELF
+        allocation = allocation or PERSONAL_TASK_ALLOCATION_VALUE
+
+        data = load_personal_tasks()
+        entry = data.get(local_id)
+        if entry is None:
+            return {"ok": False, "error": "No such task."}
+        if entry.get("status") != "draft":
+            if entry.get("ticket_id"):
+                return {"ok": False, "error": f"This task already has a Zendesk ticket (#{entry['ticket_id']})."}
+            return {"ok": False, "error": "This task can't be promoted from its current state."}
+
+        if identity_assignee not in PERSONAL_TASK_IDENTITY_CHOICES or identity_requester not in PERSONAL_TASK_IDENTITY_CHOICES:
+            return {"ok": False, "error": "Invalid Assignee/Requester choice."}
+        if allocation not in PERSONAL_TASK_ALLOCATION_CHOICES:
+            return {"ok": False, "error": "Invalid Ticket Allocation choice."}
+
+        est_mins_int, est_mins_error = _parse_est_mins(est_mins)
+        if est_mins_error or est_mins_int is None:
+            return {"ok": False, "error": est_mins_error or "Estimated minutes is required to create the ticket."}
+
+        assignee_id, assignee_error = resolve_personal_task_identity(client, identity_assignee, agent_user_id, log_fn=log_fn)
+        if assignee_error:
+            return {"ok": False, "error": assignee_error}
+        requester_id, requester_error = resolve_personal_task_identity(client, identity_requester, agent_user_id, log_fn=log_fn)
+        if requester_error:
+            return {"ok": False, "error": requester_error}
+
+        subject = entry["subject"]
+        description = (entry.get("notes") or "").strip() or subject
+
+        try:
+            created = client.create_ticket(
+                subject=subject,
+                description=description,
+                requester_id=requester_id,
+                assignee_id=assignee_id,
+                priority=PERSONAL_TASK_PRIORITY,
+                type="task",
+                tags=[PERSONAL_TASK_TAG],
+                custom_fields=_personal_task_custom_fields(est_mins_int, allocation),
+            )
+        except Exception as exc:
+            log_fn(f"promote_personal_task({local_id}) failed: {exc}")
+            return {"ok": False, "error": str(exc)}
+
+        ticket_id = created.get("id")
+
+        # Every personal task ticket is filed under the IT-Operations group by
+        # default (so it shows up as "IT-Operations / <assignee>" the same way
+        # Zendesk's own UI pairs a ticket's group and individual assignee),
+        # regardless of which Assignee/Requester identity was chosen above --
+        # these are IT-Operations work items either way. create_ticket (the
+        # shared zendesk_client.py method, deliberately never modified by this
+        # project) has no group_id parameter, so this is set via a follow-up
+        # update_ticket call right after creation, the same "create, then a
+        # couple of small follow-up writes" shape already used for the two
+        # automatic comments below. A failure here doesn't undo the ticket or
+        # block the promotion -- it's folded into the same best-effort
+        # "warning" the comment posts already use.
+        group_warning = None
+        try:
+            client.update_ticket(ticket_id, group_id=IT_OPERATIONS_GROUP_ID)
+        except Exception as exc:
+            log_fn(f"promote_personal_task({local_id}): setting group on #{ticket_id} failed: {exc}")
+            group_warning = "the ticket was created, but assigning it to the IT-Operations group may not have worked -- check the ticket directly"
+
+        def _mutate(data):
+            target = data.get(local_id)
+            if target is not None:
+                target["status"] = "open"
+                target["ticket_id"] = ticket_id
+                target["ticket_created_at"] = datetime.now().isoformat(timespec="seconds")
+                target["est_mins"] = est_mins_int
+                target["allocation"] = allocation
+                target["assignee_identity"] = identity_assignee
+                target["requester_identity"] = identity_requester
+
+        update_personal_tasks(_mutate)
+        log_fn(f"Promoted task draft {local_id} to Zendesk ticket #{ticket_id}.")
+
+        return {"ok": True, "ticket_id": ticket_id, "url": ticket_url(ticket_id), "error": None, "warning": group_warning}
+    finally:
+        _end_personal_task_action(local_id)
+
+
+def _resolve_est_mins_for_solve(entry: dict, est_mins_override) -> tuple:
+    """A task promoted before Estimated minutes existed (see
+    _personal_task_custom_fields' docstring) has no est_mins recorded at
+    all -- and unlike at creation time, where the field can just be left
+    out of custom_fields entirely, the skill's own experience is that
+    Zendesk rejects a SOLVE that omits any of the three IT Requests
+    fields. So a legacy task like that can't actually be solved without
+    finally getting an Estimated minutes value from somewhere. This
+    resolves that: the entry's own recorded est_mins always wins when
+    present (a routine solve click never silently overwrites it), and
+    only when there's truly none on file does est_mins_override -- an
+    estimate collected right on the solve form itself, the same
+    required-at-this-point pattern the promote form already uses -- get
+    validated and used instead.
+
+    Returns (resolved_est_mins, error_or_None). resolved_est_mins is
+    always a valid int when error_or_None is None."""
+    if entry.get("est_mins") is not None:
+        return entry["est_mins"], None
+    if est_mins_override is None or str(est_mins_override).strip() == "":
+        return None, "This task was created before Estimated minutes was required -- enter an estimate to solve it."
+    parsed, err = _parse_est_mins(est_mins_override)
+    if err or parsed is None:
+        return None, err or "Estimated minutes is required to solve this task."
+    return parsed, None
+
+
+def _solve_personal_task_ticket(client, local_id: str, entry: dict, log_fn=print) -> dict:
+    """Shared solve+local-mutate core used by both complete_personal_task
+    ("Mark done") and quick_solve_personal_task ("Quick Solve") -- pulled
+    out on its own precisely so neither of those two has to call the
+    other directly. Both callers already hold the single non-reentrant
+    _begin_personal_task_action(local_id) guard for the duration of their
+    own call; if one called the other internally, the second guard
+    acquisition for the same local_id would immediately fail. This helper
+    does the actual Zendesk write and local-state flip with NO guard of
+    its own -- callers are required to already hold it.
+
+    Resends the same three IT Requests custom fields as at creation time
+    (via _personal_task_custom_fields, reusing the est_mins AND
+    allocation recorded back in promote_personal_task, or freshly resolved
+    by _resolve_est_mins_for_solve for a legacy task that had none) --
+    the skill notes Zendesk rejects a solve that omits any of them.
+    entry["est_mins"] is also written back into the stored record here
+    (not just used for this one Zendesk call), so a legacy task's
+    just-collected estimate is remembered going forward rather than
+    needing to be re-entered on every future retry. Returns
+    {"ok": True, "error": None} or {"ok": False, "error": str}; never
+    raises. Does not itself check entry["status"] -- callers do that
+    first, since the exact wording of "not open" differs slightly between
+    them."""
+    ticket_id = entry["ticket_id"]
+    est_mins = entry.get("est_mins")
+    allocation = entry.get("allocation")
+    try:
+        client.update_ticket(
+            int(ticket_id),
+            status="solved",
+            custom_fields=_personal_task_custom_fields(est_mins, allocation),
+        )
+    except Exception as exc:
+        log_fn(f"_solve_personal_task_ticket({local_id}, #{ticket_id}) failed: {exc}")
+        return {"ok": False, "error": str(exc)}
+
+    def _mutate(data):
+        target = data.get(local_id)
+        if target is not None:
+            target["status"] = "done"
+            target["completed_at"] = datetime.now().isoformat(timespec="seconds")
+            if est_mins is not None:
+                target["est_mins"] = est_mins
+
+    update_personal_tasks(_mutate)
+    log_fn(f"Marked task {local_id} (Zendesk #{ticket_id}) done.")
+    return {"ok": True, "error": None}
+
+
+def complete_personal_task(client, local_id: str, est_mins=None, log_fn=print) -> dict:
+    """Marks a promoted task's Zendesk ticket solved and its local record
+    "done" in the same call -- mirrors claim_ticket()'s pattern above (a
+    real Zendesk write, immediately followed by an in-place local-state
+    update so the /tasks page reflects it right away rather than waiting
+    on the next reconcile pass). Refuses to act on anything that isn't
+    currently "open" (a draft has no ticket to mark solved; an
+    already-done task gets its own distinct message rather than the
+    misleading "doesn't have a ticket yet", which is really about drafts).
+    This is the "solve only" path -- it does NOT post any comments; see
+    quick_solve_personal_task for the variant that also posts the
+    intake note/reply first.
+
+    est_mins is only used for the rare legacy task with no est_mins
+    already on file -- see _resolve_est_mins_for_solve; for every normal
+    task (the vast majority, which already have one recorded from promote
+    time) it's ignored entirely and the stored value is used as before.
+
+    Returns {"ok": True, "error": None} or {"ok": False, "error": str};
+    never raises. Guarded by _begin_personal_task_action (see that
+    function's comment above) -- lower stakes here since Zendesk's own
+    status="solved" update is idempotent, but two overlapping Mark Done
+    clicks would otherwise still both pass the "still open?" check and
+    both hit Zendesk for no reason."""
+    if not _begin_personal_task_action(local_id):
+        return {"ok": False, "error": "This task is already being marked done -- please wait a moment and refresh."}
+
+    try:
+        data = load_personal_tasks()
+        entry = data.get(local_id)
+        if entry is None:
+            return {"ok": False, "error": "No such task."}
+        if entry.get("status") != "open":
+            if entry.get("status") == "done":
+                return {"ok": False, "error": "This task has already been marked done."}
+            return {"ok": False, "error": "This task doesn't have a Zendesk ticket yet -- create one first."}
+
+        resolved_est_mins, est_mins_error = _resolve_est_mins_for_solve(entry, est_mins)
+        if est_mins_error:
+            return {"ok": False, "error": est_mins_error}
+
+        return _solve_personal_task_ticket(client, local_id, dict(entry, est_mins=resolved_est_mins), log_fn=log_fn)
+    finally:
+        _end_personal_task_action(local_id)
+
+
+def quick_solve_personal_task(client, local_id: str, est_mins=None, log_fn=print) -> dict:
+    """"Quick Solve" -- the one-click alternative to "Mark done" for a
+    promoted task whose ticket has had no public reply or internal
+    comment posted on it yet (see promote_personal_task, which
+    deliberately no longer posts these two at creation time). Posts both
+    PERSONAL_TASK_RECEIVED_NOTE (internal) and PERSONAL_TASK_RECEIVED_REPLY
+    (public) -- the same fixed pair the skill posts, just deferred to
+    this later point -- and then solves the ticket via the same shared
+    _solve_personal_task_ticket helper complete_personal_task uses.
+
+    est_mins is only used for the rare legacy task with none on file
+    already -- see _resolve_est_mins_for_solve and complete_personal_task's
+    own docstring, which explains this the same way.
+
+    The comment posts are best-effort: if either fails, this still goes
+    on to solve the ticket (a missing intake note/reply isn't worth
+    blocking the actual solve over) and the returned dict's "warning" key
+    explains what to double-check manually -- the same pattern
+    promote_personal_task previously used for its own follow-up posts.
+    If the solve itself fails, that failure IS returned as an error (the
+    comments may already be posted, but the ticket is not marked done).
+
+    Each of the two comments' posted-or-not state is recorded on the
+    entry itself (intake_note_posted / intake_reply_posted) the moment it
+    succeeds -- BEFORE attempting the solve, and independently of whether
+    the solve then succeeds or fails. Without this, a solve failure after
+    both comments already posted would leave the task still "open", and
+    clicking Quick Solve again to retry would post both comments a SECOND
+    time before retrying the solve -- this makes that retry skip whichever
+    comment(s) already went out on an earlier attempt, posting only
+    whatever didn't.
+
+    Refuses to act on anything that isn't currently "open", the same
+    guard complete_personal_task applies (including the same distinct
+    "already done" message). Returns {"ok": True, "error": None,
+    "warning": str|None, "comments_posted_this_call": bool} on success, or
+    {"ok": False, "error": str} on failure; never raises.
+
+    Guarded by _begin_personal_task_action/_end_personal_task_action --
+    the same single non-reentrant guard complete_personal_task and
+    promote_personal_task use, which is exactly why this function calls
+    _solve_personal_task_ticket directly rather than complete_personal_task
+    itself (see that helper's docstring)."""
+    if not _begin_personal_task_action(local_id):
+        return {"ok": False, "error": "This task is already being solved -- please wait a moment and refresh."}
+
+    try:
+        data = load_personal_tasks()
+        entry = data.get(local_id)
+        if entry is None:
+            return {"ok": False, "error": "No such task."}
+        if entry.get("status") != "open":
+            if entry.get("status") == "done":
+                return {"ok": False, "error": "This task has already been marked done."}
+            return {"ok": False, "error": "This task doesn't have a Zendesk ticket yet -- create one first."}
+
+        resolved_est_mins, est_mins_error = _resolve_est_mins_for_solve(entry, est_mins)
+        if est_mins_error:
+            return {"ok": False, "error": est_mins_error}
+
+        ticket_id = entry["ticket_id"]
+        note_already_posted = bool(entry.get("intake_note_posted"))
+        reply_already_posted = bool(entry.get("intake_reply_posted"))
+        note_posted_now = False
+        reply_posted_now = False
+        comment_warning = None
+        try:
+            if not note_already_posted:
+                client.post_comment(ticket_id, PERSONAL_TASK_RECEIVED_NOTE, public=False)
+                note_posted_now = True
+            if not reply_already_posted:
+                client.post_comment(ticket_id, PERSONAL_TASK_RECEIVED_REPLY, public=True)
+                reply_posted_now = True
+        except Exception as exc:
+            log_fn(f"quick_solve_personal_task({local_id}): intake note/reply on #{ticket_id} failed: {exc}")
+            comment_warning = "the ticket was solved, but the automatic internal note/reply may not have posted -- check the ticket directly"
+
+        if note_posted_now or reply_posted_now:
+            # Recorded right away, before the solve call below even runs --
+            # if update_ticket then fails, a retry must not re-post
+            # whichever of these just succeeded.
+            def _mark_posted(data):
+                target = data.get(local_id)
+                if target is not None:
+                    if note_posted_now:
+                        target["intake_note_posted"] = True
+                    if reply_posted_now:
+                        target["intake_reply_posted"] = True
+
+            update_personal_tasks(_mark_posted)
+
+        result = _solve_personal_task_ticket(client, local_id, dict(entry, est_mins=resolved_est_mins), log_fn=log_fn)
+        if not result["ok"]:
+            return result
+
+        result["warning"] = comment_warning
+        result["comments_posted_this_call"] = note_posted_now or reply_posted_now
+        return result
+    finally:
+        _end_personal_task_action(local_id)
+
+
+def reconcile_personal_tasks(client, log_fn=print) -> None:
+    """Catches the one case complete_personal_task() above can't: a
+    promoted task's ticket solved or closed directly in Zendesk (or by any
+    other means) rather than via this page's own "Mark done"/"Quick Solve"
+    buttons, which would otherwise leave a stale "open" entry sitting in
+    the /tasks list forever. Called once per /tasks page load -- a handful
+    of open tasks at most (this is a personal to-do list, not a queue), so
+    a get_ticket() per entry stays cheap. Fails per-ticket, not per-pass,
+    mirroring recheck_pending_for_assignment()'s posture above: one
+    ticket's lookup erroring leaves that entry untouched rather than
+    discarding the whole reconcile pass. Drafts (no ticket_id yet) are
+    skipped entirely -- there's nothing in Zendesk to check. Also archives
+    old completed tasks (see archive_old_personal_tasks) at the end of the
+    same pass, since this already runs on every /tasks page load and needs
+    no Zendesk call to do it.
+
+    Deliberately does its get_ticket() calls on a plain unlocked read
+    first, and only takes update_personal_tasks' exclusive file lock
+    afterward for the (fast, no-network) write -- NOT the other way
+    around. An earlier version ran every get_ticket() call from inside the
+    update_personal_tasks _mutate callback itself, which meant the file
+    lock stayed held for the full duration of every one of those live
+    Zendesk round trips. Since this runs on every single /tasks page load
+    (unlike the 2-minute cron cadence recheck_pending_for_assignment()
+    above has the luxury of), that meant simply loading /tasks with a slow
+    Zendesk connection could block someone else's add/edit/discard/
+    promote/complete/quick-solve click for however long every open task's
+    lookup took, combined. Splitting the network reads and the write into
+    two passes (re-checking each entry's status is STILL "open" right
+    before flipping it, in case something else already moved it in the
+    meantime) keeps the exclusive lock held only for the quick in-memory
+    part, same posture as every other action in this file that touches
+    live Zendesk."""
+    data = load_personal_tasks()
+    newly_solved_local_ids = []
+    for local_id, entry in data.items():
+        if entry.get("status") != "open":
+            continue
+        ticket_id = entry.get("ticket_id")
+        try:
+            ticket = client.get_ticket(int(ticket_id))
+        except Exception as exc:
+            log_fn(f"reconcile_personal_tasks(#{ticket_id}): get_ticket failed ({exc}) -- leaving as-is")
+            continue
+        if ticket.get("status") in ("solved", "closed"):
+            newly_solved_local_ids.append(local_id)
+
+    if newly_solved_local_ids:
+        def _mutate(data):
+            for local_id in newly_solved_local_ids:
+                entry = data.get(local_id)
+                # Re-checked fresh, under the lock, rather than trusting
+                # the unlocked read above -- a Quick Solve/Mark done click
+                # (or a second reconcile pass) could have already moved
+                # this entry off "open" in the meantime; only flip it if
+                # it's STILL exactly the state this decision was based on.
+                if entry is not None and entry.get("status") == "open":
+                    entry["status"] = "done"
+                    entry["completed_at"] = datetime.now().isoformat(timespec="seconds")
+
+        update_personal_tasks(_mutate)
+    archive_old_personal_tasks(log_fn=log_fn)
+
+
+def archive_old_personal_tasks(after_days: int = ARCHIVE_AFTER_DAYS, log_fn=print) -> int:
+    """Moves personal_tasks.json entries with status "done" whose
+    completed_at is older than after_days into
+    personal_tasks_archive.json (see _archive_terminal_entries for the
+    shared mechanics). Never touches a "draft" or "open" entry regardless
+    of age -- only a task that's actually finished is eligible."""
+    def is_archivable(entry):
+        return entry.get("status") == "done"
+
+    def entry_timestamp(entry):
+        return entry.get("completed_at") or entry.get("created_at")
+
+    count = _archive_terminal_entries(
+        PERSONAL_TASKS_FILE, PERSONAL_TASKS_ARCHIVE_FILE, _personal_tasks_lock, is_archivable, entry_timestamp, after_days, log_fn=log_fn,
+    )
+    if count:
+        log_fn(f"Archived {count} completed personal task(s) from personal_tasks.json (older than {after_days} days).")
+    return count
+
+
+# --- SLA metrics summary page (reads sla-report-slack's own data) -----
+# Pure read of another tool's already-computed output -- no Zendesk calls,
+# no SLA-breach math of our own. Freshness is bounded by whatever this Mac
+# last `git pull`-ed of that sibling repo, since its own update runs in
+# GitHub Actions, not locally; see "stale_days" below, which the /sla page
+# uses to say so plainly rather than imply the numbers are live.
+
+
+def _sla_trend(entries: list, key: str):
+    """Compares the rolling 7-day average of `key` to the preceding 7 days
+    -- the same week-over-week comparison sla-report-slack's own email
+    already shows (see its README's "History & trend tracking" section),
+    read from the same file rather than recomputed independently. Returns
+    None until there are at least 14 daily snapshots to compare two full
+    windows (sla-report-slack's own email gates its trend block at 8 days,
+    since it only needs one full week plus one prior day; this needs a
+    full second week, hence 14)."""
+    if len(entries) < 14:
+        return None
+    recent = entries[-7:]
+    prior = entries[-14:-7]
+    recent_avg = sum((e.get(key) or 0) for e in recent) / 7
+    prior_avg = sum((e.get(key) or 0) for e in prior) / 7
+    if prior_avg == 0:
+        pct_change = None if recent_avg == 0 else 100.0
+    else:
+        pct_change = ((recent_avg - prior_avg) / prior_avg) * 100
+    return {"recent_avg": recent_avg, "prior_avg": prior_avg, "pct_change": pct_change}
+
+
+def _load_sla_entries(log_fn=print):
+    """Shared read+parse+sort step for every /sla data function -- both
+    load_sla_summary and load_sla_agent_series need "the sorted list of
+    daily snapshots from the sibling repo's history file," and previously
+    only the former had this logic; factored out here so a second copy
+    of the same missing-file/malformed-file handling couldn't quietly
+    drift from the first the way this project's already been burned by
+    duplicated logic before.
+
+    Returns (entries, error): entries is a date-sorted list on success
+    (error is None); on any failure entries is None and error is a
+    human-readable string explaining why, ready to hand back as-is in an
+    "available": False response."""
+    if not SLA_HISTORY_PATH.exists():
+        return None, (
+            f"No sla_history.json found at {SLA_HISTORY_PATH} -- "
+            "has the sla-report-slack repo been checked out as a sibling "
+            "folder next to this one, and has it run at least once?"
+        )
+    try:
+        entries = json.loads(SLA_HISTORY_PATH.read_text())
+        if not isinstance(entries, list) or not entries:
+            raise ValueError("file does not contain a non-empty JSON list")
+    except Exception as exc:
+        log_fn(f"_load_sla_entries: failed to read/parse {SLA_HISTORY_PATH} ({exc})")
+        return None, f"Could not read sla_history.json ({exc})."
+    return sorted(entries, key=lambda e: e.get("date", "")), None
+
+
+def load_sla_summary(log_fn=print) -> dict:
+    """Reads the sibling sla-report-slack repo's data/sla_history.json and
+    returns everything the /sla page needs. Always returns a dict and never
+    raises -- "available" is False (with "error" explaining why) if the
+    file is missing, unreadable, malformed, or empty, so a page render
+    never breaks just because that repo hasn't been cloned as a sibling
+    folder yet, or hasn't run there.
+
+    On success, returns:
+      latest        -- the most recent daily snapshot dict, as-is from
+                        sla_history.json (total, breached, due_soon,
+                        on_track, compliance_pct, breached_ids, rules, ...)
+      history_days   -- how many daily snapshots are in the file
+      stale_days     -- days between the latest snapshot's date and today
+                        on this Mac (None if the date couldn't be parsed)
+      trend          -- {"breached": ..., "due_soon": ..., "total": ...},
+                        each either a _sla_trend() dict or None
+      dashboard_path -- absolute path to sla_dashboard.html (for a file://
+                        link out to the full multi-chart dashboard)
+      dashboard_exists -- whether that file actually exists
+    """
+    entries, error = _load_sla_entries(log_fn=log_fn)
+    if entries is None:
+        return {"available": False, "error": error}
+
+    latest = entries[-1]
+
+    stale_days = None
+    try:
+        latest_date = datetime.strptime(latest["date"], "%Y-%m-%d").date()
+        stale_days = (datetime.now().date() - latest_date).days
+    except Exception:
+        pass
+
+    return {
+        "available": True,
+        "error": None,
+        "latest": latest,
+        "history_days": len(entries),
+        "stale_days": stale_days,
+        "trend": {
+            "breached": _sla_trend(entries, "breached"),
+            "due_soon": _sla_trend(entries, "due_soon"),
+            "total": _sla_trend(entries, "total"),
+        },
+        "dashboard_path": str(SLA_DASHBOARD_PATH),
+        "dashboard_exists": SLA_DASHBOARD_PATH.exists(),
+    }
+
+
+SLA_AGENT_RANGE_OPTIONS = [7, 14, 30, 90]  # pill choices on the /sla page's
+# date-range selector, plus an implicit "All" -- see load_sla_agent_series's
+# `days` param and _render_sla_page's range-pill row. Kept as one shared
+# list so the server route (parsing ?range=) and the page's rendered pills
+# can't quietly drift out of sync with each other.
+
+
+def load_sla_agent_series(agent_name: str = None, days: int = None, log_fn=print) -> dict:
+    """The personal counterpart to load_sla_summary: a day-by-day series of
+    just one agent's own reply activity and solved-ticket counts, for the
+    /sla page's "Your activity" charts -- everything else on that page
+    (queue health, violations by rule) stays team-wide because
+    sla_history.json has no historical record of which agent a breached or
+    due-soon ticket was assigned to on a given day, only the two fields
+    this function reads (agent_activity, solved_by_agent), which ARE
+    already recorded per-agent per-day. Reusing that existing data here
+    rather than inventing a new per-agent history file mirrors the same
+    "read what's already computed" principle load_sla_summary follows.
+
+    Defaults to SLA_AGENT_NAME (this tool's one actual user) if agent_name
+    isn't passed. Always returns a dict, never raises.
+
+    `days`, if given, limits the series to the most recent N daily
+    snapshots (via a plain list slice) -- this is the /sla page's date-range
+    selector. None (the default) returns the full history, same as before
+    this parameter existed. Asking for more days than actually exist just
+    returns everything available (a slice never errors on an out-of-range
+    length), so a "90" pill against 15 days of real history quietly behaves
+    like "All" rather than failing.
+
+    On success, returns:
+      agent_name -- who this series is for
+      days_requested -- the `days` argument as passed (None if unset),
+                    echoed back so the caller can render which range pill
+                    is "active" without re-threading its own copy of it.
+      dates      -- ISO date strings, oldest first, already sliced to the
+                    requested range
+      public     -- public-reply counts per date (int)
+      internal   -- internal-comment counts per date (int)
+      solved     -- solved-ticket counts per date (int)
+      tracked    -- per-date bool: whether that day's snapshot actually
+                    recorded agent_activity data at all. A handful of the
+                    most recent runs in practice haven't (see README) --
+                    those days render as explicitly "not tracked" rather
+                    than a misleading "0 activity," since the two aren't
+                    the same claim.
+      total_public / total_internal / total_solved -- sums over the
+                    (possibly range-limited) series shown, for a quick
+                    one-line summary above the charts.
+      history_days_total -- how many daily snapshots exist in the file in
+                    total, regardless of the requested range -- lets the
+                    page say "showing the last 30 of 90 days" accurately
+                    when a range is narrower than the full history.
+    """
+    name = agent_name or SLA_AGENT_NAME
+    entries, error = _load_sla_entries(log_fn=log_fn)
+    if entries is None:
+        return {"available": False, "error": error}
+
+    history_days_total = len(entries)
+    if days:
+        entries = entries[-days:]
+
+    dates, public, internal, solved, tracked = [], [], [], [], []
+    for e in entries:
+        dates.append(e.get("date", "?"))
+        activity = e.get("agent_activity")
+        this_day_tracked = isinstance(activity, dict)
+        tracked.append(this_day_tracked)
+        agent_activity = (activity or {}).get(name) or {}
+        public.append(int(agent_activity.get("public") or 0))
+        internal.append(int(agent_activity.get("internal") or 0))
+        solved_map = e.get("solved_by_agent")
+        solved.append(int((solved_map or {}).get(name) or 0))
+
+    return {
+        "available": True,
+        "error": None,
+        "agent_name": name,
+        "days_requested": days,
+        "history_days_total": history_days_total,
+        "dates": dates,
+        "public": public,
+        "internal": internal,
+        "solved": solved,
+        "tracked": tracked,
+        "total_public": sum(public),
+        "total_internal": sum(internal),
+        "total_solved": sum(solved),
+    }

@@ -36,6 +36,7 @@ manual refresh button deliberately does NOT respect business hours -- if
 you're clicking it, you already want a scan right now.)
 """
 
+import json
 import os
 import shutil
 import subprocess
@@ -46,8 +47,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _common  # noqa: E402
 
-BUSINESS_HOURS = range(9, 17)  # 9am - 4pm local, last check starts at 4pm
-BUSINESS_WEEKDAYS = range(0, 5)  # Mon=0 ... Fri=4
+# Business hours (and in_business_hours()) live in _common.py now, shared
+# with review_server.py's "next automatic check" estimate on the review page
+# -- two copies of "what counts as business hours" is exactly the kind of
+# drift that caused the launchd OAuth-path bug earlier in this project.
 
 LOG_FILE = _common.OUTPUT_DIR / "first_reply_check.log"
 
@@ -61,14 +64,32 @@ MAX_SUBJECTS_IN_NOTIFICATION = 3
 # someone change without touching code.
 NEW_TICKET_SOUND = os.getenv("ZENDESK_NOTIFICATION_SOUND", "Glass").strip() or None
 
-# Same logo shown on the review page (see review_server.py's LOGO_PATH),
-# reused here as the notification's icon. terminal-notifier's -appIcon wants
-# a URL rather than a bare path, hence as_uri() -- a file:// URL always
-# parses the same way regardless of terminal-notifier's version. None if the
-# asset is missing, so a notification never breaks just because the logo
-# didn't make it into this checkout.
-LOGO_PATH = Path(__file__).resolve().parent / "assets" / "csa-logo.png"
-LOGO_URI = LOGO_PATH.as_uri() if LOGO_PATH.exists() else None
+# A custom notification icon (the CSA logo, via terminal-notifier's -appIcon)
+# was tried and dropped: modern macOS (Catalina+) largely ignores -appIcon
+# for security reasons -- it stops CLI tools from spoofing which app a
+# notification claims to be from -- so it silently showed terminal-notifier's
+# own icon regardless. Instead, every notification's title is prefixed "CSA"
+# below so it's still identifiable at a glance in Notification Center.
+NOTIFICATION_PREFIX = "CSA"
+
+# Optional third notification path: a small Automator "Application" (see
+# README's "Notification helper app" section for the one-time setup) that
+# reads its text from NOTIFY_PAYLOAD_FILE below and calls AppleScript's
+# `display notification` from inside its own real, Launch-Services-registered
+# .app process. This exists because terminal-notifier and plain osascript
+# (both above/below) turned out to be silently dropped by macOS specifically
+# when triggered by launchd with no interactive parent -- both report a
+# clean, successful exit, but no banner ever appears, and neither shows up as
+# an entry in System Settings > Notifications for that headless invocation
+# at all. A genuine .app bundle gets its own row in that list regardless of
+# what launched it, which a raw CLI binary apparently doesn't on this Mac.
+# Entirely optional: if the app hasn't been set up at this path, this step is
+# skipped without logging, since it's an opt-in extra layer, not a
+# requirement for the other two paths above.
+NOTIFIER_APP_PATH = os.getenv(
+    "ZENDESK_NOTIFIER_APP_PATH", str(Path.home() / "Applications" / "CSA Notifier.app")
+)
+NOTIFY_PAYLOAD_FILE = _common.OUTPUT_DIR / "notify_payload.json"
 
 
 def log(msg: str) -> None:
@@ -78,73 +99,109 @@ def log(msg: str) -> None:
         f.write(line + "\n")
 
 
-def in_business_hours() -> bool:
-    now = datetime.now()
-    return now.weekday() in BUSINESS_WEEKDAYS and now.hour in BUSINESS_HOURS
-
-
 def notify(title: str, message: str, sound: str | None = None) -> None:
-    """Native macOS notification. Uses terminal-notifier (if installed) so
-    clicking the banner jumps straight to the review page; falls back to a
-    plain osascript banner (no click-through) otherwise, with the review URL
-    folded into the message text so it's still just a copy-paste away.
-    Install terminal-notifier via `brew install terminal-notifier` to get the
-    click-through behavior.
+    """Native macOS notification -- fires through BOTH terminal-notifier (if
+    installed) AND osascript's `display notification`, rather than picking
+    whichever one shutil.which() happens to find first.
+
+    Why both: this project hit a real case where a terminal-notifier
+    command run interactively in Terminal produced a visible banner, but
+    the exact same binary invoked headlessly by launchd (no Terminal
+    window, no interactive session) did not -- with no error surfaced
+    either way, since macOS's per-process notification permissioning can
+    silently drop a send it doesn't recognize as approved instead of
+    failing loudly. Rather than keep guessing which single delivery path
+    this Mac's launchd context will actually let through, both fire every
+    time. Worst case if both work: one harmless duplicate banner. Worst
+    case if only one path is actually permitted here: total silence, which
+    is exactly the failure mode this is meant to rule out.
+
+    Click-through (the banner jumping straight to the review page) is only
+    available via terminal-notifier's -open flag; the osascript banner has
+    no equivalent, so its message folds the review URL into the text
+    instead.
 
     Pass `sound` as a macOS system sound name (e.g. "Glass") to play an
-    audible alert alongside the visual banner -- both terminal-notifier's
-    -sound flag and osascript's `sound name` clause support this the same
-    way. Leave it None (the default) for a silent notification, same as
-    before this was added -- not every notification here should necessarily
-    make noise (see NEW_TICKET_SOUND's usage below vs. the failure-alert
-    call sites, which stay silent for now).
+    audible alert alongside the visual banner -- both mechanisms support
+    this. Leave it None for a silent notification (see NEW_TICKET_SOUND's
+    usage below vs. the two failure-alert call sites, which stay silent).
 
-    The notification's icon uses the CSA logo (LOGO_URI above) via
-    terminal-notifier's -appIcon flag -- but ONLY when terminal-notifier is
-    the one delivering it. AppleScript's `display notification` command (the
-    fallback path) has no icon parameter at all; a notification sent that way
-    always shows Script Editor's/System Events' own icon, and there's no way
-    to override that short of terminal-notifier. That's one more reason
-    `brew install terminal-notifier` is worth doing, on top of click-through."""
+    `title` is expected to already carry the NOTIFICATION_PREFIX (see call
+    sites below) -- notify() itself stays agnostic about branding.
+
+    Every attempt's exit code and stderr get logged, not just Python-level
+    exceptions -- the previous version only caught exceptions around
+    subprocess.run, so a real but non-zero exit (e.g. notification
+    permission denied) from either tool was invisible in the log. If
+    notifications are still silent after this change, the log is the next
+    place to look.
+
+    A third path also fires if the optional helper .app (NOTIFIER_APP_PATH)
+    has been set up -- see the README's "Notification helper app" section.
+    That one exists precisely because, on this Mac, BOTH mechanisms above
+    turned out to exit cleanly (returncode 0, nothing in stderr) while
+    triggered via launchd, yet displayed no banner at all -- confirmed by
+    directly comparing an interactive-Terminal run (worked) against a
+    `launchctl submit` run of the identical command (silent)."""
     notifier = shutil.which("terminal-notifier")
-    try:
-        if notifier:
+
+    if notifier:
+        try:
             cmd = [notifier, "-title", title, "-message", message, "-open", _common.REVIEW_SERVER_URL]
             if sound:
                 cmd += ["-sound", sound]
-            if LOGO_URI:
-                cmd += ["-appIcon", LOGO_URI]
-            subprocess.run(cmd, check=False, timeout=10)
-        else:
-            safe_message = f"{message} -- review at {_common.REVIEW_SERVER_URL}".replace('"', '\\"')
-            safe_title = title.replace('"', '\\"')
-            script = f'display notification "{safe_message}" with title "{safe_title}"'
-            if sound:
-                safe_sound = sound.replace('"', '\\"')
-                script += f' sound name "{safe_sound}"'
-            subprocess.run(["osascript", "-e", script], check=False, timeout=10)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            if result.returncode != 0:
+                log(f"terminal-notifier exited {result.returncode}: {result.stderr.strip()}")
+        except Exception as exc:
+            log(f"terminal-notifier notify() failed (non-fatal): {exc}")
+
+    try:
+        safe_message = f"{message} -- review at {_common.REVIEW_SERVER_URL}".replace('"', '\\"')
+        safe_title = title.replace('"', '\\"')
+        script = f'display notification "{safe_message}" with title "{safe_title}"'
+        if sound:
+            safe_sound = sound.replace('"', '\\"')
+            script += f' sound name "{safe_sound}"'
+        result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=10)
+        if result.returncode != 0:
+            log(f"osascript exited {result.returncode}: {result.stderr.strip()}")
     except Exception as exc:
-        log(f"notify() failed (non-fatal): {exc}")
+        log(f"osascript notify() failed (non-fatal): {exc}")
+
+    notifier_app = Path(NOTIFIER_APP_PATH)
+    if notifier_app.exists():
+        try:
+            NOTIFY_PAYLOAD_FILE.write_text(
+                json.dumps({"title": title, "message": message, "sound": sound or ""})
+            )
+            result = subprocess.run(
+                ["open", "-a", str(notifier_app)], capture_output=True, text=True, timeout=10
+            )
+            if result.returncode != 0:
+                log(f"CSA Notifier.app exited {result.returncode}: {result.stderr.strip()}")
+        except Exception as exc:
+            log(f"CSA Notifier.app notify() failed (non-fatal): {exc}")
 
 
-def format_new_ticket_lines(new_items: list) -> str:
-    """Build the notification body from the actual tickets, not just a count
-    -- one line per ticket (id + shortened subject), capped so a big batch
-    doesn't produce an unreadable wall of text."""
+def _format_ticket_lines(items: list) -> str:
+    """Shared formatter for both "new ticket" and "already handled elsewhere"
+    notification bodies -- one line per ticket (id + shortened subject),
+    capped so a big batch doesn't produce an unreadable wall of text."""
     lines = []
-    for item in new_items[:MAX_SUBJECTS_IN_NOTIFICATION]:
+    for item in items[:MAX_SUBJECTS_IN_NOTIFICATION]:
         subject = _common.shorten_subject(item["subject"])
         if len(subject) > 60:
             subject = subject[:57] + "..."
         lines.append(f"#{item['ticket_id']} -- {subject}")
-    remaining = len(new_items) - len(lines)
+    remaining = len(items) - len(lines)
     if remaining > 0:
         lines.append(f"+{remaining} more")
     return "\n".join(lines)
 
 
 def main() -> None:
-    if not in_business_hours():
+    if not _common.in_business_hours():
         log("Outside business hours (Mon-Fri 9am-4pm local) -- skipping this run.")
         return
 
@@ -175,7 +232,7 @@ def _run_check() -> None:
         _common.mark_auth_broken(reason)
         if _common.should_notify_failure():
             notify(
-                "Zendesk IT-Ops check needs attention",
+                f"{NOTIFICATION_PREFIX} Zendesk IT-Ops check needs attention",
                 f"Not authenticated -- reconnect at {_common.REVIEW_SERVER_URL}reconnect. "
                 "(This won't notify again for an hour.)",
             )
@@ -183,12 +240,12 @@ def _run_check() -> None:
         return
 
     try:
-        candidates, new_items = _common.scan_and_merge(client, log_fn=log)
+        candidates, new_items, handled_elsewhere = _common.scan_and_merge(client, log_fn=log)
     except Exception as exc:
         log(f"Check failed: {exc}")
         if _common.should_notify_failure():
             notify(
-                "Zendesk IT-Ops check needs attention",
+                f"{NOTIFICATION_PREFIX} Zendesk IT-Ops check needs attention",
                 f"Scan failed: {exc} (This won't notify again for an hour.)",
             )
             _common.mark_failure_notified()
@@ -199,6 +256,23 @@ def _run_check() -> None:
     # silently waiting out a throttle window left over from an old problem.
     _common.clear_failure_notified()
     _common.mark_auth_ok()
+
+    # Checked (and notified) BEFORE the `if not candidates: return` below --
+    # find_candidates() deliberately excludes tickets someone else already
+    # replied to, so it's entirely possible for `candidates` to be empty on
+    # a run that still found pending tickets to pull out of the queue. Early
+    # -returning before this would silently skip telling you about exactly
+    # the race this feature exists to catch.
+    if handled_elsewhere:
+        handled_ids = ", ".join(f"#{i['ticket_id']}" for i in handled_elsewhere)
+        log(
+            f"{len(handled_elsewhere)} pending ticket(s) already got a reply from someone else -- "
+            f"pulled from the queue: {handled_ids}"
+        )
+        notify(
+            f"{NOTIFICATION_PREFIX} Zendesk IT-Ops: {len(handled_elsewhere)} ticket(s) already handled elsewhere",
+            _format_ticket_lines(handled_elsewhere),
+        )
 
     if not candidates:
         log("No candidates found.")
@@ -213,8 +287,8 @@ def _run_check() -> None:
 
     if new_items:
         notify(
-            f"Zendesk IT-Ops: {len(new_items)} new ticket(s) awaiting a reply",
-            format_new_ticket_lines(new_items),
+            f"{NOTIFICATION_PREFIX} Zendesk IT-Ops: {len(new_items)} new ticket(s) awaiting a reply",
+            _format_ticket_lines(new_items),
             sound=NEW_TICKET_SOUND,
         )
     # A ticket already in the pending queue doesn't re-notify every run --

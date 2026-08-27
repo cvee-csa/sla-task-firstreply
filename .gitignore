@@ -10,6 +10,7 @@ scripts/output/
 # Python
 __pycache__/
 *.py[oc]
+.pytest_cache/
 
 # Editors
 .idea/
