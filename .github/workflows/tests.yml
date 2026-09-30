@@ -1,0 +1,33 @@
+name: Tests
+
+# Runs the pure-Python suite under scripts/tests/ on every push and every
+# pull request. Deliberately does NOT need real Zendesk credentials, a
+# network connection, or a checkout of the sibling zendesk-mcp-server repo
+# -- scripts/tests/conftest.py puts a trivial stand-in
+# (scripts/tests/stub_pkg/) on sys.path in place of the real
+# zendesk_mcp_server package, and every test that needs a "client" builds
+# its own small fake one. See the README's "Running tests" section for the
+# same invocation run locally.
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # Matches the Python 3 this project actually runs under on the
+          # Mac it's deployed to (review_server.py/first_reply_check.py's
+          # own launchd plists) -- pinned so "passes in CI" and "passes on
+          # the machine that actually runs this" mean the same thing.
+          python-version: "3.10"
+
+      - name: Install test dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run tests
+        run: python3 -m pytest scripts/tests/ -v

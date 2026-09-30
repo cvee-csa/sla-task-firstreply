@@ -291,6 +291,34 @@ def _run_check() -> None:
             _format_ticket_lines(new_items),
             sound=NEW_TICKET_SOUND,
         )
+        # This notification is exactly what's about to get you to click
+        # through to the review page RIGHT NOW -- and /firstreply's one
+        # live Zendesk call (the "Recently worked on" sidebar, see
+        # _common.fetch_recently_worked_on) is a synchronous scan: up to
+        # WORKED_ON_SCAN_PAGES pages of get_tickets() plus a
+        # get_ticket_comments() round trip for every not-already-known
+        # ticket found (up to WORKED_ON_COMMENT_CHECK_LIMIT), each a real
+        # Zendesk API call. That cache is time-based (WORKED_ON_CACHE_TTL_
+        # SECONDS, 120s) with no awareness of when a new ticket shows up,
+        # so whichever page load happens to land after it's gone cold
+        # pays that scan synchronously -- and the whole point of this
+        # notification is to make THIS the load that happens next. A
+        # timed test of this exact scan (35 not-already-known tickets,
+        # ~150ms/call) measured 5.5+ seconds cold vs instant once warm --
+        # this is not a hypothetical slowdown.
+        #
+        # Warming it here, on the same tick that's about to prompt you to
+        # open the page, means it's already warm by the time you actually
+        # click through, instead of you eating that scan on page load.
+        # force=False on purpose: if it's somehow already fresh (e.g. the
+        # page is already open somewhere with auto-refresh running), this
+        # is a free no-op rather than a redundant scan.
+        try:
+            _common.fetch_recently_worked_on(client, log_fn=log)
+        except Exception as exc:
+            # Non-fatal -- worst case /firstreply just does its own cold
+            # scan when visited, exactly like before this existed.
+            log(f"Pre-warming the 'recently worked on' cache failed (non-fatal): {exc}")
     # A ticket already in the pending queue doesn't re-notify every run --
     # it stays visible on the review page until you post it (publicly or as
     # an internal comment), so the notification's job is just "something new

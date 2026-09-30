@@ -43,7 +43,7 @@ BIND_HOST = "127.0.0.1"  # do not change to 0.0.0.0 -- see module docstring
 # without you needing to hit the browser's reload button. This is purely a
 # local re-render of whatever's already in pending_drafts.json -- it does
 # NOT trigger a new Zendesk scan itself (that stays on the cron's own
-# schedule, or the explicit "Refresh from Zendesk now" button).
+# schedule, or the explicit "Refresh data" button).
 AUTO_REFRESH_SECONDS = 60
 
 LOGO_PATH = Path(__file__).resolve().parent / "assets" / "csa-logo.png"
@@ -106,20 +106,25 @@ LOGO_B68FBF_DATA_URI = _load_logo_b68fbf_data_uri()
 # B68FBF is the one exception to "reads the same in every theme" -- see
 # _TOPIC_ICON_FILES_B68FBF right below.
 _TOPIC_ICON_FILES = {
-    "sla": "stopwatch-csa-blue.png",
     "tasks": "checklist-csa-blue.png",
     "security": "shield-checkmark-csa-blue.png",
     "flagged": "conversation-csa-blue.png",
     "reconnect": "key-csa-blue.png",
     "breach": "error-csa-blue.png",
+    # Same checkmark badge as "solved" below -- own key rather than reusing
+    # that one directly, since "a blocked/flagged issue cleared" and "a
+    # ticket got solved" are different things that happen to share the same
+    # glyph; keeping them as separate keys means either one's file can
+    # change independently later without silently affecting the other page.
     "breach-clear": "checkmark-csa-blue.png",
-    # Same checkmark badge as "breach-clear" -- own key rather than reusing
-    # that one directly, since "an SLA breach cleared" and "a ticket got
-    # solved" are different things that happen to share the same glyph;
-    # keeping them as separate keys means either one's file can change
-    # independently later without silently affecting the other page too.
     "solved": "checkmark-csa-blue.png",
     "priority-alert": "error-white.png",
+    # Was already sitting in assets/topic-icons/ unused -- a stopwatch
+    # reads naturally as "time-based tracking," which is exactly what the
+    # /sla page's four business-hours thresholds are about, distinct from
+    # "breach"/"breach-clear" above (a specific rule's own violation
+    # state, not the page's general topic).
+    "sla": "stopwatch-csa-blue.png",
 }
 
 # B68FBF-only recolor of the same badges (see recolor_topic_icons.py) -- each
@@ -133,7 +138,6 @@ _TOPIC_ICON_FILES = {
 # own themed fill), so it always falls back to rendering just its one
 # default image -- see _topic_icon below.
 _TOPIC_ICON_FILES_B68FBF = {
-    "sla": "stopwatch-b68fbf.png",
     "tasks": "checklist-b68fbf.png",
     "security": "shield-checkmark-b68fbf.png",
     "flagged": "conversation-b68fbf.png",
@@ -141,6 +145,7 @@ _TOPIC_ICON_FILES_B68FBF = {
     "breach": "error-b68fbf.png",
     "breach-clear": "checkmark-b68fbf.png",
     "solved": "checkmark-b68fbf.png",
+    "sla": "stopwatch-b68fbf.png",
 }
 
 
@@ -170,7 +175,7 @@ def _topic_icon(key: str, css_class: str = "topic-icon", alt: str = "") -> str:
     file didn't make it into this checkout. alt defaults to "" (purely
     decorative, redundant with the visible heading/label text right next
     to it) rather than describing the icon itself, so a screen reader
-    doesn't announce e.g. "stopwatch" immediately before "SLA metrics".
+    doesn't announce e.g. "checklist" immediately before "Tasks".
 
     When a B68FBF-recolored variant exists for this key, BOTH the default
     and the B68FBF <img> are rendered (classes `topic-icon-default` /
@@ -196,93 +201,6 @@ def _topic_icon(key: str, css_class: str = "topic-icon", alt: str = "") -> str:
 
 def _log(msg: str) -> None:
     print(f"{datetime.now().isoformat(timespec='seconds')}  {msg}", flush=True)
-
-
-# --- /sla "Run full refresh" background state -------------------------
-# trigger_sla_report_workflow (in _common.py) can take up to
-# SLA_WORKFLOW_TRIGGER_TIMEOUT_SECONDS (4 minutes) -- previously the POST
-# handler just blocked the whole request for that entire wait, with the
-# button's own JS-set "Running…" label frozen the whole time and zero
-# actual feedback (this server is threaded, so blocking one request was
-# harmless to every other tab, but gave whoever clicked it nothing to look
-# at for up to 4 minutes). This module-level state, updated from a
-# background thread, plus a small poller on the /sla page (see
-# _sla_trigger_status_html) gives real incremental status instead: the
-# click returns immediately with "started", and the page updates on its
-# own once the background run actually finishes.
-_sla_trigger_lock = threading.Lock()
-_sla_trigger_state = {"status": "idle", "message": "", "started_at": None, "updated_at": None}
-
-
-def _start_sla_trigger() -> str:
-    """Kicks off Run full refresh in a background thread rather than
-    blocking the request. Returns immediately with a banner message; the
-    actual dispatch-wait-pull cycle (trigger_sla_report_workflow) runs on
-    its own thread and updates _sla_trigger_state as it goes, polled by
-    the page via /sla/trigger-status (see do_GET)."""
-    with _sla_trigger_lock:
-        if _sla_trigger_state["status"] == "running":
-            return "A full refresh is already running -- see the status below."
-        now = datetime.now().isoformat(timespec="seconds")
-        _sla_trigger_state["status"] = "running"
-        _sla_trigger_state["message"] = ""
-        _sla_trigger_state["started_at"] = now
-        _sla_trigger_state["updated_at"] = now
-
-    def _run():
-        result = _common.trigger_sla_report_workflow(log_fn=_log)
-        if result["ok"]:
-            message = (
-                "Full refresh complete -- ran the workflow on GitHub and pulled its new snapshot."
-                if result["changed"] else
-                "Full refresh complete, but nothing changed in the data -- the workflow ran but produced the same snapshot as before."
-            )
-        else:
-            message = f"Full refresh didn't finish cleanly: {result['error']}"
-        with _sla_trigger_lock:
-            _sla_trigger_state["status"] = "done" if result["ok"] else "error"
-            _sla_trigger_state["message"] = message
-            _sla_trigger_state["updated_at"] = datetime.now().isoformat(timespec="seconds")
-
-    threading.Thread(target=_run, daemon=True, name="sla-trigger").start()
-    return "Full refresh started in the background -- this can take a few minutes; the status below updates on its own."
-
-
-def _sla_trigger_status_html() -> str:
-    """A small status line under the /sla page's refresh buttons, shown
-    only once a Run full refresh has actually been started this process
-    lifetime (idle -- the common case -- renders nothing, same as before
-    this existed). While running, a tiny inline script polls
-    /sla/trigger-status every few seconds and updates the text in place;
-    once it sees the status leave "running", it reloads the whole page so
-    the newly-pulled numbers actually show up without a manual refresh."""
-    with _sla_trigger_lock:
-        state = dict(_sla_trigger_state)
-    if state["status"] == "idle":
-        return ""
-    label = {
-        "running": "Full refresh running in the background…",
-        "done": state["message"] or "Full refresh complete.",
-        "error": state["message"] or "Full refresh didn't finish cleanly.",
-    }.get(state["status"], "")
-    return f"""
-<p class="meta" id="sla-trigger-status" data-status="{html.escape(state['status'])}">{html.escape(label)}</p>
-<script>
-(function() {{
-  var el = document.getElementById('sla-trigger-status');
-  if (!el || el.dataset.status !== 'running') return;
-  var poll = setInterval(function() {{
-    fetch('/sla/trigger-status').then(function(r) {{ return r.json(); }}).then(function(data) {{
-      if (data.status === 'running') {{
-        el.textContent = 'Full refresh running in the background… (started ' + (data.started_at || '') + ')';
-        return;
-      }}
-      clearInterval(poll);
-      window.location.reload();
-    }}).catch(function() {{ /* transient fetch hiccup -- next tick tries again */ }});
-  }}, 4000);
-}})();
-</script>"""
 
 
 _URL_RE = re.compile(r'(https?://[^\s<>"()]+)')
@@ -382,6 +300,15 @@ _ICONS = {
     # "several separate things pulled into one view", which is exactly
     # what that page is (see _render_overview_page).
     "grid": '<rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect>',
+    # Added for the /firstreply nav link -- a reply arrow (curving back to
+    # the sender) is the literal action that page's whole queue exists to
+    # drive, distinct from Discussion's "flag" (marking something, not
+    # answering it) or Tasks'/Security's own icons.
+    "reply": '<polyline points="9 14 4 9 9 4"></polyline><path d="M20 20v-7a4 4 0 0 0-4-4H4"></path>',
+    # Added for the /sla nav link -- a plain clock face reads as "time
+    # thresholds," distinct from Overview's "grid" (several things pulled
+    # into one view) and Tasks'/Security's own topic icons.
+    "clock": '<circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline>',
 }
 
 
@@ -478,93 +405,7 @@ def _short_date(iso: str) -> str:
         return iso
 
 
-def _svg_bar_chart(dates: list, series: list, tracked: list = None, width: int = 700, height: int = 150) -> str:
-    """A dependency-free inline SVG bar chart -- no CDN, no client JS
-    required for correctness, matching this file's existing self-contained-
-    response philosophy (see the module docstring's stance on why this
-    server has no static-file route at all). Used for the /sla page's
-    personal activity charts rather than pulling in Chart.js the way
-    sla-report-slack's own dashboard does.
-
-    `series` is a list of {"label": str, "values": list[int|float],
-    "color": a CSS color -- var(--btn-approve) etc. work here, verified by
-    rendering this in a real browser and checking getComputedStyle before
-    relying on it, the same swatch-first standard as the icon set}. Multiple
-    series stack per bar (bottom to top, in list order) -- e.g. public
-    replies then internal comments in one bar per day.
-
-    `tracked`, if given, is a per-date bool list: False means that day's
-    snapshot never recorded this data at all (see
-    _common.load_sla_agent_series's "tracked" field) -- rendered as a
-    neutral gray hairline rather than a colored bar, so "genuinely zero
-    that day" and "never recorded" don't look identical. A native <title>
-    per bar gives an exact-values hover tooltip with zero JS, at the cost
-    of the CDN dashboard's pan/zoom/live tooltip -- a deliberate tradeoff
-    for a small personal chart, not an attempt to fully replace that page
-    (see README)."""
-    n = len(dates)
-    if n == 0:
-        return '<p class="empty">No data to chart.</p>'
-
-    left_pad, right_pad, top_pad, bottom_pad = 2, 2, 4, 20
-    plot_w = width - left_pad - right_pad
-    plot_h = height - top_pad - bottom_pad
-    slot_w = plot_w / n
-    bar_w = max(1.5, slot_w - 2)
-
-    totals = [sum((s["values"][i] or 0) for s in series) for i in range(n)]
-    max_total = max(totals) or 1
-
-    parts = []
-    for i in range(n):
-        x = left_pad + i * slot_w + (slot_w - bar_w) / 2
-        day_label = html.escape(_short_date(dates[i]))
-        if tracked is not None and not tracked[i]:
-            baseline_y = top_pad + plot_h - 1
-            parts.append(
-                f'<rect x="{x:.1f}" y="{baseline_y:.1f}" width="{bar_w:.1f}" height="2" '
-                f'fill="var(--muted-2)" opacity="0.5"><title>{day_label}: not recorded that day</title></rect>'
-            )
-            continue
-        tooltip = day_label + " — " + ", ".join(f'{s["label"]}: {s["values"][i]}' for s in series)
-        tooltip = html.escape(tooltip)
-        if totals[i] == 0:
-            baseline_y = top_pad + plot_h - 1
-            parts.append(
-                f'<rect x="{x:.1f}" y="{baseline_y:.1f}" width="{bar_w:.1f}" height="1" '
-                f'fill="var(--divider)"><title>{tooltip}</title></rect>'
-            )
-            continue
-        y_cursor = top_pad + plot_h
-        for s in series:
-            v = s["values"][i] or 0
-            seg_h = plot_h * (v / max_total)
-            if seg_h <= 0:
-                continue
-            y_cursor -= seg_h
-            parts.append(
-                f'<rect x="{x:.1f}" y="{y_cursor:.1f}" width="{bar_w:.1f}" height="{seg_h:.1f}" '
-                f'fill="{s["color"]}"><title>{tooltip}</title></rect>'
-            )
-
-    # X-axis labels, thinned to roughly 7 evenly-spaced ticks -- showing one
-    # per bar for a full history (30+ days) would just overlap into noise.
-    label_step = max(1, n // 7)
-    for i in range(0, n, label_step):
-        x = left_pad + i * slot_w + slot_w / 2
-        parts.append(
-            f'<text x="{x:.1f}" y="{height - 5}" font-size="9" fill="var(--muted-2)" '
-            f'text-anchor="middle">{html.escape(_short_date(dates[i]))}</text>'
-        )
-
-    svg_body = "".join(parts)
-    return (
-        f'<svg viewBox="0 0 {width} {height}" style="width:100%;height:auto;display:block" '
-        f'role="img" aria-label="chart">{svg_body}</svg>'
-    )
-
-
-def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh: bool = False, header_action: str = "", header_meta: str = "", current_path: str = "/", wide: bool = False) -> bytes:
+def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh: bool = False, header_meta: str = "", current_path: str = "/firstreply", wide: bool = False) -> bytes:
     """wide=True widens the content column from the default 1180px to
     1680px (see body.wide-page's CSS) -- opt in from the read-only card-
     grid pages (/security, /flagged, /solved, /tasks, /overview) whose
@@ -574,34 +415,46 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
     ticket cards hold a reply-drafting textarea that reads better at the
     narrower width.
 
-    header_action and header_meta let the main page's Refresh button and
-    "N pending / last checked / next check" line ride inside the SAME sticky
-    header band as the logo/title (see .brand's CSS) instead of a second,
-    separately-bordered block underneath -- one merged header, not two
-    stacked ones. Both default to "" for every other page (reconnect,
-    confirm, 404), which just renders the logo/title with nothing extra,
-    exactly as before this existed.
+    header_meta lets the main page's "N pending / last checked / next
+    check" line ride inside the SAME sticky header band as the logo/title
+    (see .brand's CSS) instead of a second, separately-bordered block
+    underneath -- one merged header, not two stacked ones. Defaults to ""
+    for every other page (reconnect, confirm, 404), which just renders the
+    logo/title with nothing extra, exactly as before this existed. (The
+    Refresh button used to have its own header_action param following the
+    same pattern -- it's since moved into .brand-status-row below, which
+    renders unconditionally on every page, so there's no longer a
+    per-page param needed for it.)
 
-    The header itself is three stacked pieces, each thinner than the old
+    The header itself is four stacked pieces, each thinner than the old
     single wide row-1 was: the logo/title (.brand-home-link) sits alone as
     a plain block-level first child, so it sizes to its own content and
     stays flush against .brand's left edge -- a compact badge anchored in
-    the top-left corner, not a banner stretched across the full width.
-    header_action and the theme toggle share .brand-controls-row directly
-    beneath it (right-aligned, echoing where they used to sit on the old
-    row 1), and the nav links keep their own .brand-nav-row below that.
+    the top-left corner, not a banner stretched across the full width. The
+    theme toggle gets its own .brand-controls-row directly beneath it
+    (right-aligned, echoing where it used to sit on the old row 1), the
+    nav links keep their own .brand-nav-row below that, and the Refresh
+    button (_refresh_button_html) plus the Zendesk OAuth status control
+    (_zendesk_status_control_html) sit together last in their own
+    .brand-status-row -- on wide viewports this is pinned to the very
+    bottom of the sidebar (see that CSS rule's own comment for the flex
+    trick behind it) rather than just trailing the nav list.
 
     current_path drives two small navigation aids that now render on
-    EVERY page (not just "/"), since it was easy to lose track of overall
-    status while working on /sla or /tasks specifically: _top_nav_html
-    highlights whichever of its six links matches current_path, and the
-    logo/title itself becomes a link back to "/" carrying a "N pending"
-    badge (see pending_badge_html below) so the main queue's count is
-    always visible, not just when you're actually looking at it. Defaults
-    to "/" -- the handful of callers that don't pass anything explicit
-    (the confirm interstitial, 404s) are effectively reached from/related
-    to the main queue anyway, so that's the reasonable default rather than
-    requiring every call site to specify it.
+    EVERY page (not just /firstreply), since it was easy to lose track of
+    overall status while working on /flagged or /tasks specifically:
+    _top_nav_html highlights whichever of its six links matches
+    current_path, and the logo/title itself becomes a link back to
+    /firstreply carrying a "N pending" badge (see pending_badge_html
+    below) so the main queue's count is always visible, not just when
+    you're actually looking at it. Defaults to "/firstreply" -- the
+    handful of callers that don't pass anything explicit (the confirm
+    interstitial, 404s) are effectively reached from/related to the main
+    queue anyway, so that's the reasonable default rather than requiring
+    every call site to specify it. (The main queue's own real URL used to
+    just be "/" -- bare "/" is now a redirect to /firstreply, kept alive
+    for old bookmarks/muscle memory rather than removed outright, see
+    do_GET.)
 
     banner_undo_path is an optional extra: when a caller's confirmation
     message describes a reversible action (right now, just a dismissed
@@ -940,7 +793,7 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
     if (form.requestSubmit) { form.requestSubmit(); } else { form.submit(); }
   });
 
-  // Auto-fills the My tasks "What needs doing?" subject box with whichever
+  // Auto-fills the Tasks "What needs doing?" subject box with whichever
   // category tag was just picked (data-auto-subject marks the <select>,
   // see _category_select_html) -- prepended as a "[Tag] " leading tag,
   // replacing any bracketed tag already there rather than stacking a
@@ -1077,6 +930,43 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
   });
 })();
 </script>"""
+    # Animates each [data-count-target] span's own text from 0 up to its
+    # real value on load -- right now that's just the "Last week ... N
+    # replies posted" figure on /overview (see _activity_line_html), which
+    # isn't on an auto-refreshing page, so it only ever plays once per
+    # visit rather than re-triggering itself every 60s the way it would if
+    # this were also applied to something on /firstreply. Explicitly
+    # skipped under prefers-reduced-motion -- CSS's own blanket
+    # animation-duration override (see the stylesheet) has no power over a
+    # plain JS setInterval loop like this one, so this needs its own check
+    # rather than relying on that to already cover it; the real number is
+    # already sitting in the span's text content regardless (see
+    # _activity_line_html's own comment), so skipping the animation still
+    # leaves a fully correct, resolved page.
+    count_up_script = """
+<script>
+(function() {
+  var spans = document.querySelectorAll('[data-count-target]');
+  if (!spans.length) { return; }
+  var reduceMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduceMotion) { return; }
+
+  spans.forEach(function(span) {
+    var target = parseInt(span.dataset.countTarget, 10);
+    if (!isFinite(target) || target <= 0) { return; }
+    var duration = 600;
+    var start = null;
+    span.textContent = '0';
+    function step(timestamp) {
+      if (start === null) { start = timestamp; }
+      var progress = Math.min((timestamp - start) / duration, 1);
+      span.textContent = String(Math.round(progress * target));
+      if (progress < 1) { window.requestAnimationFrame(step); }
+    }
+    window.requestAnimationFrame(step);
+  });
+})();
+</script>"""
     # A "(N)" prefix on the tab title so a background tab shows the pending
     # count at a glance, the same reason pending_badge_html exists on the
     # logo/title itself -- this is the one place that's visible without
@@ -1145,7 +1035,35 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
     --warning-border: #eac48a;
     --flag-color: #b45309;        /* name-confidence warnings -- caution tier */
     --flag-alert-color: #9a3412;  /* already-replied warning -- higher tier */
+    /* HIGH and URGENT priority badges (.badge-priority, see
+       _priority_badge_html) used to both render as --flag-alert-color --
+       visually identical apart from the text label, which defeats the
+       point of color-coding severity at a glance. This is a third,
+       distinct tier: a deeper, more saturated red than --flag-alert-color
+       rather than a wholly different hue, so URGENT still reads as "the
+       same alert family, more of it" rather than an unrelated color. */
+    --flag-alert-color-urgent: #b91c1c;
     --badge-bg: #666666;
+    /* /overview's per-section left-edge accent stripe (see .overview-
+       section-tasks/-discussion/-security's CSS) -- a third, purely
+       functional color family alongside --accent (brand blue, used
+       everywhere for buttons/links) and --flag-alert-color (already means
+       "warning/priority" elsewhere on this page); dedicated tokens rather
+       than reusing an existing --btn-* hue so a theme that collapses
+       several button hues into one family (see html.theme-b68fbf below)
+       can't accidentally make two of these three sections look the same
+       color. */
+    --overview-accent-tasks: #0e7490;
+    --overview-accent-discussion: #6d4aa8;
+    --overview-accent-security: #8a6d1a;
+    /* /sla's "on track" state -- the third leg of a three-state signal
+       alongside --flag-alert-color-urgent (breached, already red) and
+       --flag-color/--warning-bg (due soon, already amber); neither of
+       those two was a green, so this is the one genuinely new color this
+       page needs rather than reusing what's already here. */
+    --sla-ok-color: #1a6e2e;
+    --sla-ok-bg: #e6f5ec;
+    --sla-ok-border: #90d0a0;
   }}
   @media (prefers-color-scheme: dark) {{
     :root {{
@@ -1181,7 +1099,18 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
       --warning-border: rgba(201,106,52,0.4);
       --flag-color: #dba15a;
       --flag-alert-color: #e28a5e;
+      /* Lighter-but-redder than --flag-alert-color for the same reason
+         its light-theme counterpart just above is darker-but-redder --
+         see that comment. Kept light enough to still contrast against the
+         dark background, same as --flag-alert-color already does. */
+      --flag-alert-color-urgent: #e2604a;
       --badge-bg: #4b4b52;
+      --overview-accent-tasks: #22b8cf;
+      --overview-accent-discussion: #a78bda;
+      --overview-accent-security: #d4b106;
+      --sla-ok-color: #4ade80;
+      --sla-ok-bg: rgba(34,197,94,0.14);
+      --sla-ok-border: rgba(34,197,94,0.4);
     }}
   }}
   /* Manual Auto/Light/Dark override (see the theme-toggle control + its two
@@ -1228,7 +1157,14 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
     --warning-border: rgba(201,106,52,0.4);
     --flag-color: #dba15a;
     --flag-alert-color: #e28a5e;
+    --flag-alert-color-urgent: #e2604a;
     --badge-bg: #4b4b52;
+    --overview-accent-tasks: #22b8cf;
+    --overview-accent-discussion: #a78bda;
+    --overview-accent-security: #d4b106;
+    --sla-ok-color: #4ade80;
+    --sla-ok-bg: rgba(34,197,94,0.14);
+    --sla-ok-border: rgba(34,197,94,0.4);
   }}
   html.theme-light {{
     --bg: #ffffff;
@@ -1263,7 +1199,14 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
     --warning-border: #eac48a;
     --flag-color: #b45309;
     --flag-alert-color: #9a3412;
+    --flag-alert-color-urgent: #b91c1c;
     --badge-bg: #666666;
+    --overview-accent-tasks: #0e7490;
+    --overview-accent-discussion: #6d4aa8;
+    --overview-accent-security: #8a6d1a;
+    --sla-ok-color: #1a6e2e;
+    --sla-ok-bg: #e6f5ec;
+    --sla-ok-border: #90d0a0;
   }}
   /* "B68FBF" theme: a fourth manual option alongside Auto/Light/Dark, built
      entirely from the literal hex color B68FBF and shades/tints of it
@@ -1280,11 +1223,11 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
      second color. This replaces the six-distinct-hues convention used
      elsewhere in the file (see the plain :root block above) with "two
      complementary shades of B68FBF," per this theme's whole premise.
-     --warning-bg/--warning-border/--flag-color/--flag-alert-color are left
-     as the same amber/orange used in the other three themes on purpose:
-     those are functional caution/alert signal colors, not CSA branding, and
-     folding them into the purple family would make them blend in instead of
-     standing out. */
+     --warning-bg/--warning-border/--flag-color/--flag-alert-color/
+     --flag-alert-color-urgent are left as the same amber/orange/red used in
+     the other three themes on purpose: those are functional caution/alert
+     signal colors, not CSA branding, and folding them into the purple
+     family would make them blend in instead of standing out. */
   html.theme-b68fbf {{
     --bg: #faf7fb;
     --bg-translucent: rgba(250,247,251,0.82);
@@ -1318,7 +1261,19 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
     --warning-border: #eac48a;
     --flag-color: #b45309;
     --flag-alert-color: #9a3412;
+    --flag-alert-color-urgent: #b91c1c;
     --badge-bg: #755b7b;
+    /* Left as the same functional colors as the other three themes, same
+       reasoning as --flag-alert-color/--warning-bg above: these are
+       "which section is this" signal colors, not CSA branding, so folding
+       them into the B68FBF/9E8FBF family would make them blend together
+       instead of staying distinct from each other. */
+    --overview-accent-tasks: #0e7490;
+    --overview-accent-discussion: #6d4aa8;
+    --overview-accent-security: #8a6d1a;
+    --sla-ok-color: #1a6e2e;
+    --sla-ok-bg: #e6f5ec;
+    --sla-ok-border: #90d0a0;
   }}
   html {{ background: var(--bg); }}
   body {{ font-family: -apple-system, system-ui, sans-serif; max-width: 1180px; margin: 2rem auto; padding: 0 1rem; color: var(--text); background: var(--bg); }}
@@ -1328,8 +1283,8 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
      already responsive (auto-fill/auto-fit) and were capping out at 3
      columns on an ordinary 1920px display with several hundred px of
      flat blank space to the right of them, never able to add a 4th no
-     matter how wide the screen actually was. The main queue ("/") is
-     deliberately NOT included -- its ticket cards hold a reply-drafting
+     matter how wide the screen actually was. The main queue (/firstreply)
+     is deliberately NOT included -- its ticket cards hold a reply-drafting
      textarea, and a much wider line length there would hurt readability
      rather than help, so it keeps the narrower 1180px default above.
      Higher specificity (body.wide-page vs body) wins regardless of
@@ -1351,8 +1306,8 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
   @media (max-width: 900px) {{ .two-panel {{ grid-template-columns: 1fr; }} }}
   /* /overview's four sections (see _render_overview_page). Deliberately a
      CSS multi-column layout rather than a grid: with a row-based grid, a
-     row's height is set by its tallest cell, so a short section (e.g. "My
-     open tasks" with 2 items next to "IT-Security recent" with 5) leaves a
+     row's height is set by its tallest cell, so a short section (e.g.
+     "Tasks" with 2 items next to "Security recent" with 5) leaves a
      large blank gap under itself instead of ending early -- confirmed via
      screenshots showing 400px+ of dead space under short tiles. `columns:
      2` with `break-inside: avoid` on each section lets the browser pack
@@ -1365,13 +1320,76 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
      breakpoint as .two-panel) since two narrow columns stop being useful
      once neither can comfortably fit a 380px-wide card grid. */
   .overview-grid {{ columns: 2; column-gap: 1.25rem; }}
-  .overview-section {{ break-inside: avoid; margin-bottom: 1.25rem; }}
+  .overview-section {{ break-inside: avoid; margin-bottom: 1.25rem; border-left: 4px solid transparent; padding-left: 0.9rem; }}
+  /* Per-section color from _render_overview_page's topic_key -- see the
+     --overview-accent-* tokens above. A left-edge stripe rather than
+     re-tinting the whole card, since these still need to read as the same
+     "security-panel" card family the rest of the app uses, just with a
+     colored edge marking which of the three sources this one is.
+
+     Selector is ".security-panel.overview-section-tasks" (both classes),
+     not just ".overview-section-tasks" alone -- .security-panel's own
+     `border` shorthand (declared later in this stylesheet, see its own
+     rule) sets border-left-color as part of that shorthand too, and a
+     single-class selector here would have exactly the same specificity as
+     that later rule, losing the "whoever comes last wins" tiebreak and
+     silently rendering every stripe as plain --card-border gray instead
+     of its own color. Matching both classes at once (0,2,0) outranks
+     .security-panel's single-class (0,1,0) regardless of source order,
+     which is the actually robust fix rather than relying on where either
+     rule happens to sit in the file. */
+  .security-panel.overview-section-tasks {{ border-left-color: var(--overview-accent-tasks); }}
+  .security-panel.overview-section-discussion {{ border-left-color: var(--overview-accent-discussion); }}
+  .security-panel.overview-section-security {{ border-left-color: var(--overview-accent-security); }}
   @media (max-width: 900px) {{ .overview-grid {{ columns: 1; }} }}
   .overview-section-head {{ display: flex; align-items: baseline; justify-content: space-between; gap: 0.75rem; margin-bottom: 0.75rem; }}
   .overview-section-head .column-heading {{ margin: 0; }}
   .overview-see-all {{ font-size: 0.82rem; font-weight: 600; white-space: nowrap; }}
+
+  /* /sla page -- just the two Chart.js trend charts (queue health +
+     agent activity) now; the KPI strip, four rule cards, and
+     awaiting-first-response list that used to sit above them were
+     removed by explicit request (the live per-ticket scan that fed them
+     still runs -- see do_GET's /sla route -- it just now only feeds the
+     nav badge's breach count, nothing rendered on this page directly).
+     Built entirely from --card-bg/--card-border and the existing
+     --flag-alert-color-urgent (breached, already red everywhere)/
+     --flag-color+--warning-bg (due soon, already amber everywhere)
+     tokens, plus the one genuinely new --sla-ok-* trio (see :root above)
+     for "on track" -- no separate branded palette, so this reads as a
+     native page rather than a bolted-on one. */
+  .sla-chart-wrap {{ position: relative; background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 14px; padding: 1rem; margin-bottom: 1.25rem; }}
+  .sla-chart-legend {{ display: flex; gap: 1rem; font-size: 0.78rem; color: var(--muted); margin-bottom: 0.5rem; flex-wrap: wrap; }}
+  .sla-chart-legend span {{ display: inline-flex; align-items: center; gap: 0.35rem; }}
+  .sla-chart-swatch {{ width: 10px; height: 10px; border-radius: 2px; display: inline-block; }}
+  .sla-chart-swatch-line {{ width: 16px; height: 3px; display: inline-block; border-radius: 1px; }}
+  .sla-history-note {{ font-size: 0.78rem; color: var(--muted-2); margin: -0.5rem 0 1rem; }}
+  /* Chart.js trend charts (queue health + agent activity) -- range filter
+     bar, drill-down panel, download/reset-zoom buttons, agent checkbox
+     filter. See _sla_charts_html's own docstring for why these exist. */
+  .sla-filter-bar {{ display: flex; align-items: center; gap: 0.5rem; margin: 0 0 0.75rem; flex-wrap: wrap; }}
+  .sla-filter-label {{ font-size: 0.72rem; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-right: 0.2rem; }}
+  .sla-range-btn {{ padding: 0.3rem 0.85rem; border-radius: 999px; font-size: 0.75rem; font-weight: 600; border: 1px solid var(--card-border); background: var(--card-bg); color: var(--muted); cursor: pointer; }}
+  .sla-range-btn:hover {{ border-color: var(--accent); color: var(--accent); }}
+  .sla-range-btn.active {{ background: var(--accent); color: white; border-color: var(--accent); }}
+  .sla-zoom-hint {{ font-size: 0.68rem; color: var(--muted-2); }}
+  .sla-range-label {{ font-size: 0.75rem; color: var(--muted); margin-left: auto; }}
+  .drill-hint {{ font-size: 0.72rem; color: var(--muted-2); margin: -0.35rem 0 0.5rem 0.1rem; }}
+  .sla-chart-dl-btn {{ position: absolute; top: 0.65rem; right: 0.65rem; background: none; border: 1px solid var(--card-border); border-radius: 6px; padding: 0.1rem 0.5rem; font-size: 0.72rem; color: var(--muted); cursor: pointer; }}
+  .sla-chart-dl-btn:hover {{ background: var(--excerpt-bg); color: var(--text); }}
+  .sla-chart-reset-btn {{ right: 4.4rem; }}
+  .sla-drilldown {{ margin: 0.4rem 0 1rem; padding: 0.75rem 1rem; background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 10px; }}
+  .sla-drilldown-head {{ display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 0.5rem; }}
+  #sla-drilldown-title {{ font-size: 0.78rem; font-weight: 700; color: var(--text); }}
+  #sla-drilldown-dismiss {{ font-size: 0.72rem; color: var(--muted); background: none; border: none; cursor: pointer; padding: 0; line-height: 1; }}
+  #sla-drilldown-tickets {{ display: flex; flex-wrap: wrap; gap: 0.4rem; }}
+  .sla-drilldown-chip {{ display: inline-block; padding: 0.15rem 0.6rem; background: var(--excerpt-bg); color: var(--accent); font-size: 0.75rem; font-weight: 600; border-radius: 999px; text-decoration: none; }}
+  .sla-agent-filter-bar {{ display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap; margin: 0.25rem 0 0.6rem; }}
+  .sla-agent-check {{ display: inline-flex; align-items: center; gap: 0.35rem; font-size: 0.78rem; font-weight: 600; color: var(--muted); cursor: pointer; padding: 0.25rem 0.7rem; border-radius: 999px; border: 1px solid var(--card-border); background: var(--card-bg); user-select: none; }}
+  .sla-agent-check.active {{ background: var(--excerpt-bg); border-color: var(--accent); color: var(--accent); }}
+  .sla-agent-check input[type=checkbox] {{ cursor: pointer; accent-color: var(--accent); width: 12px; height: 12px; }}
   /* "Recently worked on" history column pinned to the left of the main
-     IT-Operations queue on "/" -- the same asymmetric narrow-plus-wide
+     IT-Operations queue on /firstreply -- the same asymmetric narrow-plus-wide
      shape the old removed `.layout` class used for the IT-Security panel,
      revived here under a new name/purpose: unlike `.two-panel` above,
      these two columns are NOT peers -- the queue is the reason this page
@@ -1419,6 +1437,56 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
   .mini-ticket {{ padding: 0.6rem 0.5rem; margin: 0 -0.5rem; border-bottom: 1px solid var(--divider); border-radius: 6px; transition: background-color 0.12s ease; }}
   .mini-ticket:hover {{ background: var(--divider); }}
   .mini-ticket:last-child {{ border-bottom: none; }}
+  /* Same entrance-stagger idea as .ticket-list > .ticket below, for the
+     compact rows shared by /tasks, /security, /flagged, /solved, and
+     /overview's tiles -- .mini-ticket had no entrance animation at all
+     before this. .mini-ticket-grid's own children are never mixed with
+     any other element type, so plain nth-child already counts correctly
+     here with no extra wrapper needed the way .ticket-list is for the
+     main queue. A quicker fade (0.25s vs .ticket's 0.3s) and tighter
+     steps, since these rows are smaller and denser -- a whole grid of
+     them staggering as slowly as a handful of full ticket cards would
+     feel sluggish rather than lively.
+
+     Placed here, BEFORE .mini-ticket:target below, on purpose: both rules
+     set the full `animation` shorthand and have equal selector
+     specificity, so whichever comes LAST in the stylesheet is what
+     actually wins when a row is both freshly rendered AND the current
+     :target -- exactly the case on a fresh page load with a
+     #task-<local_id>/#ticket-<tid> fragment already in the URL. Keeping
+     :target below/after this block is what lets the highlight animation
+     win over the plain entrance fade in that moment, instead of the
+     fade silently overriding it. */
+  .mini-ticket-grid > .mini-ticket {{ animation: fadeIn 0.25s ease-out backwards; }}
+  .mini-ticket-grid > .mini-ticket:nth-child(1) {{ animation-delay: 0s; }}
+  .mini-ticket-grid > .mini-ticket:nth-child(2) {{ animation-delay: 0.04s; }}
+  .mini-ticket-grid > .mini-ticket:nth-child(3) {{ animation-delay: 0.08s; }}
+  .mini-ticket-grid > .mini-ticket:nth-child(4) {{ animation-delay: 0.12s; }}
+  .mini-ticket-grid > .mini-ticket:nth-child(n+5) {{ animation-delay: 0.16s; }}
+  /* Landing on /tasks with a #task-<local_id> fragment (a task's title
+     link -- see _task_title_link_html) scrolls here for free, just from
+     the id existing on this row's wrapper (_render_draft_task_row/
+     _render_open_task_row) -- no JS needed. :target then matches this
+     exact row (and only this row -- every other .mini-ticket on the page
+     has a different id, so nothing else lights up), fading its
+     background from --focus-ring down to nothing so the row that was
+     just scrolled to is unmistakable for a moment, then settles back to
+     looking like every other row once you've had a beat to spot it. */
+  .mini-ticket:target {{ animation: taskHighlight 2s ease-out; }}
+  @keyframes taskHighlight {{
+    from {{ background: var(--focus-ring); }}
+    to {{ background: transparent; }}
+  }}
+  /* Same trick, applied to a main-queue ticket card instead of a /tasks
+     row: landing on /firstreply#ticket-<tid> (see notify()'s open_url in
+     first_reply_check.py -- the notification for a NEW ticket now opens
+     straight at that ticket's own anchor, not just the bare page) makes
+     the exact ticket that triggered the notification unmistakable the
+     moment the page loads, rather than leaving you to find it yourself
+     among everything else in the queue. Reuses taskHighlight rather than
+     a second near-identical keyframe -- a momentary background fade means
+     the same thing here as it does on a task row. */
+  .ticket:target {{ animation: taskHighlight 2s ease-out; }}
   /* A compact-row list (a draft/open task, an IT-Security row) used to
      always stack one full-width .mini-ticket per row -- fine for a
      couple of items, wasteful once there are enough to scroll through,
@@ -1536,10 +1604,8 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
      be several hundred pixels wide. */
   .new-task-extra-fields input, .new-task-extra-fields select {{ flex: 1 1 12rem; max-width: 16rem; margin-bottom: 0; }}
   /* /tasks page -- notes are optional, so .mini-ticket-notes only ever
-     shows when a task actually has some; .tasks-open-heading is just the
-     "Open (N)" heading above the list. */
+     shows when a task actually has some. */
   .mini-ticket-notes {{ font-size: 0.82rem; color: var(--muted); margin-top: 0.3rem; white-space: pre-wrap; }}
-  .tasks-open-heading {{ font-size: 1.05rem; margin: 1.5rem 0 0.6rem 0; }}
   h1 {{ font-size: 1.1rem; margin: 0; }}
   /* Shrink-wrapped to its own content (width: fit-content) rather than
      stretched across the full page -- the badge, controls row, and the
@@ -1606,9 +1672,12 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
      This is the header's second structural pass: it used to be a single
      row-1 (.brand-top, splitting .brand-left/.brand-right across a
      justify-content: space-between line) with the nav on its own row-2
-     below. That flat two-row shape is now three stacked pieces -- the
-     badge, then .brand-controls-row, then .brand-nav-row -- each one
-     shorter/thinner than row 1 used to be on its own. */
+     below. That flat two-row shape is now four stacked pieces -- the
+     badge, then .brand-controls-row, then .brand-nav-row, then the
+     Zendesk OAuth status control's own .brand-status-row -- each one
+     shorter/thinner than row 1 used to be on its own, with that last one
+     pushed down to anchor at the sidebar's bottom on wide viewports
+     (see .brand-status-row's own rule below). */
   .brand-controls-row {{
     display: flex; align-items: center; justify-content: flex-end;
     flex-wrap: wrap; gap: 0.5rem 0.75rem; margin-top: 0.35rem;
@@ -1644,8 +1713,8 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
     display: inline-block; width: 12px; height: 12px; border-radius: 50%;
     background: #B68FBF; border: 1px solid rgba(0, 0, 0, 0.15);
   }}
-  /* Nav list of actual working pages (Overview / My tasks / Blocked-
-     Standup / IT-Security / Recently Solved / SLA metrics) -- its own dedicated
+  /* Nav list of actual working pages (Overview / Tasks / Discussion /
+     Security / Recently Solved) -- its own dedicated
      stack (see .brand-nav-row) instead of as middot-separated text down
      in the meta line, so it reads as actual navigation (with room to
      grow) rather than accumulating links inside a status sentence.
@@ -1655,7 +1724,7 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
      flat list now, no second "status" cluster/divider -- Zendesk OAuth
      used to be the other category here and now lives entirely separately
      (see .zendesk-status-link, below), so there's nothing left to
-     separate the remaining six links from. */
+     separate the remaining five links from. */
   .top-nav {{ display: flex; flex-direction: column; align-items: stretch; gap: 0.15rem; }}
   /* Icon + a real visible label now (see _link/_top_nav_html) -- a plain
      left-aligned row instead of the old centered icon-only pill, with
@@ -1678,14 +1747,15 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
      page's own heading. */
   .top-nav-link.active {{ background: var(--accent); color: white; border-color: var(--accent); }}
   .top-nav-link.active:hover {{ background: var(--accent); color: white; }}
-  /* Zendesk OAuth's own small icon-only control, living in
-     .brand-controls-row next to the theme toggle instead of in the nav
-     list above -- see _zendesk_status_control_html's docstring for why it
-     was pulled out. Sized and shaped like a single theme-toggle button so
-     the two standing controls read as a matched pair. Muted/quiet by
-     default; .zendesk-status-warn (applied when the last real check found
-     it disconnected) is the only time this control should actually draw
-     the eye. */
+  /* Zendesk OAuth's own small icon-only control, living in its own
+     .brand-status-row at the very bottom of the sidebar/header (below the
+     nav list, not next to the theme toggle in .brand-controls-row and not
+     in the nav list itself) -- see _zendesk_status_control_html's
+     docstring for why it was pulled out of the nav to begin with, and
+     .brand-status-row below for why it now anchors to the bottom.
+     Muted/quiet by default; .zendesk-status-warn (applied when the last
+     real check found it disconnected) is the only time this control
+     should actually draw the eye. */
   .zendesk-status-link {{
     display: inline-flex; align-items: center; justify-content: center;
     width: 2.2rem; height: 2.2rem; border-radius: 999px; flex-shrink: 0;
@@ -1694,13 +1764,31 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
   }}
   .zendesk-status-link:hover {{ background: var(--divider); color: var(--text); }}
   .zendesk-status-warn {{ color: var(--flag-alert-color); border-color: var(--flag-alert-color); }}
-  /* Small count badge riding on a nav link (SLA breach count, tasks
-     awaiting a decision, a Zendesk-disconnected warning) -- lets that
-     page's own status travel with you to every other page instead of
-     only being visible when you're actually on it. .nav-badge-warn (SLA
-     breaches, auth trouble) uses the same higher-severity color as the
-     "already replied" flag elsewhere; the plain .nav-badge (My tasks'
-     count) is neutral, since a waiting task isn't inherently a problem. */
+  /* Its own row, separated from the nav list above by a thin divider (same
+     treatment as .recently-handled's own top divider elsewhere) -- a
+     standing "is this healthy"/"refresh now" utility footer reads
+     differently from another nav destination, so it gets a visually
+     distinct spot rather than blending into the links above it. Holds two
+     small controls side by side (the Zendesk OAuth status icon and the
+     Refresh button, in that order) with a small gap between them and
+     wrapping allowed in case the narrow top-card layout's width ever gets
+     tight; centered by default (that narrow layout has nothing to anchor
+     "bottom" against). The wide sidebar media query below overrides
+     margin-top to auto so this row actually pins to the bottom of the
+     full-height rail instead of just trailing the nav list. */
+  .brand-status-row {{
+    display: flex; justify-content: center; align-items: center; flex-wrap: wrap;
+    gap: 0.6rem; margin-top: 1rem; padding-top: 0.75rem;
+    border-top: 1px solid var(--divider);
+  }}
+  /* Small count badge riding on a nav link (tasks awaiting a decision,
+     flagged/security counts) -- lets that page's own status travel with
+     you to every other page instead of only being visible when you're
+     actually on it. .nav-badge-warn is available for a higher-severity
+     count (the same color as the "already replied" flag elsewhere) via
+     _badge()'s warn=True, though nothing currently uses it; the plain
+     .nav-badge (Tasks' count, among others) is neutral, since a waiting
+     task isn't inherently a problem. */
   .nav-badge {{
     display: inline-flex; align-items: center; justify-content: center;
     min-width: 1.1rem; height: 1.1rem; padding: 0 0.3rem;
@@ -1708,7 +1796,7 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
     font-size: 0.68rem; font-weight: 700; line-height: 1;
   }}
   .nav-badge-warn {{ background: var(--flag-alert-color); }}
-  /* The logo/title becomes a link back to "/" -- color: inherit and
+  /* The logo/title becomes a link back to /firstreply -- color: inherit and
      text-decoration: none keep it looking like the plain heading it
      always was, not a normal blue underlined link. */
   .brand-home-link {{
@@ -1752,6 +1840,12 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
       width: 240px; box-sizing: border-box; overflow-y: auto;
       margin: 0; padding: 1.25rem 1rem;
       border: none; border-right: 2px solid var(--accent); border-radius: 0;
+      /* Flex column so .brand-status-row (the Zendesk OAuth control, last
+         child) can use margin-top: auto below to anchor itself to the
+         bottom of this full-height rail, with everything above it
+         (badge/controls/nav/meta) keeping its normal top-down stacking --
+         same trick as a classic "push footer down" layout. */
+      display: flex; flex-direction: column;
     }}
     @supports (backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px)) {{
       .brand {{
@@ -1787,41 +1881,29 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
       flex-direction: column; align-items: stretch; justify-content: flex-start;
       gap: 0.6rem; margin-top: 1.1rem;
     }}
-    .brand-controls-row form {{ width: 100%; }}
+    /* No <form> left inside .brand-controls-row now that the Refresh
+       button has moved to .brand-status-row below (only the theme toggle
+       remains here) -- the button rule stays since it still governs the
+       theme-toggle's own <button> elements. */
     .brand-controls-row button {{ width: 100%; justify-content: center; white-space: normal; text-align: center; }}
     .brand-controls-row .theme-toggle {{ align-self: stretch; justify-content: center; }}
-    /* Unlike the Refresh button and theme toggle, this one control should
-       NOT stretch to the sidebar's full width -- it's a single small
-       circular icon, not a full-width action or button group, and
-       stretching align-items: stretch (this row's default) would blow it
-       up into an oversized pill. align-self: center keeps it its natural
-       compact size, centered between the two full-width rows above/below
-       it rather than pinned to the left edge like a stray leftover. */
-    .brand-controls-row .zendesk-status-link {{ align-self: center; }}
     .brand-nav-row {{ margin-top: 1.1rem; }}
+    /* The one override that actually makes this a bottom-anchored footer
+       rather than just another stacked row: margin-top: auto on a flex
+       column's last child eats all the remaining vertical space in the
+       (full-height, position: fixed) rail, pushing this row down to sit
+       flush against the bottom regardless of how much or how little
+       content (badge/controls/nav, plus the meta line on /firstreply only) comes
+       before it. Centering and the divider above it still come from the
+       base .brand-status-row rule -- only the vertical anchor changes
+       here. */
+    .brand-status-row {{ margin-top: auto; }}
   }}
   .stat-chip {{
     display: inline-block; background: var(--divider); color: var(--text);
     font-size: 0.78rem; font-weight: 600; padding: 0.15rem 0.55rem;
     border-radius: 999px; margin-right: 0.4rem;
   }}
-  /* KPI tiles -- the /sla page's "Today" numbers get their own tile grid
-     rather than reusing the header's compact stat-chip pill, since those
-     pills were sized for a secondary status line, not a page's headline
-     content. Each tile's left accent color hints at good/neutral/bad
-     without a red/green traffic light -- teal for on-track, the existing
-     flag/flag-alert amber tones for due-soon/breached, matching the same
-     severity language already used elsewhere on this page. */
-  .kpi-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 0.75rem; }}
-  .kpi-tile {{
-    background: var(--card-bg); border: 1px solid var(--card-border); border-left: 3px solid var(--divider);
-    border-radius: 10px; padding: 0.7rem 0.9rem;
-  }}
-  .kpi-tile.kpi-good {{ border-left-color: var(--btn-approve); }}
-  .kpi-tile.kpi-warn {{ border-left-color: var(--flag-color); }}
-  .kpi-tile.kpi-bad {{ border-left-color: var(--flag-alert-color); }}
-  .kpi-value {{ font-size: 1.6rem; font-weight: 700; line-height: 1.1; }}
-  .kpi-label {{ font-size: 0.72rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; margin-top: 0.15rem; }}
   /* Avatar-initials bubble next to a resolved person's name -- a stable
      per-name color (see _avatar_html) rather than a photo, for a quick
      visual anchor when scanning a list of names. */
@@ -1837,29 +1919,6 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
      html.theme-b68fbf class every other theme-conditional swap on this
      page uses. */
 {AVATAR_HUE_CSS}
-  /* Chart legend swatch -- a tiny rect matching the exact color/opacity the
-     "not tracked" bars render with in _svg_bar_chart, so the explanatory
-     note reads as an actual legend for the gray marks above it rather than
-     a wall of text you have to cross-reference by memory. */
-  .chart-legend {{ display: flex; align-items: center; gap: 0.4rem; }}
-  .legend-swatch {{ display: inline-block; width: 0.8rem; height: 0.8rem; border-radius: 2px; flex-shrink: 0; }}
-  .legend-swatch--untracked {{ background: var(--muted-2); opacity: 0.5; }}
-  /* Date-range pills for the personal activity charts -- same filled-pill
-     active state as .theme-toggle button.active, just as a group of plain
-     links (each carrying its own ?range= query param, see
-     _render_range_pills) rather than JS-toggled buttons, since selecting a
-     range here is a normal page reload, not a client-side redraw. */
-  .range-pills {{
-    display: inline-flex; border: 1px solid var(--input-border); border-radius: 999px;
-    overflow: hidden; margin: 0.5rem 0 0.75rem 0;
-  }}
-  .range-pill {{
-    background: transparent; color: var(--muted); padding: 0.3rem 0.7rem; font-size: 0.78rem;
-    font-weight: 600; text-decoration: none; transition: background-color 0.12s ease, color 0.12s ease;
-  }}
-  .range-pill:hover {{ background: var(--divider); color: var(--text); text-decoration: none; }}
-  .range-pill-active {{ background: var(--accent); color: white; }}
-  .range-pill-active:hover {{ background: var(--accent); color: white; }}
   .icon {{ width: 14px; height: 14px; flex-shrink: 0; }}
   .icon-sm {{ width: 12px; height: 12px; flex-shrink: 0; }}
   .logo {{ height: 36px; width: auto; }}
@@ -1941,14 +2000,50 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
      this used to have everywhere. */
   .ticket {{
     background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 14px;
-    padding: 1rem; margin-bottom: 1.2rem; animation: fadeIn 0.3s ease-out;
+    padding: 1rem; margin-bottom: 1.2rem; animation: fadeIn 0.3s ease-out backwards;
     transition: box-shadow 0.15s ease, border-color 0.15s ease, opacity 0.2s ease, transform 0.2s ease;
   }}
   .ticket:hover {{ box-shadow: var(--card-shadow); border-color: var(--muted-2); }}
   .ticket.is-removing, .mini-ticket.is-removing {{ opacity: 0; transform: scale(0.98); pointer-events: none; }}
+  /* Staggers each ticket's own fadeIn (above) by a few hundredths of a
+     second per position, so a list of them settles in one after another
+     on page load instead of all popping in at the exact same instant --
+     "backwards" fill-mode (added to .ticket's animation above) holds each
+     card at fadeIn's own 0%% state (opacity 0) for the whole delay, rather
+     than briefly flashing fully visible before its turn starts. .ticket-
+     list (not .ticket alone) is what nth-child counts against here -- see
+     do_GET's own comment for why: nth-child counts every sibling
+     regardless of class, so without a wrapper scoped to JUST the ticket
+     cards, this would silently miscount whenever the auth-warning banner
+     or the filter/sort controls happened to precede them that day. Capped
+     at 5 explicit steps, then flat -- a queue of 40 tickets shouldn't take
+     two seconds to finish appearing just because there are 40 of them. */
+  .ticket-list > .ticket:nth-child(1) {{ animation-delay: 0s; }}
+  .ticket-list > .ticket:nth-child(2) {{ animation-delay: 0.05s; }}
+  .ticket-list > .ticket:nth-child(3) {{ animation-delay: 0.1s; }}
+  .ticket-list > .ticket:nth-child(4) {{ animation-delay: 0.15s; }}
+  .ticket-list > .ticket:nth-child(n+5) {{ animation-delay: 0.2s; }}
   .ticket-eyebrow {{ font-size: 0.7rem; font-weight: 700; color: var(--muted-2); text-transform: uppercase; letter-spacing: 0.06em; margin: 0 0 0.15rem 0; }}
   .ticket h2 {{ font-size: 1.1rem; font-weight: 700; margin: 0 0 0.4rem 0; }}
   .ticket h2 .tid {{ color: var(--muted-2); font-weight: 500; font-size: 0.95rem; }}
+  /* A ticket's title text sitting next to its "#tid" link (see
+     _titled_link_html, shared by _render_ticket/_render_confirm_page/
+     _render_readonly_ticket_row/_render_worked_on_sidebar) now opens the
+     same Zendesk link the number does -- fixing a common miss-click
+     aimed at the (much larger) title instead of the small number beside
+     it. A personal task's title (draft or open -- _task_title_link_html,
+     used by _render_draft_task_row/_render_open_task_row/
+     _render_overview_draft_task_row) shares this same .ticket-title-link
+     class/look but points somewhere different: back to that task's own
+     row on /tasks, not out to Zendesk -- see that helper's docstring.
+     Either way, kept looking like plain text rather than a normal blue/
+     underlined link on purpose: color: inherit (matches whatever heading/
+     row it's sitting in -- a .ticket h2, a .mini-ticket-head, a
+     .worked-on-subject line) and no underline until hover/focus, so this
+     doesn't add visual weight to already-busy cards; the cursor and hover
+     underline are enough of a cue once a pointer is actually on it. */
+  .ticket-title-link {{ color: inherit; text-decoration: none; }}
+  .ticket-title-link:hover, .ticket-title-link:focus-visible {{ text-decoration: underline; }}
   .meta {{ color: var(--muted); font-size: 0.85rem; margin-bottom: 0.6rem; }}
   textarea, input[type=text] {{
     width: 100%; box-sizing: border-box; font-family: inherit; font-size: 0.95rem;
@@ -2038,6 +2133,11 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
   .flag-alert {{ color: var(--flag-alert-color); font-weight: 700; font-style: normal; }}
   .badge-test {{ background: var(--badge-bg); color: white; font-size: 0.72rem; font-weight: 600; padding: 0.15rem 0.5rem; border-radius: 999px; margin-left: 0.5rem; vertical-align: middle; }}
   .badge-priority {{ background: var(--flag-alert-color); color: white; font-size: 0.72rem; font-weight: 600; padding: 0.15rem 0.5rem; border-radius: 999px; margin-left: 0.5rem; vertical-align: middle; }}
+  /* HIGH and URGENT used to be the exact same color, distinguishable only
+     by reading the badge's text -- this modifier (see _priority_badge_html)
+     gives URGENT a distinct, more intense shade of the same alert family
+     rather than sharing HIGH's color outright. */
+  .badge-priority-urgent {{ background: var(--flag-alert-color-urgent); }}
   .auth-warning {{ background: var(--warning-bg); border-color: var(--warning-border); border-left-color: var(--btn-reject); }}
   .recently-handled {{ margin-top: 1.5rem; padding-top: 1rem; border-top: 1px solid var(--divider); }}
   .recently-handled summary {{ cursor: pointer; color: var(--muted); font-size: 0.9rem; font-weight: 600; }}
@@ -2055,22 +2155,63 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
     from {{ opacity: 0; transform: translateY(2px); }}
     to {{ opacity: 1; transform: translateY(0); }}
   }}
+  /* Small ambient "this is watching" cue next to "Next automatic check"
+     (see _header_meta_html) -- the page already auto-refreshes and the
+     background scan already runs on its own schedule regardless of
+     whether anyone's looking, but nothing on the page itself used to
+     hint that quietly-live behavior at a glance; this is a soft breathing
+     pulse rather than anything urgent (compare .badge-priority-urgent's
+     much more saturated, attention-grabbing color -- this is the opposite
+     end of that spectrum on purpose). */
+  .live-pulse {{
+    display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+    background: var(--accent); margin-right: 0.3rem; vertical-align: middle;
+    animation: livePulse 2.4s ease-in-out infinite;
+  }}
+  @keyframes livePulse {{
+    0%, 100% {{ opacity: 0.35; transform: scale(0.8); }}
+    50% {{ opacity: 1; transform: scale(1); }}
+  }}
+  /* Cross-fades between full page loads (clicking a nav link, submitting a
+     form that redirects, the auto-refresh reload) in browsers that support
+     the View Transitions API's cross-document mode -- no JS, no change to
+     how navigation actually works (still a normal server-rendered page
+     load every time), just a smoother visual join between the old page and
+     the new one instead of a blank flash. A no-op, not an error, in a
+     browser that doesn't recognize @view-transition -- it's simply
+     ignored, same as any unsupported at-rule. Default duration overridden
+     down to something snappier (0.18s) to match the pace of everything
+     else already animated on this page, rather than the browser's own
+     slower default. */
+  @view-transition {{
+    navigation: auto;
+  }}
+  ::view-transition-old(root), ::view-transition-new(root) {{
+    animation-duration: 0.18s;
+  }}
   @media (prefers-reduced-motion: reduce) {{
     * {{ animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }}
+    /* The universal selector above only reaches real elements -- the
+       transition pseudo-elements View Transitions generates
+       (::view-transition-old/new/group) live outside the normal DOM and
+       aren't matched by "*" in every browser that implements this API, so
+       this needs its own explicit opt-out rather than relying on the
+       blanket rule above to already cover it. */
+    ::view-transition-group(*), ::view-transition-old(*), ::view-transition-new(*) {{
+      animation: none !important;
+    }}
   }}
 </style>
 </head>
 <body{' class="wide-page"' if wide else ''}>
 <div id="page-loading-bar" aria-hidden="true"></div>
 <div class="brand">
-  <a class="brand-home-link" href="/">
+  <a class="brand-home-link" href="/firstreply">
     {logo_html}
-    <h1>Workflow Asset</h1>
+    <h1>Zendesk Workflow Asset for CSA</h1>
     {pending_badge_html}
   </a>
   <div class="brand-controls-row">
-    {header_action}
-    {_zendesk_status_control_html()}
     <div class="theme-toggle" role="group" aria-label="Theme">
       <button type="button" data-theme="system" title="Auto (match system)" onclick="setTheme('system')">{_icon("monitor", "icon-sm")}</button>
       <button type="button" data-theme="light" title="Light" onclick="setTheme('light')">{_icon("sun", "icon-sm")}</button>
@@ -2082,6 +2223,10 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
     {_top_nav_html(current_path)}
   </div>
   {header_meta}
+  <div class="brand-status-row">
+    {_zendesk_status_control_html()}
+    {_refresh_button_html(current_path)}
+  </div>
 </div>
 {banner_html}
 <main>
@@ -2092,22 +2237,9 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
 {theme_script}
 {interaction_script}
 {loading_bar_script}
+{count_up_script}
 </body>
 </html>""".encode("utf-8")
-
-
-def _kpi_tile(value, label: str, tone: str = "") -> str:
-    """One tile for a `.kpi-grid` row -- bigger-number treatment (see
-    .kpi-tile/.kpi-value in the stylesheet) with an optional left-edge
-    accent hinting at good/neutral/bad, using the same non-traffic-light
-    severity colors (teal/amber/deep-amber) already used elsewhere rather
-    than literal red/green. Originally a closure private to
-    _render_sla_page's "Today" tiles; pulled up to module level once
-    _header_meta_html's own daily-activity counts needed the exact same
-    tile shape, rather than that page ending up with a second, quietly
-    drifting copy of this same four-line function."""
-    tone_class = f" kpi-{tone}" if tone else ""
-    return f'<div class="kpi-tile{tone_class}"><div class="kpi-value">{value}</div><div class="kpi-label">{html.escape(label)}</div></div>'
 
 
 def _header_meta_html() -> str:
@@ -2123,10 +2255,10 @@ def _header_meta_html() -> str:
     counts = _common.summary_counts()
     # Small pill instead of a plain "M posted today" sentence -- same
     # information, but reads as a glanceable stat rather than a sentence you
-    # have to parse. A KPI-tile version of this (all five summary_counts(),
-    # same _kpi_tile shape /sla's "Today" row uses) was tried and then
-    # explicitly reverted -- back to a plain pill rather than any five-count
-    # variant. This used to be a *second* pill alongside "N pending", but
+    # have to parse. A bigger-number KPI-tile version of this (all five
+    # summary_counts()) was tried and then explicitly reverted -- back to a
+    # plain pill rather than any five-count variant. This used to be a
+    # *second* pill alongside "N pending", but
     # that count is also shown on the logo/title's pending_badge_html on
     # every page (see _page()) -- showing it twice in the same header was
     # redundant, so only "posted today" (which has no other home) stays here.
@@ -2143,21 +2275,29 @@ def _header_meta_html() -> str:
         if next_target["target_iso"]
         else ""
     )
-    # The Zendesk OAuth / SLA metrics links used to live here, middot-
-    # separated at the end of this sentence -- moved to _top_nav_html()
-    # (rendered in the header's brand-right area on every page) now that
-    # there are two of them and more could follow; this line goes back to
-    # being just the counts/timing it was always meant to show.
+    # The Zendesk OAuth status link used to live here, middot-separated at
+    # the end of this sentence -- moved to _top_nav_html() (rendered in the
+    # header's brand-right area on every page) instead; this line goes back
+    # to being just the counts/timing it was always meant to show.
+    # A small pulsing dot ahead of "Next automatic check" -- purely
+    # decorative reinforcement of what the text already says (this is the
+    # one page that auto-refreshes AND runs its own background scan every
+    # couple of minutes), not new information, so aria-hidden keeps it out
+    # of a screen reader's way rather than announcing an unlabeled
+    # graphic. _header_meta_html is only ever called for /firstreply (see
+    # do_GET) -- the one page auto_refresh=True actually applies to -- so
+    # this doesn't need its own conditional the way a shared helper would.
+    live_pulse_html = '<span class="live-pulse" aria-hidden="true"></span>'
     return (
         f'<div class="meta">{summary}<br>Last checked: <span id="last-checked"{last_checked_attr}>{last_checked_text}</span> '
-        f'&middot; Next automatic check: <span id="next-check"{next_check_attr}>{next_check_text}</span></div>'
+        f'&middot; {live_pulse_html}Next automatic check: <span id="next-check"{next_check_attr}>{next_check_text}</span></div>'
     )
 
 
 def _top_nav_html(current_path: str = "") -> str:
     """The nav list of actual working pages, shown in its own vertical
     stack below the logo/title (see _page()'s .brand-nav-row), on every
-    page this tool has (main queue, reconnect, /sla, /tasks, /flagged,
+    page this tool has (main queue, reconnect, /tasks, /flagged,
     /security, /solved) -- not just the main page, the same way the theme
     toggle already appears everywhere (tucked into .brand-controls-row
     instead, off this stack entirely -- see _page()). Consolidates what
@@ -2181,14 +2321,14 @@ def _top_nav_html(current_path: str = "") -> str:
     /flagged and /security now carry a count badge too, but a cache-only
     one rather than a live one: there's no local file tracking "block"/
     "standup"-tagged tickets or the IT-Security group's own recent
-    activity the way personal_tasks.json/sla_history.json back the other
-    badges, so a genuinely live count for either would mean calling
+    activity the way personal_tasks.json backs Tasks' own badge, so a
+    genuinely live count for either would mean calling
     _common.fetch_flagged_tickets/fetch_recent_tickets from this function
     itself, on every page load, not just their own -- and
     fetch_flagged_tickets in particular can page through up to
     FLAGGED_TICKET_SCAN_PAGES pages (1000 tickets) of the IT-Operations
     group on a cold cache. That's a real cost a page with nothing to do
-    with Blocked/Standup (say, /tasks) shouldn't ever risk paying just to
+    with Discussion (say, /tasks) shouldn't ever risk paying just to
     draw a header badge. _common.cached_flagged_ticket_count/
     cached_security_ticket_count read those two functions' own caches
     without ever calling Zendesk themselves -- so the badge shows the last
@@ -2197,22 +2337,21 @@ def _top_nav_html(current_path: str = "") -> str:
     FLAGGED_CACHE_TTL_SECONDS, 120 seconds each), and quietly disappears
     once it goes stale rather than forcing a fresh scan. In practice that
     means the badge is closer to "still warm from your last visit" than
-    "always current" the way SLA metrics/My tasks are -- an accepted
+    "always current" the way Tasks' own count is -- an accepted
     trade-off for keeping every other page's render free of a Zendesk
     call it has no other reason to make.
 
     Two things layered on top of the plain link list: an "active" state on
     whichever link matches current_path, so it's obvious at a glance which
     page you're already on (mirroring the theme toggle's own .active
-    treatment); and a small count badge per link -- the SLA breach count on
-    SLA metrics, the number of not-yet-done personal tasks on My tasks, and
-    the cache-only Blocked/Standup and IT-Security counts described above
-    -- riding at the end of the row rather than crowding the label."""
-    sla_summary = _common.load_sla_summary(log_fn=_log)
-    sla_breached = sla_summary["latest"].get("breached", 0) if sla_summary.get("available") else 0
+    treatment); and a small count badge per link -- the number of
+    not-yet-done personal tasks on Tasks, and the cache-only Discussion and
+    Security counts described above -- riding at the end of the row rather
+    than crowding the label."""
     tasks_count = len(_common.draft_personal_tasks()) + len(_common.open_personal_tasks())
     flagged_count = _common.cached_flagged_ticket_count()
     security_count = _common.cached_security_ticket_count(_common.IT_SECURITY_GROUP_ID)
+    sla_breach_count = _common.cached_sla_breach_count()
 
     def _badge(count, warn=False):
         if not count:
@@ -2234,51 +2373,70 @@ def _top_nav_html(current_path: str = "") -> str:
         )
 
     # One flat list, ordered roughly by how often you'd actually reach for
-    # it -- the two working queues first (My tasks, Blocked/Standup), then
-    # IT-Security and Recently Solved, then SLA metrics last as the one
-    # you check in on rather than work from day to day. No more splitting
-    # this into "status" vs "workflow" clusters with a divider between
-    # them -- that split existed to set Zendesk OAuth apart from the pages
-    # you actually work in, and now that OAuth has its own separate control
-    # entirely (see _zendesk_status_control_html), every remaining link
-    # here IS a working page, so there's no second category left to
-    # separate from the first.
+    # it -- First Reply first (the original main queue, and still the
+    # single most-worked page day to day), then Overview as the "check
+    # this before anything else" glance across the rest, then the two
+    # other working queues (Tasks, Discussion), then Security, then
+    # Recently Solved last as the one you check in on rather than work
+    # from day to day. No more splitting this into "status" vs "workflow"
+    # clusters with a divider between them -- that split existed to set
+    # Zendesk OAuth apart from the pages you actually work in, and now
+    # that OAuth has its own separate control entirely (see
+    # _zendesk_status_control_html), every remaining link here IS a
+    # working page, so there's no second category left to separate from
+    # the first.
     nav_links = (
-        # Overview sits first -- it's the "check this before anything
+        # No badge here despite this being the page with arguably the
+        # single most actionable count of any of them -- pending_badge_html
+        # (see _page()'s logo/title) already shows "N pending" on every
+        # page, so a matching badge on this link would be the exact
+        # duplicate-count problem that got the old second "N pending"
+        # stat-chip removed from the header meta line; one visible count
+        # is enough.
+        _link("/firstreply", "reply", "First Reply")
+        # Overview sits second -- it's the "check this before anything
         # else" glance across all four of the pages below it (see
-        # _render_overview_page), so it goes at the top of the list
+        # _render_overview_page), so it goes near the top of the list
         # rather than slotted in by topic like the rest.
-        _link("/overview", "grid", "Overview")
-        + _link("/tasks", "check-square", "My tasks", _badge(tasks_count))
-        + _link("/flagged", "flag", "Blocked/Standup", _badge(flagged_count))
-        + _link("/security", "shield", "IT-Security", _badge(security_count))
+        + _link("/overview", "grid", "Overview")
+        # SLA sits right after Overview -- another "check this before you
+        # dig in" glance page rather than a queue you work from day to
+        # day, and its badge (unlike Tasks/Discussion/Security's own) is a
+        # warn-colored count specifically because a breach is something
+        # that needs escalating, not just a to-do count.
+        + _link("/sla", "clock", "SLA", _badge(sla_breach_count, warn=True))
+        + _link("/tasks", "check-square", "Tasks", _badge(tasks_count))
+        + _link("/flagged", "flag", "Discussion", _badge(flagged_count))
+        + _link("/security", "shield", "Security", _badge(security_count))
         # No badge here on purpose, unlike the three above -- those counts
         # are all "does this need a look" signals (open tasks, blocked/
-        # standup tickets, IT-Security's recent activity). Recently Solved
+        # standup tickets, Security's recent activity). Recently Solved
         # would just show a static number that maxes out at
         # _common.RECENTLY_SOLVED_LIMIT the moment its cache is warm --
         # nothing about that number says "go look at this," so a badge
         # here would just be visual noise dressed up as a signal.
         + _link("/solved", "check-circle", "Recently Solved")
-        + _link("/sla", "bar-chart", "SLA metrics", _badge(sla_breached, warn=True))
     )
     return f'<div class="top-nav">{nav_links}</div>'
 
 
 def _zendesk_status_control_html() -> str:
-    """A small icon-only connection-status control living in
-    .brand-controls-row (see _page()) alongside the theme toggle, rather
-    than among the working pages in _top_nav_html's list above. Zendesk
-    OAuth is a standing "is this healthy" indicator you almost never click
-    on purpose -- only when something's broken -- much closer in spirit to
-    the theme toggle (a standing per-browser control you set once and
-    mostly ignore) than to My tasks/Blocked-Standup/IT-Security/Recently
-    Solved/SLA metrics, which are pages you actually navigate to as part
-    of the day's work. Icon-only stays right here even after the main nav
-    list gained its labels back, since this one control genuinely is
-    meant to fade into the background until it needs attention -- the
-    title tooltip plus (when broken) the warning color and border are
-    what carry that attention, not a permanent label."""
+    """A small icon-only connection-status control living in its own
+    .brand-status-row (see _page()), pinned to the very bottom of the
+    sidebar on wide viewports -- below the nav list, not alongside the
+    theme toggle in .brand-controls-row and not among the working pages in
+    _top_nav_html's list above. Zendesk OAuth is a standing "is this
+    healthy" indicator you almost never click on purpose -- only when
+    something's broken -- much closer in spirit to the theme toggle (a
+    standing per-browser control you set once and mostly ignore) than to
+    Tasks/Discussion/Security/Recently Solved, which are pages you
+    actually navigate to as part of the day's work; living at the bottom,
+    below everything you actually use day to day, reinforces that it's a
+    standing status check rather than another destination. Icon-only even
+    after the main nav list gained its labels back, since this one control
+    genuinely is meant to fade into the background until it needs
+    attention -- the title tooltip plus (when broken) the warning color
+    and border are what carry that attention, not a permanent label."""
     auth_ok = _common.auth_status().get("ok", True)
     warn_class = "" if auth_ok else " zendesk-status-warn"
     title = "Zendesk OAuth" if auth_ok else "Zendesk OAuth -- isn't connected right now"
@@ -2288,12 +2446,31 @@ def _zendesk_status_control_html() -> str:
     )
 
 
-def _refresh_button_html() -> str:
-    """The Refresh button, split out from the old _status_bar() so it can
-    sit directly beside the logo/title (see _page()'s header_action param)
-    instead of on its own row below."""
+def _refresh_button_html(return_to: str = "/firstreply") -> str:
+    """The Refresh button -- rendered unconditionally in .brand-status-row
+    (see _page()) next to the Zendesk OAuth status control, on every page,
+    rather than only on the main queue via a per-page header_action param
+    the way it originally worked (split out from the old _status_bar() to
+    sit beside the logo/title). Grouping it with the OAuth control instead
+    of leaving it main-page-only reads better now that both are "standing
+    utility actions available anywhere" rather than the main queue's own
+    page-specific action -- which is also why the label shrank from
+    "Refresh from Zendesk now" to just "Refresh data": a persistent,
+    always-visible button earns a shorter, more generic name than a
+    one-off primary action would.
+
+    return_to (see the hidden field below, and do_POST's ["refresh"]
+    branch) is what actually makes "available on every page" work rather
+    than just LOOK like it does -- without it, clicking Refresh while on
+    /tasks would still bounce you back to /firstreply, since a plain POST
+    has no other way to know which page it was submitted from. _page()
+    passes its own current_path through here so the redirect after
+    refreshing lands you back on the exact page you clicked from, the
+    same return_to pattern _render_readonly_ticket_row's Claim button
+    already established for the same reason."""
     return f"""<form method="post" action="/refresh">
-      <button class="refresh" type="submit" data-loading-text="Refreshing…">{_icon("refresh")}<span>Refresh from Zendesk now</span></button>
+      <input type="hidden" name="return_to" value="{html.escape(return_to)}">
+      <button class="refresh" type="submit" data-loading-text="Refreshing…">{_icon("refresh")}<span>Refresh data</span></button>
     </form>"""
 
 
@@ -2320,48 +2497,6 @@ def _filter_box_html(target_selector: str, placeholder: str = "Filter by subject
   <input type="search" class="filter-input" placeholder="{safe_placeholder}" aria-label="{safe_placeholder}">
   <span class="filter-count" aria-live="polite"></span>
 </div>"""
-
-
-def _sla_refresh_button_html(active_days) -> str:
-    """"Check for newer data" button for the /sla page's header, mirroring
-    the main queue page's Refresh button's placement (see
-    _refresh_button_html) but a much lighter action underneath -- a plain
-    `git pull --ff-only` in the sibling sla-report-slack checkout (see
-    _common.pull_sla_report_data), picking up whatever that repo's own
-    scheduled job (or a manual GitHub Actions run) has already committed.
-    Deliberately NOT a live Zendesk fetch: an earlier version of this
-    button shelled out to run that repo's own scan script directly, which
-    needed a second, locally-stored copy of Zendesk/Gmail credentials and
-    sent a live email on every click -- replaced with this git-pull
-    approach specifically to avoid both. Carries whatever date-range pill
-    is currently selected as a hidden field so refreshing doesn't reset
-    it."""
-    range_field = f'<input type="hidden" name="range" value="{active_days}">' if active_days else ""
-    return f"""<form method="post" action="/sla/refresh">
-      {range_field}
-      <button class="refresh" type="submit" data-loading-text="Checking…">{_icon("refresh")}<span>Check for newer data</span></button>
-    </form>"""
-
-
-def _sla_trigger_button_html(active_days) -> str:
-    """"Run full refresh" -- the /sla page's SECOND, heavier button, sitting
-    beside (not replacing) _sla_refresh_button_html above. Where that one is
-    a passive git-pull that only ever shows what's already been committed,
-    this one actually dispatches sla-report-slack's own GitHub Actions
-    workflow via _common.trigger_sla_report_workflow, waits for it to
-    finish, and pulls the result -- a genuine on-demand refresh, at the cost
-    of also being the slower path (bounded by that workflow's own run time)
-    and, unlike the git-pull button, still causing a real Zendesk scan and
-    sla-report-slack's own email (its workflow always runs with
-    DRY_RUN=false, however it's triggered). Uses a visually distinct color
-    (.trigger, gold, matching the .claim button elsewhere) so it never
-    reads as a second copy of the plain "Check for newer data" button.
-    Carries the same hidden range field for the same reason."""
-    range_field = f'<input type="hidden" name="range" value="{active_days}">' if active_days else ""
-    return f"""<form method="post" action="/sla/trigger">
-      {range_field}
-      <button class="trigger" type="submit" data-loading-text="Running… (up to a few min)">{_icon("external-link")}<span>Run full refresh</span></button>
-    </form>"""
 
 
 def _auth_warning_html() -> str:
@@ -2392,7 +2527,7 @@ def _render_reconnect_page(banner: str = "") -> bytes:
         auth_url = html.escape(pending["authorization_url"])
         body = f"""
 <div class="narrow-page">
-<p><a href="/">&larr; back to pending tickets</a></p>
+<p><a href="/firstreply">&larr; back to pending tickets</a></p>
 <h2>{_topic_icon("reconnect")}Reconnect Zendesk OAuth</h2>
 <p>1. Click below and approve access in Zendesk:</p>
 <p><a href="{auth_url}" target="_blank" rel="noopener">Authorize Zendesk access</a></p>
@@ -2416,7 +2551,7 @@ below.</p>
     else:
         body = f"""
 <div class="narrow-page">
-<p><a href="/">&larr; back to pending tickets</a></p>
+<p><a href="/firstreply">&larr; back to pending tickets</a></p>
 <h2>{_topic_icon("reconnect")}Reconnect Zendesk OAuth</h2>
 <p>No reconnect in progress.</p>
 <form method="post" action="/reconnect/start">
@@ -2426,282 +2561,84 @@ below.</p>
 """
     return _page(body, banner=banner, current_path="/reconnect")
 
+def _priority_badge_html(priority: str) -> str:
+    """The small colored "HIGH"/"URGENT" pill next to a ticket's subject
+    (Zendesk's own priority field, surfaced free-of-charge -- see the call
+    site in _render_ticket). Only shown
+    for "high"/"urgent"; "normal"/"low" get no badge at all, same
+    reasoning as the TEST badge elsewhere -- a badge on every single card
+    would be noise most of the time.
 
-def _trend_row(label: str, trend, higher_is_worse: bool) -> str:
-    """One line of the week-over-week trend block. Color only flags the
-    "worse" direction for that particular metric (more breached/due-soon is
-    bad news; more total open tickets is neutral-to-good since it just
-    means volume, so it never gets the alert color) -- reusing the
-    existing .flag-alert class rather than inventing a parallel red/green
-    palette, consistent with this file's deliberate avoidance of literal
-    traffic-light colors elsewhere."""
-    if trend is None:
-        return f'<p class="meta">{html.escape(label)}: not enough history yet (needs 14+ days of daily snapshots).</p>'
-    pct = trend["pct_change"]
-    if pct is None:
-        return f'<p class="meta">{html.escape(label)}: flat (zero both weeks).</p>'
-    worse = (pct > 0) if higher_is_worse else (pct < 0)
-    arrow = "▲" if pct > 0 else ("▼" if pct < 0 else "→")
-    sign = "+" if pct > 0 else ""
-    class_attr = ' class="flag-alert"' if worse else ""
-    return (
-        f'<p><span{class_attr}>{arrow} {sign}{pct:.0f}%</span> {html.escape(label)} '
-        f"vs the prior 7 days</p>"
-    )
+    HIGH and URGENT used to render in the exact identical color
+    (--flag-alert-color for both), distinguishable only by actually
+    reading the text -- which defeats the point of a color-coded severity
+    badge in the first place. URGENT now gets the .badge-priority-urgent
+    modifier (--flag-alert-color-urgent, a deeper/more saturated red in
+    every theme) so the two are visually distinct at a glance, not just by
+    label."""
+    priority = (priority or "").lower()
+    if priority not in ("high", "urgent"):
+        return ""
+    css_class = "badge-priority badge-priority-urgent" if priority == "urgent" else "badge-priority"
+    return f'<span class="{css_class}">{_topic_icon("priority-alert", "topic-icon-inline")}{html.escape(priority.upper())}</span>'
 
 
-def _render_range_pills(active_days) -> str:
-    """Date-range pill row for the personal activity charts -- plain <a>
-    links carrying a ?range= query param (see Handler.do_GET), so picking a
-    range is an ordinary page reload with zero client JS required, the same
-    "one self-contained response per request" philosophy as the rest of
-    this page (and the CDN dashboard's own pan/zoom this deliberately
-    doesn't try to reproduce -- see the README). `active_days` is whichever
-    range is currently applied (None means "All"), so the matching pill can
-    render filled rather than outlined -- same active/inactive visual
-    language as the Auto/Light/Dark theme toggle already uses."""
-    def pill(label, href, active):
-        cls = "range-pill range-pill-active" if active else "range-pill"
-        return f'<a class="{cls}" href="{href}">{html.escape(label)}</a>'
+def _titled_link_html(subject_html: str, url: str) -> str:
+    """Wraps an already-escaped ticket subject in the same live-Zendesk
+    href its neighboring "#tid" link already uses (see every call site
+    below: _render_ticket, _render_confirm_page, _render_readonly_ticket_row,
+    _render_worked_on_sidebar) -- before this, only the small "#tid" number
+    itself opened the ticket, even though the much larger, more-clicked-on
+    title text sitting right next to it looked just as clickable and
+    wasn't. A single shared helper instead of repeating this at each call
+    site so all four stay in sync if the styling or target ever needs to
+    change.
 
-    pills = [pill(f"{d}d", f"/sla?range={d}", active_days == d) for d in _common.SLA_AGENT_RANGE_OPTIONS]
-    pills.append(pill("All", "/sla", active_days is None))
-    return f'<div class="range-pills" role="group" aria-label="Date range">{"".join(pills)}</div>'
+    Deliberately styled via .ticket-title-link to look like ordinary text
+    -- color: inherit, no underline by default -- rather than picking up
+    the same blue/underlined treatment as "#tid". The goal here is just
+    fixing the surprisingly common miss-click of aiming for the title
+    instead of the number, not visually announcing "this is a link" on
+    every card; a hover/focus underline (see the CSS rule alongside .tid)
+    is enough of a cue once someone's pointer is actually on it.
 
+    Falls back to the plain subject text, unwrapped, when there's no url.
 
-def _render_agent_activity_html(series: dict) -> str:
-    """'Your activity' charts -- the personalized counterpart to the
-    team-wide KPI tiles/breach list above them on the /sla page. Unlike
-    those, this data genuinely is tracked per-agent per-day in
-    sla_history.json (see _common.load_sla_agent_series), so it can be
-    filtered to one person honestly, which the queue-health and
-    violations-by-rule numbers can't be (see the module README)."""
-    if not series["available"]:
-        return f'<div class="ticket"><h2>Your activity</h2><p class="empty">{html.escape(series["error"])}</p></div>'
-    if not series["dates"]:
-        return '<div class="ticket"><h2>Your activity</h2><p class="empty">No history yet.</p></div>'
-
-    name = html.escape(series["agent_name"])
-    active_days = series.get("days_requested")
-    range_pills = _render_range_pills(active_days)
-    scope_label = f"last {active_days} days" if active_days else "full history"
-    activity_chart = _svg_bar_chart(
-        series["dates"],
-        [
-            {"label": "Public replies", "values": series["public"], "color": "var(--btn-approve)"},
-            {"label": "Internal comments", "values": series["internal"], "color": "var(--btn-internal)"},
-        ],
-        tracked=series["tracked"],
-    )
-    solved_chart = _svg_bar_chart(
-        series["dates"],
-        [{"label": "Solved", "values": series["solved"], "color": "var(--accent)"}],
-        tracked=series["tracked"],
-    )
-    untracked_days = sum(1 for t in series["tracked"] if not t)
-    # A real legend (color swatch + label) rather than a plain sentence, and
-    # positioned right under the chart it explains rather than after both
-    # charts -- the gray hairline is easy to misread as "zero activity" at a
-    # glance, so the thing that disambiguates it should sit where the eye
-    # already is, not further down the page.
-    untracked_note = (
-        f'<p class="meta chart-legend">'
-        f'<span class="legend-swatch legend-swatch--untracked"></span>'
-        f'Gray hairline = not tracked that day, not a real zero '
-        f'({untracked_days} of the last {len(series["dates"])} days).</p>'
-        if untracked_days
-        else ""
-    )
-    return f"""
-<div class="ticket">
-  <h2>Your activity — {name}</h2>
-  {range_pills}
-  <p class="meta">
-    <span class="stat-chip">{series["total_public"]} public replies</span>
-    <span class="stat-chip">{series["total_internal"]} internal comments</span>
-    <span class="stat-chip">{series["total_solved"]} solved</span>
-    ({html.escape(scope_label)})
-  </p>
-  <div class="two-panel">
-    <div>
-      <p class="meta" style="margin-bottom:0.3rem">Public replies + internal comments, per day</p>
-      {activity_chart}
-      {untracked_note}
-    </div>
-    <div>
-      <p class="meta" style="margin-bottom:0.3rem">Tickets solved, per day</p>
-      {solved_chart}
-    </div>
-  </div>
-  <p class="meta">Only this chart is scoped to one person -- the numbers above (queue health, violations by rule) are queue-wide, since sla_history.json doesn't record which agent a ticket was assigned to on a given historical day, only who replied or solved it.</p>
-</div>"""
+    NOT used for a personal task's title (draft or open) -- see
+    _task_title_link_html below instead. A task is a different kind of
+    thing from a ticket shown elsewhere in this tool: Discussion/Security/
+    the main queue are all live Zendesk tickets that exist independently
+    of this tool and are primarily managed in Zendesk itself, so their
+    title opens the same place their "#tid" does. A task, promoted or
+    not, is managed HERE -- Quick Solve/Mark done/Promote/Discard/Edit are
+    all only available on /tasks -- so its title should take you back to
+    this app, to that exact row, not out to Zendesk."""
+    if not url:
+        return subject_html
+    return f'<a href="{html.escape(url)}" target="_blank" class="ticket-title-link">{subject_html}</a>'
 
 
-def _render_sla_page(summary: dict, agent_series: dict = None, banner: str = "") -> bytes:
-    """Native /sla page (see _common.load_sla_summary): renders the sibling
-    sla-report-slack repo's precomputed daily snapshot in this tool's own
-    dark/light theme and stat-chip/flag-alert visual language, rather than
-    embedding that repo's own separately-branded sla_dashboard.html. Links
-    out to that dashboard (via a file:// URL -- this server has no
-    static-file route, see the module docstring) for the multi-chart
-    deep-dive this page deliberately doesn't try to reproduce.
+def _task_title_link_html(subject_html: str, local_id: str) -> str:
+    """Links a task's title (draft or open, wherever it's shown -- the
+    /tasks page's own rows, or the compact previews on /overview's Tasks
+    tile) to that exact row's anchor on /tasks (#task-<local_id>, set on
+    the row's own wrapper by _render_draft_task_row/_render_open_task_row)
+    -- same-tab, no target="_blank", since this is normal in-app
+    navigation, not a hop out to another site.
 
-    agent_series (see _common.load_sla_agent_series) drives the "Your
-    activity" section below the team-wide numbers -- the one part of this
-    page that's genuinely personalized, since it's the one part of
-    sla_history.json that's actually tracked per-agent. Defaults to None
-    (renders nothing extra) so existing callers/tests that only pass
-    `summary` keep working."""
-    if not summary["available"]:
-        body = f"""
-<p><a href="/">&larr; back to pending tickets</a></p>
-<h2>{_topic_icon("sla")}SLA metrics</h2>
-<p class="empty">{html.escape(summary["error"])}</p>
-"""
-        header_action = _sla_refresh_button_html(None) + _sla_trigger_button_html(None)
-        return _page(body, banner=banner, header_action=header_action, current_path="/sla")
+    Deliberately NOT the same href an open task's "#tid" link uses (see
+    _titled_link_html's docstring for the reasoning): the title always
+    means "take me to this task, in this app," while "#tid" (when a task
+    has one) means "take me to the Zendesk ticket it became." Two
+    different destinations, two different affordances, so clicking each
+    does what its own label suggests rather than one silently overriding
+    the other.
 
-    latest = summary["latest"]
-    date = html.escape(str(latest.get("date", "?")))
-    stale_days = summary["stale_days"]
-    if stale_days is None:
-        staleness_html = f'<p class="meta">Snapshot date: {date}.</p>'
-    elif stale_days <= 0:
-        staleness_html = f'<p class="meta">Last updated {date} (today).</p>'
-    elif stale_days <= 3:
-        # A normal weekend/holiday gap for a weekdays-only 9am PT job --
-        # worth showing the date, not worth alarming about.
-        staleness_html = f'<p class="meta">Last updated {date} ({stale_days} day{"s" if stale_days != 1 else ""} ago).</p>'
-    else:
-        staleness_html = (
-            f'<p class="flag-alert">Last updated {date} ({stale_days} days ago) -- '
-            "older than the weekdays-only report normally goes. Has this Mac "
-            "pulled the sla-report-slack repo's latest commits?</p>"
-        )
-
-    # KPI tiles, not stat-chip pills -- this is the page's headline content,
-    # not a secondary status line, so it gets the bigger-number treatment
-    # (see _kpi_tile/.kpi-value in the stylesheet) rather than literal
-    # red/green.
-    chips = (
-        '<div class="kpi-grid">'
-        + _kpi_tile(latest.get("total", 0), "Open")
-        + _kpi_tile(latest.get("breached", 0), "Breached", "bad" if latest.get("breached", 0) else "")
-        + _kpi_tile(latest.get("due_soon", 0), "Due soon", "warn" if latest.get("due_soon", 0) else "")
-        + _kpi_tile(latest.get("on_track", 0), "On track", "good")
-        + _kpi_tile(f'{latest.get("compliance_pct", "?")}%', "Compliance")
-        + "</div>"
-    )
-
-    trend = summary["trend"]
-    trend_html = (
-        _trend_row("Breached tickets", trend["breached"], higher_is_worse=True)
-        + _trend_row("Due-soon tickets", trend["due_soon"], higher_is_worse=True)
-        + _trend_row("Total open tickets", trend["total"], higher_is_worse=False)
-    )
-
-    rules = latest.get("rules") or {}
-    breached_ids = latest.get("breached_ids") or []
-    if breached_ids:
-        rule_summary = ", ".join(f"{html.escape(str(k))}: {v}" for k, v in rules.items())
-        breach_links = ", ".join(
-            f'<a href="{_common.ticket_url(tid)}" target="_blank">#{tid}</a>' for tid in breached_ids
-        )
-        breaches_html = f"""
-<div class="ticket">
-  <h2>{_topic_icon("breach")}Current breaches</h2>
-  <p>{breach_links}</p>
-  {f'<p class="meta">By rule: {rule_summary}</p>' if rule_summary else ""}
-</div>"""
-    else:
-        breaches_html = (
-            f'<div class="ticket"><h2>{_topic_icon("breach")}Current breaches</h2>'
-            f'<p class="empty">{_topic_icon("breach-clear", "topic-icon-empty")}None right now.</p></div>'
-        )
-
-    if summary["dashboard_exists"]:
-        dash_url = "file://" + quote(summary["dashboard_path"])
-        dashboard_html = (
-            f'<p><a href="{dash_url}" target="_blank" style="display:inline-flex;align-items:center;gap:0.3rem">{_icon("external-link", "icon-sm")}Open the full dashboard '
-            f"(charts, agent activity, rule breakdown)</a><br>"
-            f'<span class="meta">{html.escape(summary["dashboard_path"])}</span></p>'
-        )
-    else:
-        dashboard_html = '<p class="meta">Full dashboard not found on disk -- has sla-report-slack run at least once?</p>'
-
-    agent_activity_html = _render_agent_activity_html(agent_series) if agent_series is not None else ""
-
-    # One shared date-range line above both the team-wide sections and the
-    # personal charts below -- both are read from the exact same
-    # sla_history.json entries (see _common.load_sla_summary/
-    # load_sla_agent_series, which share _load_sla_entries), so this is a
-    # real fact about the data, not a cosmetic unification of two windows
-    # that don't actually match. Only claims a start date when the personal
-    # series is actually present (agent_series may be None for older
-    # callers/tests), since "Today" and "Current breaches" alone don't have
-    # a meaningful multi-day range to name.
-    history_days = summary["history_days"]
-    if agent_series is not None and agent_series.get("available") and agent_series.get("dates"):
-        range_start = _short_date(agent_series["dates"][0])
-        range_end = _short_date(agent_series["dates"][-1])
-        shown_days = len(agent_series["dates"])
-        if agent_series.get("days_requested"):
-            # The range-pill selector below narrowed the personal charts to
-            # fewer days than the full history -- say so explicitly rather
-            # than reusing the "both drawn from the same N-day history"
-            # line, which would overstate how aligned the two sections are
-            # once they're no longer actually showing the same window.
-            scope_html = (
-                f'<p class="meta">Team metrics are drawn from the full {history_days}-day sla-report-slack history; '
-                f'your activity below is currently showing the last {shown_days} days ({range_start} – {range_end}).</p>'
-            )
-        else:
-            scope_html = (
-                f'<p class="meta">Team metrics and your activity below are both drawn from the same '
-                f'{history_days}-day sla-report-slack history ({range_start} – {range_end}).</p>'
-            )
-    else:
-        scope_html = f'<p class="meta">Drawn from the sla-report-slack repo\'s {history_days}-day snapshot history.</p>'
-
-    # Two buttons live in the header now (see header_action below), and they
-    # cost genuinely different things -- said plainly here so "why didn't
-    # this change the Zendesk-side numbers" (or "why did this just send an
-    # email") has an answer on the page itself, not just in the README.
-    refresh_note = (
-        '<p class="meta">The <strong>Check for newer data</strong> button above pulls whatever '
-        "sla-report-slack's own scheduled job has already committed to GitHub -- it doesn't touch "
-        "Zendesk or send an email itself. <strong>Run full refresh</strong> goes further: it actually "
-        "triggers that repo's GitHub Actions workflow and waits for it, which does re-scan Zendesk and "
-        "does send sla-report-slack's own email, same as its normal weekday run -- use it when you "
-        "specifically want fresh numbers right now, not just whatever's already been committed.</p>"
-    )
-
-    trigger_status_html = _sla_trigger_status_html()
-    body = f"""
-<p><a href="/">&larr; back to pending tickets</a></p>
-<h2>{_topic_icon("sla")}SLA metrics</h2>
-{staleness_html}
-{scope_html}
-{refresh_note}
-{trigger_status_html}
-<div class="ticket">
-  <h2>Today</h2>
-  {chips}
-</div>
-<div class="two-panel">
-  <div class="ticket">
-    <h2>Week over week</h2>
-    {trend_html}
-  </div>
-  {breaches_html}
-</div>
-{dashboard_html}
-<p class="meta">Numbers are read as-is from that history file, not recomputed here.</p>
-{agent_activity_html}
-"""
-    active_days = agent_series.get("days_requested") if agent_series is not None else None
-    header_action = _sla_refresh_button_html(active_days) + _sla_trigger_button_html(active_days)
-    return _page(body, banner=banner, header_action=header_action, current_path="/sla")
+    Landing back on /tasks with a matching #task-<local_id> fragment
+    scrolls to that row natively (no JS needed) and briefly highlights it
+    via the .mini-ticket:target CSS rule -- see the taskHighlight keyframe
+    alongside .mini-ticket's other rules."""
+    return f'<a href="/tasks#task-{html.escape(str(local_id))}" class="ticket-title-link">{subject_html}</a>'
 
 
 def _duration_bucket(then: datetime) -> str:
@@ -2857,7 +2794,7 @@ def _render_recently_handled() -> str:
 
 
 def _render_worked_on_sidebar(items: list, capped: bool = False, zendesk_unavailable: bool = False) -> str:
-    """Persistent left-hand column on the main queue page ("/") listing the
+    """Persistent left-hand column on the main queue page (/firstreply) listing the
     last 30 tickets actually worked on, most-recent first -- via
     _common.fetch_recently_worked_on, which now covers two sources: replies
     sent THROUGH this tool (the original, always-available local scope) and,
@@ -2914,6 +2851,7 @@ def _render_worked_on_sidebar(items: list, capped: bool = False, zendesk_unavail
         subject = html.escape(item.get("subject") or f"Ticket #{tid}")
         url = item.get("url") or ""
         link = f'<a href="{html.escape(url)}" target="_blank">#{tid}</a>' if url else f"#{tid}"
+        subject = _titled_link_html(subject, url)
         kind = "Public reply" if item.get("posted_public") else "Internal comment"
         posted_at = item.get("posted_at", "")
         try:
@@ -2958,12 +2896,13 @@ def _render_confirm_page(ticket_id, draft_text: str, public: bool, reply_check: 
     action_path = "post_public" if public else "post_internal"
     subject_html = html.escape(subject) if subject else ""
     link = f'<a href="{html.escape(url)}" target="_blank" class="tid">#{ticket_id}</a>' if url else f'<span class="tid">#{ticket_id}</span>'
+    subject_html = _titled_link_html(subject_html, url)
     draft_escaped = html.escape(draft_text)
     reason_html = html.escape(reply_check.get("reason", "an existing reply"))
     button_class = "approve" if public else "internal"
     button_icon = _icon("send") if public else _icon("lock")
     return _page(f"""
-<p><a href="/">&larr; back to pending tickets</a></p>
+<p><a href="/firstreply">&larr; back to pending tickets</a></p>
 <div class="ticket">
   <h2>{link} — {subject_html}</h2>
   <p class="flag-alert">This ticket already appears to have {reason_html}.</p>
@@ -3032,8 +2971,8 @@ def _requester_line(item: dict) -> str:
     )
 
 
-# Used by the main queue's "Priority first" sort toggle (see do_GET's "/"
-# handler) to rank Zendesk's own priority field -- the same field
+# Used by the main queue's "Priority first" sort toggle (see do_GET's
+# "/firstreply" handler) to rank Zendesk's own priority field -- the same field
 # _render_ticket already surfaces as a badge for "high"/"urgent". Missing
 # or unrecognized values (blank, "low", "normal", or something Zendesk adds
 # later that this tool doesn't know about yet) all rank alongside "normal"
@@ -3052,6 +2991,7 @@ def _render_ticket(item: dict) -> str:
     subject = html.escape(item.get("subject", ""))
     url = item.get("url") or ""
     link = f'<a href="{html.escape(url)}" target="_blank" class="tid">#{tid}</a>' if url else f'<span class="tid">#{tid}</span>'
+    subject = _titled_link_html(subject, url)
     # When someone else is already working this ticket in Zendesk, don't
     # pre-fill the auto-drafted acknowledgment -- the stored draft in
     # pending_drafts.json is left untouched (so it's still there if the
@@ -3082,12 +3022,7 @@ def _render_ticket(item: dict) -> str:
     # rather than a badge on every single card for "normal"/"low", which
     # would just be noise most of the time (mirrors why the TEST badge
     # above is conditional too, not shown on every card).
-    priority = (item.get("priority") or "").lower()
-    priority_html = (
-        f'<span class="badge-priority">{_topic_icon("priority-alert", "topic-icon-inline")}{html.escape(priority.upper())}</span>'
-        if priority in ("high", "urgent")
-        else ""
-    )
+    priority_html = _priority_badge_html(item.get("priority"))
     # Zendesk's own Assignee field, surfaced as a heads-up: someone else is
     # already working this ticket directly in Zendesk, even though no
     # public reply has posted yet (so it's still sitting here as a
@@ -3122,7 +3057,7 @@ def _render_ticket(item: dict) -> str:
             f'data-loading-text="Claiming…"{confirm_attr}>{_icon("user-check")}<span>Claim for yourself</span></button>'
         )
     return f"""
-<div class="ticket">
+<div class="ticket" id="ticket-{tid}">
   <p class="ticket-eyebrow">Ticket</p>
   <h2>{link} — {subject}{badge_html}{priority_html}</h2>
   <div class="meta">{_requester_line(item)}{age_html}{updated_html}</div>
@@ -3141,7 +3076,7 @@ def _render_ticket(item: dict) -> str:
 </div>"""
 
 
-def _render_readonly_ticket_row(item: dict, return_to: str = "/") -> str:
+def _render_readonly_ticket_row(item: dict, return_to: str = "/firstreply") -> str:
     """One read-only ticket row: link, subject, status, requester,
     assignee, and a Claim button when it isn't already ours -- shared by
     the IT-Security page (_render_security_page/_render_security_column)
@@ -3167,6 +3102,7 @@ def _render_readonly_ticket_row(item: dict, return_to: str = "/") -> str:
     subject = html.escape(item.get("subject", ""))
     url = item.get("url") or ""
     link = f'<a href="{html.escape(url)}" target="_blank" class="tid">#{tid}</a>' if url else f'<span class="tid">#{tid}</span>'
+    subject = _titled_link_html(subject, url)
     status = html.escape((item.get("status") or "").capitalize() or "Unknown")
     requester_name = item.get("requester_name")
     requester = (
@@ -3230,7 +3166,7 @@ def _render_security_column(items: list, error: str = "", return_to: str = "/sec
     from cache) -- shown in place of the list rather than silently
     rendering an empty panel that could be mistaken for "the queue is
     actually empty right now."""
-    heading = f'<h2 class="column-heading">{_topic_icon("security")}IT-Security — 5 most recent</h2>'
+    heading = f'<h2 class="column-heading">{_topic_icon("security")}Security — 5 most recent</h2>'
     if error:
         return f'<div class="security-panel">{heading}<p class="flag-alert">{html.escape(error)}</p></div>'
     if not items:
@@ -3246,12 +3182,363 @@ def _render_security_column(items: list, error: str = "", return_to: str = "/sec
     return f'<div class="security-panel">{heading}<div class="mini-ticket-grid">{rows}</div></div>'
 
 
+def _fmt_sla_history_date(date_str: str) -> str:
+    try:
+        return datetime.strptime(date_str, "%Y-%m-%d").strftime("%b %-d")
+    except Exception:
+        return date_str
+
+
+def _sla_charts_html(history: dict) -> str:
+    """The /sla page's two trend charts, rendered client-side with
+    Chart.js over the sibling sla-report-slack project's own daily
+    snapshots (see _common.sla_history_snapshot/sla_chart_data): a
+    stacked-area "queue health" chart (on_track/due_soon/breached, plus a
+    dashed compliance-% line) with click-to-drill-down into that day's
+    breached ticket IDs, and a stacked-bar "agent activity" chart (public
+    replies + internal notes per agent) -- both sharing a Last 7 / Last 14
+    / All time range toggle, mouse-wheel zoom + drag-to-pan, and a PNG
+    export button. This is a deliberate, explicitly-requested departure
+    from this file's own house style of zero external script
+    dependencies: built to be genuinely identical to
+    sla_dashboard.html's own charts (same Chart.js 4.4.1 +
+    chartjs-plugin-zoom 2.0.1 + hammer.js 2.0.8, same chart types and
+    interactions) rather than a look-alike, just recolored to read off
+    THIS tool's own CSS custom properties at chart-build time instead of
+    that report's hardcoded brand hex -- consistent with the "match this
+    tool's theme" decision made for the rest of the /sla page.
+
+    Deliberately narrower than the full email-report dashboard: no status
+    banner / streak badge / weekly-snapshot table / avg-response KPIs --
+    those need fields (median/percentile response times, per-ticket
+    response timing) this page has no live equivalent for, and would just
+    be redisplaying stale numbers. Just the two graphs the history file
+    already carries everything needed for.
+
+    Colors are resolved via getComputedStyle(document.documentElement) at
+    chart-build time rather than baked in here, so they automatically
+    track this tool's active theme (including a live OS light/dark
+    switch while in "system" mode) -- see the MutationObserver/matchMedia
+    listeners at the bottom of the inline script, both of which just
+    rebuild the charts."""
+    entries = history.get("entries") or []
+    if not entries:
+        message = history.get("error") or "No history entries found yet."
+        return f'<p class="empty">{_topic_icon("sla", "topic-icon-empty")}{html.escape(message)}</p>'
+
+    data = _common.sla_chart_data(history)
+    data["labels"] = [_fmt_sla_history_date(d) for d in data["labels"]]
+    # "</" -> "<\/" so a literal "</script>" inside e.g. an agent name or
+    # ticket subject can never prematurely close this embedded JSON block.
+    data_json = json.dumps(data).replace("</", "<\\/")
+    subdomain_json = json.dumps(_common.ZENDESK_SUBDOMAIN)
+
+    return f"""
+<div class="sla-filter-bar">
+  <span class="sla-filter-label">Range</span>
+  <button type="button" class="sla-range-btn active" data-range="7" onclick="_slaSetRange(7)">Last 7</button>
+  <button type="button" class="sla-range-btn" data-range="14" onclick="_slaSetRange(14)">Last 14</button>
+  <button type="button" class="sla-range-btn" data-range="0" onclick="_slaSetRange(0)">All time</button>
+  <span class="sla-zoom-hint">scroll to zoom &middot; drag to pan</span>
+  <span class="sla-range-label" id="sla-range-label"></span>
+</div>
+
+<div class="sla-chart-legend">
+  <span><span class="sla-chart-swatch" style="background:var(--sla-ok-color)"></span>Meeting SLA</span>
+  <span><span class="sla-chart-swatch" style="background:var(--flag-color)"></span>Due soon</span>
+  <span><span class="sla-chart-swatch" style="background:var(--flag-alert-color-urgent)"></span>SLA not met</span>
+  <span><span class="sla-chart-swatch-line" style="background:var(--accent)"></span>Compliance %</span>
+</div>
+<p class="drill-hint">&#8627; Click a data point to see breached tickets for that day</p>
+<div class="sla-chart-wrap">
+  <button type="button" class="sla-chart-dl-btn sla-chart-reset-btn" onclick="if(window._slaAreaChart)window._slaAreaChart.resetZoom()" title="Reset zoom">&#8635;</button>
+  <button type="button" class="sla-chart-dl-btn" onclick="_slaDownloadChart('sla-area-chart','queue-health')">&#8595; PNG</button>
+  <div style="position:relative;height:260px"><canvas id="sla-area-chart"></canvas></div>
+</div>
+<div id="sla-drilldown" class="sla-drilldown" style="display:none">
+  <div class="sla-drilldown-head">
+    <div id="sla-drilldown-title"></div>
+    <button type="button" id="sla-drilldown-dismiss">&#x2715; dismiss</button>
+  </div>
+  <div id="sla-drilldown-tickets"></div>
+</div>
+
+<h2 class="column-heading">Agent activity <span class="meta">public replies &amp; internal notes per agent</span></h2>
+<div class="sla-agent-filter-bar" id="sla-agent-filter-bar"></div>
+<div class="sla-chart-wrap">
+  <button type="button" class="sla-chart-dl-btn sla-chart-reset-btn" onclick="if(window._slaAgentChart)window._slaAgentChart.resetZoom()" title="Reset zoom">&#8635;</button>
+  <button type="button" class="sla-chart-dl-btn" onclick="_slaDownloadChart('sla-agent-chart','agent-activity')">&#8595; PNG</button>
+  <div style="position:relative;height:220px"><canvas id="sla-agent-chart"></canvas></div>
+</div>
+<p id="sla-agent-empty" class="empty" style="display:none">No agent activity recorded in this history file.</p>
+
+<script type="application/json" id="sla-chart-data">{data_json}</script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/hammer.js/2.0.8/hammer.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/chartjs-plugin-zoom/2.0.1/chartjs-plugin-zoom.min.js"></script>
+<script>
+(function() {{
+  var dataEl = document.getElementById('sla-chart-data');
+  if (!dataEl || typeof Chart === 'undefined') return;
+  var RAW = JSON.parse(dataEl.textContent);
+  var SUBDOMAIN = {subdomain_json};
+  var AGENT_PALETTE = ['#2a78d6', '#6c3fc5', '#1baf7a', '#eda100', '#d03b3b', '#0e9e9e'];
+  var zoomOpts = {{ pan: {{ enabled: true, mode: 'x' }}, zoom: {{ wheel: {{ enabled: true }}, pinch: {{ enabled: true }}, mode: 'x' }} }};
+  var filterAgents = new Set(RAW.agent_names);
+  var currentRange = 7;
+  var areaChart = null, agentChart = null;
+
+  function slice(arr, n) {{ return (!n || n >= arr.length) ? arr : arr.slice(-n); }}
+
+  function themeColor(name) {{
+    return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  }}
+
+  function hexToRgba(hex, alpha) {{
+    var m = /^#([0-9a-f]{{6}})$/i.exec((hex || '').trim());
+    if (!m) return hex;
+    var r = parseInt(m[1].substr(0, 2), 16), g = parseInt(m[1].substr(2, 2), 16), b = parseInt(m[1].substr(4, 2), 16);
+    return 'rgba(' + r + ',' + g + ',' + b + ',' + alpha + ')';
+  }}
+
+  function buildAgentFilterBar() {{
+    var bar = document.getElementById('sla-agent-filter-bar');
+    if (!bar) return;
+    bar.innerHTML = RAW.agent_names.map(function(name, i) {{
+      var active = filterAgents.has(name) ? ' active' : '';
+      var checked = filterAgents.has(name) ? ' checked' : '';
+      return '<label class="sla-agent-check' + active + '"><input type="checkbox" data-agent-idx="' + i
+        + '"' + checked + '>' + name.replace(/&/g, '&amp;').replace(/</g, '&lt;') + '</label>';
+    }}).join('');
+    Array.prototype.forEach.call(bar.querySelectorAll('input[type=checkbox]'), function(cb) {{
+      cb.addEventListener('change', function() {{
+        var name = RAW.agent_names[parseInt(cb.dataset.agentIdx, 10)];
+        if (cb.checked) {{ filterAgents.add(name); }} else {{ filterAgents.delete(name); }}
+        cb.closest('label').classList.toggle('active', cb.checked);
+        buildCharts(currentRange);
+      }});
+    }});
+  }}
+
+  function buildCharts(n) {{
+    currentRange = n;
+    var labels = slice(RAW.labels, n);
+    var onTrack = slice(RAW.on_track, n);
+    var dueSoon = slice(RAW.due_soon, n);
+    var breached = slice(RAW.breached, n);
+    var totals = slice(RAW.totals, n);
+    var breachedIds = slice(RAW.breached_ids, n);
+    var compliance = slice(RAW.compliance_pct, n).map(function(v, i) {{
+      if (v !== null && v !== undefined) return v;
+      var t = totals[i];
+      return t > 0 ? Math.round(((t - breached[i]) / t) * 100) : null;
+    }});
+
+    var rangeLabelEl = document.getElementById('sla-range-label');
+    if (rangeLabelEl) {{
+      rangeLabelEl.textContent = labels.length
+        ? (labels[0] + ' \\u2013 ' + labels[labels.length - 1] + ' \\u00b7 ' + labels.length + (labels.length === 1 ? ' day' : ' days'))
+        : 'No data yet';
+    }}
+
+    var okColor = themeColor('--sla-ok-color') || '#1a6e2e';
+    var dueColor = themeColor('--flag-color') || '#b45309';
+    var breachColor = themeColor('--flag-alert-color-urgent') || '#b91c1c';
+    var accent = themeColor('--accent') || '#1a56c4';
+    var gridColor = themeColor('--card-border') || '#e2e2e5';
+    var tickColor = themeColor('--muted') || '#666';
+    var tickCfg = {{ color: tickColor, font: {{ size: 11 }}, maxRotation: 45, autoSkip: true, maxTicksLimit: 10 }};
+
+    if (areaChart) areaChart.destroy();
+    var drillPanel = document.getElementById('sla-drilldown');
+    var areaCanvas = document.getElementById('sla-area-chart');
+    if (areaCanvas) {{
+      areaChart = new Chart(areaCanvas, {{
+        type: 'line',
+        data: {{ labels: labels, datasets: [
+          {{ label: 'SLA not met', data: breached, borderColor: breachColor, backgroundColor: hexToRgba(breachColor, 0.7), borderWidth: 1.5, pointRadius: 3, tension: 0, fill: true, stack: 'q', order: 1, yAxisID: 'y' }},
+          {{ label: 'Due soon', data: dueSoon, borderColor: dueColor, backgroundColor: hexToRgba(dueColor, 0.75), borderWidth: 1.5, pointRadius: 3, tension: 0, fill: true, stack: 'q', order: 2, yAxisID: 'y' }},
+          {{ label: 'Meeting SLA', data: onTrack, borderColor: okColor, backgroundColor: hexToRgba(okColor, 0.75), borderWidth: 1.5, pointRadius: 3, tension: 0, fill: true, stack: 'q', order: 3, yAxisID: 'y' }},
+          {{ label: 'Compliance %', data: compliance, type: 'line', borderColor: accent, backgroundColor: 'transparent', borderWidth: 2, borderDash: [4, 3], pointRadius: 2, tension: 0.3, spanGaps: true, order: 0, yAxisID: 'yPct' }}
+        ] }},
+        options: {{
+          responsive: true, maintainAspectRatio: false,
+          plugins: {{
+            legend: {{ display: false }},
+            tooltip: {{ mode: 'index', intersect: false, callbacks: {{ label: function(ctx) {{
+              if (ctx.dataset.yAxisID === 'yPct') return 'Compliance: ' + ctx.parsed.y + '%';
+              return ctx.dataset.label + ': ' + ctx.parsed.y;
+            }} }} }},
+            zoom: zoomOpts
+          }},
+          scales: {{
+            x: {{ ticks: tickCfg, grid: {{ display: false }} }},
+            y: {{ ticks: {{ color: tickColor, font: {{ size: 11 }}, stepSize: 10 }}, grid: {{ color: gridColor }}, min: 0, stacked: true }},
+            yPct: {{ position: 'right', min: 0, max: 100, ticks: {{ color: accent, font: {{ size: 10 }}, callback: function(v) {{ return v + '%'; }} }}, grid: {{ display: false }} }}
+          }},
+          onClick: function(evt, elements) {{
+            if (!elements.length) {{ drillPanel.style.display = 'none'; return; }}
+            var idx = elements[0].index;
+            var ids = breachedIds[idx] || [];
+            if (!ids.length) {{ drillPanel.style.display = 'none'; return; }}
+            document.getElementById('sla-drilldown-title').textContent =
+              labels[idx] + ' \\u2014 ' + ids.length + ' breached ticket' + (ids.length !== 1 ? 's' : '');
+            document.getElementById('sla-drilldown-tickets').innerHTML = ids.map(function(id) {{
+              return SUBDOMAIN
+                ? '<a class="sla-drilldown-chip" href="https://' + SUBDOMAIN + '.zendesk.com/agent/tickets/' + id + '" target="_blank">#' + id + '</a>'
+                : '<span class="sla-drilldown-chip">#' + id + '</span>';
+            }}).join('');
+            drillPanel.style.display = '';
+          }}
+        }}
+      }});
+    }}
+
+    if (agentChart) agentChart.destroy();
+    var agentCanvas = document.getElementById('sla-agent-chart');
+    var agentEmpty = document.getElementById('sla-agent-empty');
+    var activeAgents = RAW.agent_names.filter(function(name) {{
+      if (!filterAgents.has(name)) return false;
+      var pub = slice(RAW.agents[name].public, n), internal = slice(RAW.agents[name].internal, n);
+      return pub.some(function(v) {{ return v > 0; }}) || internal.some(function(v) {{ return v > 0; }});
+    }});
+    if (agentCanvas) {{
+      var wrap = agentCanvas.closest('.sla-chart-wrap');
+      if (activeAgents.length) {{
+        if (wrap) wrap.style.display = '';
+        if (agentEmpty) agentEmpty.style.display = 'none';
+        agentChart = new Chart(agentCanvas, {{
+          type: 'bar',
+          data: {{ labels: labels, datasets: activeAgents.map(function(name, i) {{
+            var pub = slice(RAW.agents[name].public, n), internal = slice(RAW.agents[name].internal, n);
+            return {{
+              label: name,
+              data: pub.map(function(p, j) {{ return p + (internal[j] || 0); }}),
+              backgroundColor: AGENT_PALETTE[i % AGENT_PALETTE.length],
+              borderRadius: 2,
+              stack: 'h'
+            }};
+          }}) }},
+          options: {{
+            responsive: true, maintainAspectRatio: false,
+            plugins: {{
+              legend: {{ position: 'bottom', labels: {{ color: tickColor, font: {{ size: 11 }}, boxWidth: 12, padding: 10 }} }},
+              tooltip: {{ callbacks: {{ label: function(ctx) {{
+                var name = ctx.dataset.label, i = ctx.dataIndex;
+                var pub = slice(RAW.agents[name].public, n)[i] || 0;
+                var internal = slice(RAW.agents[name].internal, n)[i] || 0;
+                return name + ': ' + ctx.parsed.y + ' (' + pub + ' pub / ' + internal + ' int)';
+              }} }} }},
+              zoom: zoomOpts
+            }},
+            scales: {{
+              x: {{ ticks: tickCfg, grid: {{ display: false }}, stacked: true }},
+              y: {{ ticks: {{ color: tickColor, font: {{ size: 11 }}, stepSize: 5 }}, grid: {{ color: gridColor }}, min: 0, stacked: true }}
+            }}
+          }}
+        }});
+      }} else {{
+        if (wrap) wrap.style.display = 'none';
+        if (agentEmpty) agentEmpty.style.display = '';
+      }}
+    }}
+
+    window._slaAreaChart = areaChart;
+    window._slaAgentChart = agentChart;
+  }}
+
+  window._slaSetRange = function(n) {{
+    Array.prototype.forEach.call(document.querySelectorAll('.sla-range-btn'), function(btn) {{
+      btn.classList.toggle('active', parseInt(btn.dataset.range, 10) === n);
+    }});
+    buildCharts(n);
+  }};
+
+  window._slaDownloadChart = function(canvasId, filename) {{
+    var canvas = document.getElementById(canvasId);
+    if (!canvas) return;
+    var a = document.createElement('a');
+    a.href = canvas.toDataURL('image/png');
+    a.download = filename + '.png';
+    a.click();
+  }};
+
+  var dismissBtn = document.getElementById('sla-drilldown-dismiss');
+  if (dismissBtn) {{
+    dismissBtn.addEventListener('click', function() {{
+      document.getElementById('sla-drilldown').style.display = 'none';
+    }});
+  }}
+
+  buildAgentFilterBar();
+  buildCharts(7);
+
+  // Recolor on any theme change -- an explicit toggle (adds/removes a
+  // theme-* class on <html>) or a live OS-level light/dark switch while
+  // in "system" mode (no class change at all, so matchMedia is the only
+  // way to notice that one).
+  new MutationObserver(function() {{ buildCharts(currentRange); }})
+    .observe(document.documentElement, {{ attributes: true, attributeFilter: ['class'] }});
+  if (window.matchMedia) {{
+    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', function() {{ buildCharts(currentRange); }});
+  }}
+}})();
+</script>
+"""
+
+
+def _render_sla_page(sla_result: dict, history: dict, banner: str = "") -> bytes:
+    """Native /sla page: now just the two Chart.js trend charts read
+    read-only from the sibling sla-report-slack project's own history
+    file (see _common.sla_history_snapshot/sla_chart_data and
+    _sla_charts_html). Used to also render a live KPI strip, four rule
+    cards, and an awaiting-first-response list computed directly from
+    _common.fetch_sla_tickets/evaluate_sla_ticket -- removed by explicit
+    request. That live per-ticket scan itself is untouched (do_GET's
+    /sla route still calls fetch_sla_tickets every load, same as before)
+    since it's also what keeps the nav badge's live breach count fresh;
+    sla_result is kept as a param purely for its error/capped state,
+    still worth surfacing here even with nothing else from it rendered."""
+    error_html = (
+        f'<p class="empty">{_topic_icon("breach", "topic-icon-empty")}{html.escape(sla_result["error"])}</p>'
+        if sla_result.get("error")
+        else ""
+    )
+    capped_note = (
+        '<p class="sla-history-note">Some tickets may be missing from this scan -- '
+        "the IT-Operations queue is large enough that this page didn't reach every page of it. "
+        "See the README for SLA_TICKET_SCAN_PAGES.</p>"
+        if sla_result.get("capped")
+        else ""
+    )
+    as_of = history.get("as_of")
+    history_note = (
+        f'<p class="sla-history-note">Trend history as of {html.escape(as_of)} '
+        "-- only as fresh as the last <code>git pull</code> of the sla-report-slack repo on this machine; "
+        "this page never writes to that file.</p>"
+        if as_of
+        else ""
+    )
+
+    body = f"""
+<p><a href="/firstreply">&larr; back to pending tickets</a></p>
+<h2>{_topic_icon("sla")}SLA</h2>
+<p class="meta">Historical SLA trends for the IT-Operations queue, sourced from the sibling sla-report-slack project's own daily snapshots -- the same four business-hours thresholds it tracks: initial response ({_common.SLA_INITIAL_RESPONSE_HRS}h), requester wait ({_common.SLA_REQUESTER_WAIT_HRS}h), no-update window ({_common.SLA_NO_UPDATE_HRS}h), and resolution age ({_common.SLA_RESOLUTION_HRS:g}h). The live breach count for the current queue is in the nav badge above.</p>
+{error_html}
+{capped_note}
+<h2 class="column-heading">Queue health over time</h2>
+{history_note}
+{_sla_charts_html(history)}
+"""
+    return _page(body, banner=banner, current_path="/sla", wide=True)
+
+
 def _render_security_page(items: list, error: str = "", banner: str = "") -> bytes:
     """Native /security page: the IT-Security group's own read-only
     "recent activity" list, previously embedded as a narrower side panel
     next to the main IT-Operations queue via the page's old `.layout`
-    two-column grid. Moved to its own page (next to My tasks/Blocked &
-    Standup) so the main queue reads as one focused list again, rather
+    two-column grid. Moved to its own page (next to Tasks/Discussion)
+    so the main queue reads as one focused list again, rather
     than always reserving a column for a different team's queue whether
     or not you're currently looking at it.
 
@@ -3260,8 +3547,8 @@ def _render_security_page(items: list, error: str = "", banner: str = "") -> byt
     only the page it's placed inside is new."""
     filter_html = _filter_box_html(".mini-ticket") if items else ""
     body = f"""
-<p><a href="/">&larr; back to pending tickets</a></p>
-<h2>{_topic_icon("security")}IT-Security</h2>
+<p><a href="/firstreply">&larr; back to pending tickets</a></p>
+<h2>{_topic_icon("security")}Security</h2>
 <p class="meta">A read-only view of the IT-Security group's own queue -- any status, no already-replied filtering, no drafting -- with a Claim button if you'd like to pick one up. Previously a side panel on the main page; moved here so the main queue is a single focused list.</p>
 {filter_html}
 {_render_security_column(items, error)}
@@ -3290,8 +3577,8 @@ def _render_flagged_page(items: list, error: str = "", capped: bool = False, ban
     limitation to work around: it really is both."""
     if error:
         body = f"""
-<p><a href="/">&larr; back to pending tickets</a></p>
-<h2>{_topic_icon("flagged")}Blocked &amp; standup tickets</h2>
+<p><a href="/firstreply">&larr; back to pending tickets</a></p>
+<h2>{_topic_icon("flagged")}Discussion</h2>
 <p class="flag-alert">{html.escape(error)}</p>
 """
         return _page(body, banner=banner, current_path="/flagged", wide=True)
@@ -3330,8 +3617,8 @@ def _render_flagged_page(items: list, error: str = "", capped: bool = False, ban
     # same query twice.
     filter_html = _filter_box_html(".mini-ticket") if (blocked or standup) else ""
     body = f"""
-<p><a href="/">&larr; back to pending tickets</a></p>
-<h2>{_topic_icon("flagged")}Blocked &amp; standup tickets</h2>
+<p><a href="/firstreply">&larr; back to pending tickets</a></p>
+<h2>{_topic_icon("flagged")}Discussion</h2>
 <p class="meta">Every IT-Operations ticket tagged &quot;block&quot; or &quot;standup&quot; in Zendesk, regardless of who it's assigned to or whether it's already been replied to -- separate from the pending-reply queue on the main page, which only tracks tickets that still need a first reply.</p>
 {capped_note}
 {filter_html}
@@ -3358,7 +3645,7 @@ def _render_solved_page(items: list, error: str = "", capped: bool = False, bann
     row renderer turns into a "solved Nh ago" segment on the meta line."""
     if error:
         body = f"""
-<p><a href="/">&larr; back to pending tickets</a></p>
+<p><a href="/firstreply">&larr; back to pending tickets</a></p>
 <h2>{_topic_icon("solved")}Recently solved</h2>
 <p class="flag-alert">{html.escape(error)}</p>
 """
@@ -3380,9 +3667,9 @@ def _render_solved_page(items: list, error: str = "", capped: bool = False, bann
 
     filter_html = _filter_box_html(".mini-ticket") if items else ""
     body = f"""
-<p><a href="/">&larr; back to pending tickets</a></p>
+<p><a href="/firstreply">&larr; back to pending tickets</a></p>
 <h2>{_topic_icon("solved")}Recently solved</h2>
-<p class="meta">The last {len(items)} tickets in the IT-Operations group that are both solved and assigned to you in Zendesk, most recently solved first -- read-only, no drafting or reply actions here. Doesn't include solved tickets assigned to you in other groups (e.g. IT-Security) -- see the docstring on _common.fetch_recently_solved_tickets for why.</p>
+<p class="meta">The last {len(items)} tickets in the IT-Operations group that are both solved and assigned to you in Zendesk, most recently solved first -- read-only, no drafting or reply actions here. Doesn't include solved tickets assigned to you in other groups (e.g. Security) -- see the docstring on _common.fetch_recently_solved_tickets for why.</p>
 {capped_note}
 {filter_html}
 <div class="security-panel"><h2 class="column-heading">Recently solved ({len(items)})</h2>{rows_html}</div>
@@ -3393,61 +3680,87 @@ def _render_solved_page(items: list, error: str = "", capped: bool = False, bann
 _OVERVIEW_SECTION_CAP = 5
 
 
-def _render_overview_pending_row(item: dict) -> str:
-    """Compact, read-only row for /overview's "Needs a first reply"
-    section. The main queue's own _render_ticket is a full draft-and-post
-    form -- too heavy for a glanceable snapshot -- so this shows just
-    enough (subject, priority, requester, age) to tell whether it's worth
-    clicking through to "/" to actually act on it. Mirrors the same
-    .mini-ticket shape _render_readonly_ticket_row uses for the other
-    three sections, so all four sections read as one consistent grid
-    rather than three compact ones and an odd one out."""
-    tid = item.get("ticket_id")
-    subject = html.escape(item.get("subject", ""))
-    url = item.get("url") or ""
-    link = f'<a href="{html.escape(url)}" target="_blank" class="tid">#{tid}</a>' if url else f'<span class="tid">#{tid}</span>'
-    priority = (item.get("priority") or "").lower()
-    priority_html = (
-        f'<span class="badge-priority">{_topic_icon("priority-alert", "topic-icon-inline")}{html.escape(priority.upper())}</span>'
-        if priority in ("high", "urgent")
+def _render_overview_draft_task_row(item: dict) -> str:
+    """Compact, read-only row for /overview's "Tasks" section covering
+    a not-yet-promoted draft (see _common.draft_personal_tasks). Mirrors
+    the other overview rows' glanceable shape (the same .mini-ticket
+    layout _render_readonly_ticket_row uses for Discussion/Security) --
+    just enough (subject, category tag, added date) to tell whether it's
+    worth clicking through to /tasks -- rather than reusing
+    _render_draft_task_row's full Estimated-minutes/Assignee/Requester/
+    Allocation/Promote/Discard/reorder/Edit form, which would turn this
+    snapshot page into a second workflow. That's exactly what this page's
+    own docstring says it deliberately avoids for the other sections, and
+    a draft needs the same restraint: nothing here can promote or discard
+    it, only /tasks itself can. Its title links to that exact draft's row
+    on /tasks (see _task_title_link_html) -- "clicking through to /tasks"
+    used to mean landing at the top of a possibly-long list; now it
+    scrolls straight to the row in question."""
+    local_id = item.get("local_id")
+    raw_subject = item.get("subject", "")
+    subject = _task_title_link_html(html.escape(raw_subject), local_id)
+    category = item.get("category", "")
+    # Same "skip the chip when the subject already carries the category as
+    # its own leading tag" rule _render_draft_task_row/_render_open_task_row
+    # use, so a row here looks identical in style to its /tasks counterpart.
+    category_html = (
+        f'<span class="stat-chip task-category-chip">{html.escape(category)}</span>'
+        if category and not raw_subject.strip().startswith(category)
         else ""
     )
-    age = _relative_age(item.get("created_at", ""))
-    age_html = f" &middot; {age}" if age else ""
+    added = html.escape(_task_added_label(item.get("created_at", "")))
     return f"""<div class="mini-ticket">
-  <div class="mini-ticket-head">{link} — {subject}{priority_html}</div>
-  <div class="mini-ticket-meta">{_requester_line(item)}{age_html}</div>
+  <div class="mini-ticket-head">{category_html}{subject}</div>
+  <div class="mini-ticket-meta">Added {added} &middot; not yet in Zendesk</div>
 </div>"""
 
 
 def _render_overview_page(
-    pending_items: list,
     open_tasks: list,
+    draft_tasks: list,
     flagged_items: list,
     security_items: list,
     flagged_error: str = "",
     security_error: str = "",
+    activity_summary: dict | None = None,
     banner: str = "",
 ) -> bytes:
-    """New /overview page: a single glanceable "what needs me" snapshot
-    pulling together the four otherwise-separate places a ticket or task
-    can be waiting on you -- the main queue (first replies), My tasks
-    (open, already-promoted personal tasks), Blocked/Standup, and
-    IT-Security's own recent activity -- since checking each of those
-    pages individually just to answer "is there anything I'm missing
-    right now" was the exact fragmented-view complaint this page exists
-    to fix.
+    """/overview page: a single glanceable "what needs me" snapshot
+    pulling together three otherwise-separate places a ticket or task can
+    be waiting on you -- Tasks (both not-yet-promoted drafts and
+    already-promoted open tasks), Discussion, and Security's own recent
+    activity -- since checking each of those pages individually just to
+    answer "is there anything I'm missing right now" was the exact
+    fragmented-view complaint this page exists to fix.
 
-    Deliberately NOT a second workflow layered on top of the other four:
-    every section here is read-only or lightly actionable (My tasks keeps
-    its Quick Solve/Mark done buttons via _render_open_task_row; Blocked/
-    Standup and IT-Security keep their Claim buttons via
-    _render_readonly_ticket_row -- both reused as-is, not reimplemented),
-    each capped to _OVERVIEW_SECTION_CAP items, with a "See all" link
-    through to that section's own full page for anything past the cap or
-    the real per-ticket draft/reply workflow the main queue itself has.
-    This page answers "where do I need to look first"; the destination
-    pages answer "now what."
+    First replies used to be a fourth section here ("Needs a first
+    reply"), but that queue is now its own real page at /firstreply
+    (linked first in the top nav) rather than a tile duplicated onto
+    Overview too -- see the activity_summary paragraph below for the one
+    thing about first replies that's still surfaced here.
+
+    activity_summary (see _common.personal_activity_summary) adds a small
+    "Last week" personal-pace line above the sections -- replies posted
+    through this tool during the most recently completed business week
+    (Monday-Friday; the weekend doesn't count) and their average wait,
+    purely local and read-only. This is what replaced the old /sla page's
+    team-wide compliance dashboard: a much smaller, personal-only figure
+    rather than a second team metrics page, per the removal decision.
+    Optional (defaults to None/omitted) so existing callers/tests that
+    don't pass it still render a page, just without that line.
+
+    Deliberately NOT a second workflow layered on top of the other pages:
+    every section here is read-only or lightly actionable (open tasks keep
+    their Quick Solve/Mark done buttons via _render_open_task_row, drafts
+    are shown read-only via _render_overview_draft_task_row rather than
+    reusing _render_draft_task_row's full promote/discard/reorder/edit
+    form; Discussion and Security keep their Claim buttons via
+    _render_readonly_ticket_row -- reused as-is, not reimplemented), each
+    capped to _OVERVIEW_SECTION_CAP items, with a "See all" link through
+    to that section's own full page for anything past the cap or the real
+    per-ticket workflow the destination page itself has. This page
+    answers "where do I need to look first"; the destination pages answer
+    "now what."
 
     All four inputs are the exact same cached/local reads those pages
     already make on their own (see do_GET's "/overview" branch) --
@@ -3457,19 +3770,24 @@ def _render_overview_page(
     signal /flagged and /security show standalone, in place of that one
     section rather than silently rendering it as an empty (and
     misleadingly reassuring) "nothing here.\""""
-    pending_sorted = sorted(pending_items, key=_priority_sort_key)[:_OVERVIEW_SECTION_CAP]
-    pending_body = (
-        f'<div class="mini-ticket-grid">{"".join(_render_overview_pending_row(i) for i in pending_sorted)}</div>'
-        if pending_sorted
-        else '<p class="empty">Nothing waiting on you right now.</p>'
-    )
-
-    tasks_capped = open_tasks[:_OVERVIEW_SECTION_CAP]
+    # Drafts first, then open tasks -- same order the /tasks page itself
+    # uses for its two lists ("Not yet in Zendesk" above "Open"). Combined
+    # and capped together (not each capped separately then concatenated)
+    # so the cap reflects the section as a whole, matching how the other
+    # three sections cap their one underlying list.
+    tasks_combined = [("draft", i) for i in draft_tasks] + [("open", i) for i in open_tasks]
+    tasks_capped = tasks_combined[:_OVERVIEW_SECTION_CAP]
     tasks_body = (
-        f'<div class="mini-ticket-grid">{"".join(_render_open_task_row(i) for i in tasks_capped)}</div>'
+        '<div class="mini-ticket-grid">'
+        + "".join(
+            _render_overview_draft_task_row(i) if kind == "draft" else _render_open_task_row(i)
+            for kind, i in tasks_capped
+        )
+        + "</div>"
         if tasks_capped
-        else f'<p class="empty">{_topic_icon("tasks", "topic-icon-empty")}No open tasks right now.</p>'
+        else f'<p class="empty">{_topic_icon("tasks", "topic-icon-empty")}No tasks right now.</p>'
     )
+    tasks_total = len(draft_tasks) + len(open_tasks)
 
     flagged_capped = flagged_items[:_OVERVIEW_SECTION_CAP]
     if flagged_error:
@@ -3487,8 +3805,64 @@ def _render_overview_page(
     else:
         security_body = f'<p class="empty">{_topic_icon("security", "topic-icon-empty")}No recent tickets.</p>'
 
-    def _section(title: str, icon_html: str, count: int, body_html: str, see_all_href: str) -> str:
-        return f"""<div class="security-panel overview-section">
+    def _last_week_range_label(summary: dict) -> str:
+        """'Aug 17-21' for a business week within one month, 'Aug 31 - Sep
+        4' when it spans a month boundary (or, rarer still, New Year's,
+        where %b already disambiguates the year change). Always a Mon-Fri
+        span (week_start/week_end -- see _common.personal_activity_summary)
+        since the weekend is deliberately excluded from what "last week"
+        counts here."""
+        start, end = summary["week_start"], summary["week_end"]
+        if start.month == end.month:
+            return f'{start.strftime("%b")} {start.day}–{end.day}'
+        return f'{start.strftime("%b")} {start.day} – {end.strftime("%b")} {end.day}'
+
+    def _activity_line_html(summary: dict | None) -> str:
+        """Small 'Last week' personal-pace line -- see
+        _common.personal_activity_summary's docstring for exactly what's
+        being measured (the most recently completed Monday-through-Friday
+        business week, not a rolling trailing window and not counting the
+        weekend) and why it's deliberately not framed as an SLA/compliance
+        figure. Renders nothing at all (not even an empty-state message)
+        when there's no summary or nothing posted in the window, since an
+        always-present-but-usually-zero line would just be noise on a
+        quiet week."""
+        if not summary or not summary.get("count"):
+            return ""
+        count = summary["count"]
+        reply_word = "reply" if count == 1 else "replies"
+        breakdown = f'{summary["public_count"]} public, {summary["internal_count"]} internal'
+        avg_hours = summary.get("avg_hours")
+        avg_html = (
+            f", averaging {avg_hours:.1f}h from first seen to reply" if avg_hours is not None else ""
+        )
+        range_label = _last_week_range_label(summary)
+        # data-count-target carries the real number for count_up_script
+        # (see _page()) to animate up from 0 on load -- the span's own
+        # text content is ALSO the real, correct count from the start, not
+        # "0", so nothing here depends on that script actually running:
+        # with JS disabled, or under prefers-reduced-motion (which the
+        # script itself checks before touching this), the number simply
+        # sits there fully resolved, exactly as it always did before this.
+        return (
+            f'<p class="meta overview-activity-line">Last week ({range_label}): '
+            f'<span class="stat-chip"><span class="count-up" data-count-target="{count}">{count}</span> {reply_word} posted</span> '
+            f"({breakdown}){avg_html}.</p>"
+        )
+
+    activity_html = _activity_line_html(activity_summary)
+
+    # topic_key drives a per-section left-edge accent stripe (see
+    # .overview-section-<key>'s CSS) -- purely a color-coded "which of the
+    # three sources is this" cue for a page that deliberately blends all
+    # three together (see this function's own docstring); Tasks/Discussion/
+    # Security recent each get their own hue, distinct from --accent (the
+    # general brand blue already used everywhere for buttons/links) and
+    # from --flag-alert-color (already means "warning/priority" elsewhere
+    # on this page), so this doesn't accidentally borrow meaning from
+    # either of those.
+    def _section(title: str, icon_html: str, count: int, body_html: str, see_all_href: str, topic_key: str) -> str:
+        return f"""<div class="security-panel overview-section overview-section-{topic_key}">
   <div class="overview-section-head">
     <h2 class="column-heading">{icon_html}{html.escape(title)} ({count})</h2>
     <a class="overview-see-all" href="{see_all_href}">See all &rarr;</a>
@@ -3497,15 +3871,15 @@ def _render_overview_page(
 </div>"""
 
     sections_html = (
-        _section("Needs a first reply", "", len(pending_items), pending_body, "/")
-        + _section("My open tasks", _topic_icon("tasks"), len(open_tasks), tasks_body, "/tasks")
-        + _section("Blocked / Standup", _topic_icon("flagged"), len(flagged_items), flagged_body, "/flagged")
-        + _section("IT-Security recent", _topic_icon("security"), len(security_items), security_body, "/security")
+        _section("Tasks", _topic_icon("tasks"), tasks_total, tasks_body, "/tasks", "tasks")
+        + _section("Discussion", _topic_icon("flagged"), len(flagged_items), flagged_body, "/flagged", "discussion")
+        + _section("Security recent", _topic_icon("security"), len(security_items), security_body, "/security", "security")
     )
 
     body = f"""
 <h2>{_topic_icon("overview")}Overview</h2>
-<p class="meta">A single glanceable snapshot of everything that might need you right now, pulled together from the main queue, My tasks, Blocked/Standup, and IT-Security -- each section capped to the {_OVERVIEW_SECTION_CAP} most relevant, with a link through to that page's own full list to act on anything past the cap.</p>
+<p class="meta">A single glanceable snapshot of everything that might need you right now, pulled together from Tasks, Discussion, and Security -- each section capped to the {_OVERVIEW_SECTION_CAP} most relevant, with a link through to that page's own full list to act on anything past the cap. Need to see what's waiting on a first reply? That's its own page now -- <a href="/firstreply">First Reply</a>.</p>
+{activity_html}
 <div class="overview-grid">
 {sections_html}
 </div>
@@ -3578,10 +3952,16 @@ def _render_draft_task_row(item: dict, is_first: bool = True, is_last: bool = Tr
     is_first/is_last (from _render_tasks_page's enumerate over the
     already-ordered list) disable the Move up / Move down button that
     would otherwise do nothing -- there's no draft above the first one or
-    below the last one to swap positions with."""
+    below the last one to swap positions with.
+
+    Carries id="task-{local_id}" on its own wrapper -- the landing spot
+    for the title link _task_title_link_html builds elsewhere (this row's
+    own compact preview on /overview, or a bookmark/history entry pointing
+    straight back here), so #task-{local_id} in the URL scrolls to and
+    briefly highlights this exact row (see .mini-ticket:target)."""
     local_id = item.get("local_id")
     raw_subject = item.get("subject", "")
-    subject = html.escape(raw_subject)
+    subject = _task_title_link_html(html.escape(raw_subject), local_id)
     notes = html.escape(item.get("notes", ""))
     notes_html = f'<div class="mini-ticket-notes">{notes}</div>' if notes else ""
     category = item.get("category", "")
@@ -3604,7 +3984,7 @@ def _render_draft_task_row(item: dict, is_first: bool = True, is_last: bool = Tr
     down_disabled = " disabled" if is_last else ""
 
     return f"""
-<div class="mini-ticket">
+<div class="mini-ticket" id="task-{html.escape(str(local_id))}">
   <div class="mini-ticket-head">{category_html}{subject}</div>
   <div class="mini-ticket-meta">Added {added} &middot; not yet in Zendesk</div>
   {notes_html}
@@ -3672,7 +4052,14 @@ def _render_open_task_row(item: dict) -> str:
     there instead of failing with no way to fix it from this page. A
     normal task (the vast majority, already having one from promote time)
     shows its estimate as plain text in the meta line instead and neither
-    form gets this extra input at all."""
+    form gets this extra input at all.
+
+    Carries id="task-{local_id}" on its own wrapper, same as
+    _render_draft_task_row -- an open task's title (see
+    _task_title_link_html) points back at this row, not at the "#tid"
+    link's Zendesk URL, so wherever this row shows up (here, or the
+    compact preview on /overview) linking through lands on this exact
+    row on /tasks rather than just the top of the page."""
     local_id = item.get("local_id")
     tid = item.get("ticket_id")
     raw_subject = item.get("subject", "")
@@ -3681,6 +4068,7 @@ def _render_open_task_row(item: dict) -> str:
     notes_html = f'<div class="mini-ticket-notes">{notes}</div>' if notes else ""
     url = _common.ticket_url(tid)
     link = f'<a href="{html.escape(url)}" target="_blank" class="tid">#{tid}</a>' if url else f'<span class="tid">#{tid}</span>'
+    subject = _task_title_link_html(subject, local_id)
     added = html.escape(_task_added_label(item.get("ticket_created_at") or item.get("created_at", "")))
     est_mins = item.get("est_mins")
     est_html = f" &middot; Est. {int(est_mins)}m" if est_mins else ""
@@ -3700,7 +4088,7 @@ def _render_open_task_row(item: dict) -> str:
             'class="task-est-input" aria-label="Estimated minutes (required to solve this task)"></label>'
         )
     return f"""
-<div class="mini-ticket">
+<div class="mini-ticket" id="task-{html.escape(str(local_id))}">
   <div class="mini-ticket-head">{link} — {category_html}{subject}</div>
   <div class="mini-ticket-meta">Created {added}{est_html}</div>
   {notes_html}
@@ -3769,13 +4157,26 @@ def _render_tasks_page(draft_tasks: list, open_tasks: list, banner: str = "") ->
     comments). Deliberately its own page rather than
     a panel on the main queue -- these are your own tickets, not a
     customer's, so this keeps the main page focused purely on ticket
-    triage the way /sla already keeps SLA metrics off of it too.
+    triage the way /flagged and /security already keep their own
+    different-purpose lists off of it too.
 
     This two-step draft-then-promote flow replaced an earlier version
     where "Add task" created the Zendesk ticket immediately: that turned
     out to be too eager for quickly jotting down an idea that might not be
     worth tracking as an actual ticket -- see the README for the full
-    rationale."""
+    rationale.
+
+    Not yet in Zendesk / Open render as two side-by-side panels in the
+    same `.two-panel` grid /flagged already uses for its Blocked/Standup
+    split -- previously these were two full-width sections stacked one
+    above the other, so seeing an open task meant scrolling past every
+    draft first even though the two lists have nothing to do with each
+    other. Side by side, both are visible together without scrolling (on
+    a wide enough viewport); .two-panel collapses back to stacked panels
+    on narrow ones, same breakpoint as everywhere else it's used. The
+    #tasks-drafts/#tasks-open anchors (and the "Jump to" links in the meta
+    paragraph below) move onto each panel's own wrapper now instead of a
+    heading, so they still work the same on a stacked/narrow layout."""
     # .mini-ticket-grid (shared with /security's read-only list) lets these
     # compact rows flow into however many columns fit instead of one
     # full-width row each -- each row's own content (a title line plus one
@@ -3792,19 +4193,19 @@ def _render_tasks_page(draft_tasks: list, open_tasks: list, banner: str = "") ->
         )
         + "</div>"
         if draft_tasks
-        else f'<p class="empty">{_topic_icon("tasks", "topic-icon-empty")}No drafts waiting -- anything you add above shows up here first.</p>'
+        else f'<p class="empty">{_topic_icon("tasks", "topic-icon-empty")}All clear -- anything you add above shows up here first.</p>'
     )
     open_html = (
         '<div class="mini-ticket-grid">' + "\n".join(_render_open_task_row(i) for i in open_tasks) + "</div>"
         if open_tasks
-        else f'<p class="empty">{_topic_icon("tasks", "topic-icon-empty")}No open tasks right now.</p>'
+        else f'<p class="empty">{_topic_icon("tasks", "topic-icon-empty")}Nothing open right now -- all caught up here too.</p>'
     )
 
     completed_html = _render_recently_completed_tasks()
 
     body = f"""
-<p><a href="/">&larr; back to pending tickets</a></p>
-<h2>{_topic_icon("tasks")}My tasks</h2>
+<p><a href="/firstreply">&larr; back to pending tickets</a></p>
+<h2>{_topic_icon("tasks")}Tasks</h2>
 <p class="meta">Personal to-do tickets -- self-requested and self-assigned in Zendesk (tagged &quot;{html.escape(_common.PERSONAL_TASK_TAG)}&quot;) once promoted, kept entirely separate from the IT-Operations pending-reply queue on the main page. Jump to: <a href="#tasks-drafts">Not yet in Zendesk ({len(draft_tasks)})</a> &middot; <a href="#tasks-open">Open ({len(open_tasks)})</a></p>
 <div class="ticket">
   <p class="ticket-eyebrow">New task</p>
@@ -3817,14 +4218,15 @@ def _render_tasks_page(draft_tasks: list, open_tasks: list, banner: str = "") ->
     </div>
     <div class="actions">
       <button class="approve" type="submit" data-loading-text="Saving…">{_icon("send")}<span>Add task</span></button>
+      <button class="trigger" type="submit" formaction="/tasks/new/quick-solve" data-loading-text="Solving…">{_icon("send", "icon-sm")}<span>Add + Quick Solve</span></button>
     </div>
-    <div class="kbd-hint">Saved here only -- nothing is created in Zendesk until you click "Make Zendesk Ticket from Task" below. Estimated minutes here is optional and just pre-fills that step -- it's still asked for again if you leave it blank.</div>
+    <div class="kbd-hint">Saved here only -- nothing is created in Zendesk until you click "Make Zendesk Ticket from Task" below. Estimated minutes here is optional and just pre-fills that step -- it's still asked for again if you leave it blank. "Add + Quick Solve" skips straight to a solved Zendesk ticket in one click -- it does need Estimated minutes filled in first.</div>
   </form>
 </div>
-<h3 class="tasks-open-heading" id="tasks-drafts">Not yet in Zendesk ({len(draft_tasks)})</h3>
-{draft_html}
-<h3 class="tasks-open-heading" id="tasks-open">Open ({len(open_tasks)})</h3>
-{open_html}
+<div class="two-panel">
+  <div class="security-panel" id="tasks-drafts"><h2 class="column-heading">Not yet in Zendesk ({len(draft_tasks)})</h2>{draft_html}</div>
+  <div class="security-panel" id="tasks-open"><h2 class="column-heading">Open ({len(open_tasks)})</h2>{open_html}</div>
+</div>
 {completed_html}
 """
     return _page(body, banner=banner, current_path="/tasks", wide=True)
@@ -3844,16 +4246,16 @@ class Handler(BaseHTTPRequestHandler):
 
     # Below this, gzip's own ~20-byte header/footer overhead plus the CPU
     # cost of compressing can net out LARGER or not-worth-it versus just
-    # sending the bytes -- /sla/trigger-status's small polled JSON blob is
-    # the main thing that'd otherwise get gzipped for no benefit on every
-    # poll while a full refresh is running.
+    # sending the bytes -- most requests here are quick redirect/claim/
+    # dismiss round-trips with tiny or empty bodies, and it's not worth
+    # paying the compression cost on those.
     _MIN_GZIP_BYTES = 500
 
     def log_message(self, fmt, *args):
         _log(f"{self.address_string()} - {fmt % args}")
 
     def _write_body(self, body: bytes, content_type: str, status: int = 200) -> None:
-        """Shared by _send_html/_send_json. Gzips the body when the
+        """Shared by _send_html. Gzips the body when the
         client's Accept-Encoding says it understands gzip (every real
         browser does; a plain curl/script request with no such header --
         including this app's own test suite -- gets the exact same bytes
@@ -3878,9 +4280,6 @@ class Handler(BaseHTTPRequestHandler):
 
     def _send_html(self, body: bytes, status: int = 200):
         self._write_body(body, "text/html; charset=utf-8", status)
-
-    def _send_json(self, data: dict, status: int = 200):
-        self._write_body(json.dumps(data).encode("utf-8"), "application/json; charset=utf-8", status)
 
     def _redirect(self, path: str) -> None:
         self.send_response(303)
@@ -3952,37 +4351,14 @@ class Handler(BaseHTTPRequestHandler):
         # other action's redirect has nothing to undo, so this is "" (and
         # _page's banner_undo_path renders nothing extra) everywhere else.
         banner_undo_path = unquote(qs.get("undo", [""])[0])
-        # "/" 's own sort toggle -- see the priority-sort block below.
+        # /firstreply's own sort toggle -- see the priority-sort block below.
         # Anything other than the one recognized value falls back to the
         # default (oldest-first, i.e. no query param at all), same
-        # fail-open posture as /sla's range param above.
+        # fail-open posture used throughout this handler.
         sort_param = qs.get("sort", [""])[0]
 
         if parsed.path == "/reconnect":
             self._send_html(_render_reconnect_page(banner=banner))
-            return
-
-        if parsed.path == "/sla":
-            # Date-range pill selector for the personal activity charts --
-            # ?range=7/14/30/90 or ?range=all (the default with no param).
-            # Anything else unrecognized (a hand-edited URL, a stale
-            # bookmark from before a range option changed) falls back to
-            # "all" rather than erroring, same fail-open posture as the
-            # rest of this page.
-            range_param = qs.get("range", [""])[0]
-            range_days = int(range_param) if range_param.isdigit() and int(range_param) in _common.SLA_AGENT_RANGE_OPTIONS else None
-            summary = _common.load_sla_summary(log_fn=_log)
-            agent_series = _common.load_sla_agent_series(days=range_days, log_fn=_log)
-            self._send_html(_render_sla_page(summary, agent_series, banner=banner))
-            return
-
-        if parsed.path == "/sla/trigger-status":
-            # Polled by the /sla page's small inline script (see
-            # _sla_trigger_status_html) while a Run full refresh is in
-            # progress -- plain JSON, not another rendered page, since this
-            # is read by fetch() rather than navigated to.
-            with _sla_trigger_lock:
-                self._send_json(dict(_sla_trigger_state))
             return
 
         if parsed.path == "/tasks":
@@ -4022,6 +4398,19 @@ class Handler(BaseHTTPRequestHandler):
             self._send_html(_render_security_page(security["items"], security["error"] or "", banner=banner))
             return
 
+        if parsed.path == "/sla":
+            # Live four-rule SLA evaluation (_common.fetch_sla_tickets,
+            # cached the same SLA_CACHE_TTL_SECONDS as Discussion/Security's
+            # own panels) plus a read-only look at the sibling sla-report-
+            # slack project's own history file (_common.sla_history_snapshot,
+            # never written here) for the trend chart -- see
+            # _render_sla_page.
+            client = _common.make_client()
+            sla_result = _common.fetch_sla_tickets(client, log_fn=_log)
+            history = _common.sla_history_snapshot()
+            self._send_html(_render_sla_page(sla_result, history, banner=banner))
+            return
+
         if parsed.path == "/solved":
             # Read-only, same posture as /security and /flagged -- see
             # _common.fetch_recently_solved_tickets for the cache/scan-depth
@@ -4034,27 +4423,45 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/overview":
-            # Every one of these four is the exact same cached/local read
+            # Every one of these three is the exact same cached/local read
             # its own dedicated page already makes -- see
             # _render_overview_page's docstring for why that's true even
-            # though this route calls all four at once (nothing here adds
+            # though this route calls all three at once (nothing here adds
             # a new Zendesk scan beyond what visiting each page
-            # individually would already trigger).
+            # individually would already trigger). First replies used to
+            # be a fourth read here (_common.pending_items()) but that
+            # queue is now /firstreply's own page, not a tile duplicated
+            # onto Overview too.
             client = _common.make_client()
-            pending_items = _common.pending_items()
             open_tasks = _common.open_personal_tasks()
+            draft_tasks = _common.draft_personal_tasks()
             flagged = _common.fetch_flagged_tickets(client, log_fn=_log)
             security = _common.fetch_recent_tickets(
                 client, _common.IT_SECURITY_GROUP_ID, limit=_common.IT_SECURITY_COLUMN_LIMIT, log_fn=_log
             )
+            # Purely local (pending_drafts.json only, see
+            # _common.personal_activity_summary's docstring) -- costs
+            # nothing extra beyond the reads above, no Zendesk call.
+            activity_summary = _common.personal_activity_summary()
             self._send_html(_render_overview_page(
-                pending_items, open_tasks, flagged["items"], security["items"],
+                open_tasks, draft_tasks, flagged["items"], security["items"],
                 flagged_error=flagged["error"] or "", security_error=security["error"] or "",
+                activity_summary=activity_summary,
                 banner=banner,
             ))
             return
 
-        if parsed.path != "/":
+        if parsed.path == "/":
+            # The main queue's real URL, below -- kept alive as a redirect
+            # (not removed, not still rendering the page itself) so an old
+            # bookmark or muscle-memory "/" still lands somewhere useful
+            # rather than a 404. Drops the query string on purpose (a
+            # ?sort=priority from an old link isn't worth preserving
+            # through the extra hop for something this rare).
+            self._redirect("/firstreply")
+            return
+
+        if parsed.path != "/firstreply":
             self._send_html(_page('<p class="empty">Not found.</p>'), status=404)
             return
 
@@ -4063,10 +4470,17 @@ class Handler(BaseHTTPRequestHandler):
             if sort_param == "priority"
             else sorted(_common.pending_items(), key=lambda i: i.get("created_at", ""))
         )
+        # .ticket-list wraps just the ticket cards (not the auth-warning
+        # banner or filter/sort controls that can sit above them in
+        # .main-col) so its CSS nth-child stagger (see .ticket-list >
+        # .ticket's rules) counts cleanly among tickets only -- nth-child
+        # counts ALL siblings regardless of class, so without this
+        # wrapper the stagger delays would shift depending on whether an
+        # auth warning happened to be showing that day.
         ticket_html = (
-            "\n".join(_render_ticket(i) for i in items)
+            '<div class="ticket-list">' + "\n".join(_render_ticket(i) for i in items) + "</div>"
             if items
-            else '<p class="empty">Nothing waiting on you right now.</p>'
+            else '<p class="empty">You\'re all caught up -- nothing waiting on you right now.</p>'
         )
         # Filter box + sort toggle sit directly above the queue -- only
         # worth showing once there's actually more than an empty-state
@@ -4074,9 +4488,9 @@ class Handler(BaseHTTPRequestHandler):
         list_controls_html = ""
         if items:
             sort_toggle_html = (
-                f'<a class="sort-toggle" href="/">{_icon("chevron-down", "icon-sm")}<span>Oldest first</span></a>'
+                f'<a class="sort-toggle" href="/firstreply">{_icon("chevron-down", "icon-sm")}<span>Oldest first</span></a>'
                 if sort_param == "priority"
-                else f'<a class="sort-toggle" href="/?sort=priority">{_icon("bar-chart", "icon-sm")}<span>Priority first</span></a>'
+                else f'<a class="sort-toggle" href="/firstreply?sort=priority">{_icon("bar-chart", "icon-sm")}<span>Priority first</span></a>'
             )
             list_controls_html = (
                 f'<div class="list-controls">'
@@ -4087,11 +4501,12 @@ class Handler(BaseHTTPRequestHandler):
         main_col_html = (
             _auth_warning_html() + list_controls_html + ticket_html + _render_recently_handled()
         )
-        # The one live Zendesk call GET / now makes -- see
-        # fetch_recently_worked_on's own docstring for why "/" otherwise
-        # never touching Zendesk still holds in spirit: the local-only half
-        # of this result is always available on its own, so a disconnected
-        # or slow Zendesk degrades this one sidebar, never breaks the page.
+        # The one live Zendesk call GET /firstreply now makes -- see
+        # fetch_recently_worked_on's own docstring for why /firstreply
+        # otherwise never touching Zendesk still holds in spirit: the
+        # local-only half of this result is always available on its own,
+        # so a disconnected or slow Zendesk degrades this one sidebar,
+        # never breaks the page.
         client = _common.make_client()
         worked_on = _common.fetch_recently_worked_on(client, log_fn=_log)
         # .main-with-sidebar (see CSS) -- "recently worked on" history column
@@ -4107,8 +4522,8 @@ class Handler(BaseHTTPRequestHandler):
 
         self._send_html(_page(
             body, banner=banner, banner_undo_path=banner_undo_path, auto_refresh=True,
-            header_action=_refresh_button_html(), header_meta=_header_meta_html(),
-            current_path="/",
+            header_meta=_header_meta_html(),
+            current_path="/firstreply",
         ))
 
     def do_POST(self):
@@ -4121,24 +4536,21 @@ class Handler(BaseHTTPRequestHandler):
         parts = parsed.path.strip("/").split("/")
 
         if parts == ["refresh"]:
+            # return_to (see _refresh_button_html's hidden field) sends you
+            # back to whichever page you actually clicked Refresh from --
+            # the button now renders on every page (see .brand-status-row
+            # in _page()), so hardcoding the redirect to /firstreply would
+            # bounce you to a different page than the one you were just
+            # looking at. Whitelisted rather than trusted outright, same
+            # reasoning as the "claim" action's own return_to below: this
+            # is a value from the request body, and blindly redirecting
+            # wherever it says would be an open redirect.
+            form = self._parse_form_body()
+            return_to = form.get("return_to", ["/firstreply"])[0]
+            if return_to not in ("/firstreply", "/overview", "/tasks", "/flagged", "/security", "/solved", "/reconnect"):
+                return_to = "/firstreply"
             message = self._refresh()
-            self._redirect(f"/?msg={quote(message)}")
-            return
-
-        if parts == ["sla", "refresh"]:
-            form = self._parse_form_body()
-            range_param = form.get("range", [""])[0]
-            message = self._sla_refresh()
-            redirect_to = f"/sla?range={quote(range_param)}&msg={quote(message)}" if range_param else f"/sla?msg={quote(message)}"
-            self._redirect(redirect_to)
-            return
-
-        if parts == ["sla", "trigger"]:
-            form = self._parse_form_body()
-            range_param = form.get("range", [""])[0]
-            message = self._sla_trigger()
-            redirect_to = f"/sla?range={quote(range_param)}&msg={quote(message)}" if range_param else f"/sla?msg={quote(message)}"
-            self._redirect(redirect_to)
+            self._redirect(f"{return_to}?msg={quote(message)}")
             return
 
         if parts == ["tasks", "new"]:
@@ -4148,6 +4560,16 @@ class Handler(BaseHTTPRequestHandler):
             category = form.get("category", [""])[0]
             est_mins = form.get("est_mins", [""])[0]
             message = self._add_task(subject, notes, est_mins, category)
+            self._redirect(f"/tasks?msg={quote(message)}")
+            return
+
+        if parts == ["tasks", "new", "quick-solve"]:
+            form = self._parse_form_body()
+            subject = form.get("subject", [""])[0]
+            notes = form.get("notes", [""])[0]
+            category = form.get("category", [""])[0]
+            est_mins = form.get("est_mins", [""])[0]
+            message = self._add_and_quick_solve_task(subject, notes, est_mins, category)
             self._redirect(f"/tasks?msg={quote(message)}")
             return
 
@@ -4163,7 +4585,12 @@ class Handler(BaseHTTPRequestHandler):
 
         if len(parts) == 4 and parts[0] == "tasks" and parts[2] == "move" and parts[3] in ("up", "down"):
             message = self._move_task(parts[1], parts[3])
-            self._redirect(f"/tasks?msg={quote(message)}")
+            # #task-<local_id> (not just "/tasks") so the row that just
+            # moved gets the same .mini-ticket:target highlight a task
+            # title link already lands on -- after a reorder, that row's
+            # position in the list just changed, so calling out which one
+            # it was saves re-hunting for it in the new order.
+            self._redirect(f"/tasks?msg={quote(message)}#task-{quote(parts[1])}")
             return
 
         if len(parts) == 3 and parts[0] == "tasks" and parts[2] == "promote":
@@ -4220,17 +4647,21 @@ class Handler(BaseHTTPRequestHandler):
         if action == "claim":
             # return_to (see _render_readonly_ticket_row's hidden field)
             # sends you back to whichever page the Claim button was
-            # actually clicked from -- "/" (the main queue's own claim
-            # button doesn't set this), "/security", "/flagged", or
-            # "/overview" (its Blocked/Standup and IT-Security sections
-            # reuse the same row/claim form -- see _render_overview_page)
-            # -- rather than always bouncing back to "/" regardless of
-            # where you were. Whitelisted rather than trusted outright:
-            # this is a value from the request body, and blindly
-            # redirecting wherever it says would be an open redirect.
-            return_to = form.get("return_to", ["/"])[0]
-            if return_to not in ("/", "/security", "/flagged", "/overview"):
-                return_to = "/"
+            # actually clicked from -- "/firstreply" (the main queue's own
+            # claim button doesn't set this, so it falls through to this
+            # same default), "/security", "/flagged", or "/overview" (its
+            # Discussion and Security sections reuse the same row/claim
+            # form -- see _render_overview_page) -- rather than always
+            # bouncing back to /firstreply regardless of where you were.
+            # ("/sla" used to be in this list too, for its awaiting-
+            # first-response list's own Claim buttons -- removed along
+            # with that list, see _render_sla_page.)
+            # Whitelisted rather than trusted outright: this is a value
+            # from the request body, and blindly redirecting wherever it
+            # says would be an open redirect.
+            return_to = form.get("return_to", ["/firstreply"])[0]
+            if return_to not in ("/firstreply", "/security", "/flagged", "/overview"):
+                return_to = "/firstreply"
             message = self._claim(ticket_id)
             self._redirect(f"{return_to}?msg={quote(message)}")
             return
@@ -4240,12 +4671,12 @@ class Handler(BaseHTTPRequestHandler):
         if action == "dismiss":
             message, undo_ticket_id = self._dismiss(ticket_id)
             undo_qs = f"&undo={quote(f'/undo_dismiss/{undo_ticket_id}')}" if undo_ticket_id else ""
-            self._redirect(f"/?msg={quote(message)}{undo_qs}")
+            self._redirect(f"/firstreply?msg={quote(message)}{undo_qs}")
             return
 
         if action == "undo_dismiss":
             message = self._undo_dismiss(ticket_id)
-            self._redirect(f"/?msg={quote(message)}")
+            self._redirect(f"/firstreply?msg={quote(message)}")
             return
 
         confirmed = form.get("confirm", [""])[0] == "yes"
@@ -4257,7 +4688,7 @@ class Handler(BaseHTTPRequestHandler):
             # click without a round trip through pending_drafts.json.
             self._send_html(result[1])
             return
-        self._redirect(f"/?msg={quote(result)}")
+        self._redirect(f"/firstreply?msg={quote(result)}")
 
     def _reconnect_start(self) -> str:
         client = _common.make_client()
@@ -4306,7 +4737,7 @@ class Handler(BaseHTTPRequestHandler):
         _common.clear_failure_notified()
         expires_in = result.get("expires_in")
         _log(f"OAuth reconnected successfully (expires_in={expires_in}).")
-        return (f"Zendesk reconnected -- new token expires in {expires_in} seconds.", "/")
+        return (f"Zendesk reconnected -- new token expires in {expires_in} seconds.", "/firstreply")
 
     def _refresh(self) -> str:
         """Runs the exact same scan-and-draft pass the cron script runs every
@@ -4343,38 +4774,6 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             run_lock.close()
 
-    def _sla_refresh(self) -> str:
-        """The /sla page's "Check for newer data" button -- unlike
-        _refresh() above (this tool's own 2-minute scan run on demand),
-        this doesn't touch Zendesk or Gmail at all. It runs a plain
-        `git pull --ff-only` in the sibling sla-report-slack checkout (see
-        _common.pull_sla_report_data), picking up whatever that repo's own
-        scheduled job -- or a manual GitHub Actions run someone triggered
-        directly on GitHub -- has already committed. Needs no locally-stored
-        Zendesk/Gmail credentials and never sends an email itself, at the
-        cost of only ever showing data that's already been committed
-        somewhere else, not a fresh-on-demand Zendesk fetch."""
-        result = _common.pull_sla_report_data(log_fn=_log)
-        if not result["ok"]:
-            return f"Couldn't check for newer data: {result['error']}"
-        if result["changed"]:
-            return "Pulled newer sla-report-slack data -- the numbers below should now reflect it."
-        return "Already up to date -- no newer snapshot has been committed yet."
-
-    def _sla_trigger(self) -> str:
-        """The /sla page's "Run full refresh" button -- the heavier sibling
-        of _sla_refresh() above. This one actually dispatches
-        sla-report-slack's own GitHub Actions workflow (see
-        _common.trigger_sla_report_workflow), which means it DOES cause a
-        real Zendesk scan and DOES send that repo's own email, and takes as
-        long as that workflow's run does (bounded by
-        _common.SLA_WORKFLOW_TRIGGER_TIMEOUT_SECONDS). Runs in a background
-        thread (see _start_sla_trigger) rather than blocking this request
-        for however long that takes -- the page's own status widget (see
-        _sla_trigger_status_html) polls for real progress instead of one
-        frozen "Running…" label the whole time."""
-        return _start_sla_trigger()
-
     def _add_task(self, subject: str, notes: str, est_mins, category: str) -> str:
         """The /tasks page's quick-add form -- saves a LOCAL-ONLY draft via
         _common.add_personal_task. Deliberately makes no Zendesk call at
@@ -4386,6 +4785,67 @@ class Handler(BaseHTTPRequestHandler):
         if not result["ok"]:
             return f"Could not add task: {result['error']}"
         return "Saved -- not yet created in Zendesk."
+
+    def _add_and_quick_solve_task(self, subject: str, notes: str, est_mins, category: str) -> str:
+        """The /tasks page's "New task" form's second button -- "Add +
+        Quick Solve" -- collapses the normal add -> promote -> quick-solve
+        sequence into one click, chaining the same three _common functions
+        _add_task/_promote_task/_quick_solve_task each call individually.
+
+        Unlike plain "Add task", this one actually needs est_mins up front
+        (promote_personal_task requires it), but the shared form input
+        stays optional in HTML -- it's also used by "Add task" alone,
+        which must NOT be forced to fill it in -- so that's validated here
+        instead, before anything is created.
+
+        Each step below already leaves the task in a normal, visible,
+        non-broken state on its own failure (nothing needs rolling back):
+        a failed promote just leaves an ordinary draft sitting in "Not yet
+        in Zendesk", and a failed quick-solve just leaves an ordinary open
+        ticket sitting in "Open" -- so the messages below say how far it
+        got rather than trying to undo anything."""
+        if not est_mins or not est_mins.strip():
+            return (
+                "Add + Quick Solve needs an estimate -- fill in Estimated minutes "
+                "first (Add task alone doesn't need one)."
+            )
+
+        add_result = _common.add_personal_task(subject, notes, est_mins=est_mins, category=category, log_fn=_log)
+        if not add_result["ok"]:
+            return f"Could not add task: {add_result['error']}"
+        local_id = add_result["local_id"]
+
+        client = _common.make_client()
+        if client.client is None:
+            _common.mark_auth_broken("not authenticated (checked while creating a task's ticket)")
+            return (
+                "Saved as a draft, but could not create the Zendesk ticket: Zendesk "
+                "isn't authenticated right now -- see /reconnect and try again "
+                "(nothing lost -- it's sitting in \"Not yet in Zendesk\")."
+            )
+
+        agent_user_id = _common.resolve_own_agent_id(client, log_fn=_log)
+        promote_result = _common.promote_personal_task(client, local_id, agent_user_id, est_mins, log_fn=_log)
+        if not promote_result["ok"]:
+            return f"Saved as a draft, but could not create the Zendesk ticket: {promote_result['error']}"
+        _common.mark_auth_ok()
+
+        ticket_id = promote_result["ticket_id"]
+        url_part = f" ({promote_result['url']})" if promote_result.get("url") else ""
+
+        solve_result = _common.quick_solve_personal_task(client, local_id, est_mins=est_mins, log_fn=_log)
+        if not solve_result["ok"]:
+            return (
+                f"Created Zendesk ticket #{ticket_id}{url_part}, but could not "
+                f"quick-solve it: {solve_result['error']} (it's sitting in "
+                f"\"Open\" -- use Quick Solve there when ready)."
+            )
+
+        message = f"Created and solved Zendesk ticket #{ticket_id}{url_part}."
+        warnings = [w for w in (promote_result.get("warning"), solve_result.get("warning")) if w]
+        if warnings:
+            message += f" ({'; '.join(warnings)})"
+        return message
 
     def _edit_task(self, local_id: str, subject: str, notes: str, est_mins, category: str) -> str:
         """The /tasks page's "Edit" action on a draft row -- see

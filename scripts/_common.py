@@ -752,352 +752,6 @@ def resolve_personal_task_identity(client, choice: str, own_agent_id, log_fn=pri
         return None, "Could not resolve your own Zendesk account from ZENDESK_EMAIL -- check that .env value."
     return own_agent_id, None
 
-# The sibling sla-report-slack repo -- a separate, independently-deployed
-# tool (its own GitHub Actions cron, its own Gmail-based daily email) that
-# tracks IT-Operations SLA compliance and already does the actual
-# breach/due-soon classification work. The /sla page (see load_sla_summary,
-# below, and review_server.py's _render_sla_page) reads its precomputed
-# daily snapshots rather than re-deriving SLA math here -- exactly the
-# anti-duplication principle noted above for IT_OPERATIONS_GROUP_ID, applied
-# across repos instead of across files. Assumes both repos are checked out
-# as sibling folders (as they are on this Mac); if that ever changes, this
-# is the one place to update.
-SLA_REPO_ROOT = REPO_ROOT.parent / "sla-report-slack"
-SLA_HISTORY_PATH = SLA_REPO_ROOT / "data" / "sla_history.json"
-SLA_DASHBOARD_PATH = SLA_REPO_ROOT / "sla_dashboard.html"
-
-# Whose personal activity the /sla page's "Your activity" charts are scoped
-# to -- a name, not a Zendesk id, because that's how sla_history.json's own
-# per-day agent_activity/solved_by_agent dicts key each agent (matching
-# whatever display name Zendesk had for them at report time). Overridable
-# via env var since this whole file is otherwise agent-identity-agnostic
-# (resolve_own_agent_id resolves an id from ZENDESK_EMAIL, not a name), but
-# defaults to this tool's one actual user.
-SLA_AGENT_NAME = os.getenv("SLA_AGENT_NAME", "Catherine Vee")
-
-SLA_REPO_GIT_PULL_TIMEOUT_SECONDS = 30  # a plain `git pull --ff-only` against
-# an already-cloned repo should be fast -- this only needs to catch a
-# genuinely stuck network call or a credential prompt with nothing to answer
-# it, not a long-running scan. (An earlier version of this feature shelled
-# out to run sla-report-slack's own scan script directly -- see git history
-# -- but that needed a second, locally-stored copy of Zendesk API + Gmail
-# OAuth credentials this project doesn't otherwise use, and sent a live
-# email on every click. Replaced with this git-pull approach: it needs no
-# Zendesk or Gmail credentials at all, at the cost of only ever showing
-# whatever sla-report-slack's own scheduled job -- or someone manually
-# triggering it on GitHub -- has already committed, rather than forcing a
-# fresh Zendesk fetch on demand.)
-
-
-def pull_sla_report_data(log_fn=print) -> dict:
-    """The /sla page's "Check for newer data" button. Runs a plain
-    `git pull --ff-only` in the sibling sla-report-slack checkout, picking
-    up whatever that repo's own weekdays-9am GitHub Actions job (or a
-    manual workflow_dispatch run, triggered on GitHub itself) has already
-    pushed to `main` -- nothing here ever calls Zendesk or Gmail directly.
-
-    `--ff-only` is deliberate: this tool treats that repo as read-only (it
-    never commits here), so a fast-forward should always be possible unless
-    something unexpected has diverged the local clone -- and if it has,
-    failing loudly is much better than this function quietly creating a
-    merge commit in a repo it doesn't own. GIT_TERMINAL_PROMPT=0 makes an
-    auth problem fail fast with a clear message instead of hanging on a
-    credential prompt that has no terminal to answer it.
-
-    Always returns a dict, never raises:
-      ok      -- whether the pull succeeded (an already-up-to-date pull
-                 counts as ok)
-      changed -- whether HEAD actually moved (False for both a no-op pull
-                 and a failed one)
-      output  -- combined stdout/stderr, for a "what happened" detail line
-      error   -- a human-readable reason when ok is False
-    """
-    if not SLA_REPO_ROOT.exists():
-        return {"ok": False, "changed": False, "output": "", "error": f"sla-report-slack isn't checked out at {SLA_REPO_ROOT}."}
-    if not (SLA_REPO_ROOT / ".git").exists():
-        return {"ok": False, "changed": False, "output": "", "error": f"{SLA_REPO_ROOT} doesn't look like a git checkout (no .git folder)."}
-
-    def _head():
-        try:
-            r = subprocess.run(
-                ["git", "-C", str(SLA_REPO_ROOT), "rev-parse", "HEAD"],
-                capture_output=True, text=True, timeout=10,
-            )
-            return r.stdout.strip() if r.returncode == 0 else None
-        except Exception:
-            return None
-
-    before = _head()
-    log_fn(f"Pulling latest sla-report-slack data (git -C {SLA_REPO_ROOT} pull --ff-only)")
-    try:
-        proc = subprocess.run(
-            ["git", "-C", str(SLA_REPO_ROOT), "pull", "--ff-only"],
-            capture_output=True,
-            text=True,
-            timeout=SLA_REPO_GIT_PULL_TIMEOUT_SECONDS,
-            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
-        )
-    except subprocess.TimeoutExpired:
-        log_fn(f"sla-report-slack git pull timed out after {SLA_REPO_GIT_PULL_TIMEOUT_SECONDS}s")
-        return {
-            "ok": False, "changed": False, "output": "",
-            "error": f"Timed out after {SLA_REPO_GIT_PULL_TIMEOUT_SECONDS}s -- GitHub may be unreachable, or a credential prompt is stuck.",
-        }
-    except Exception as exc:
-        log_fn(f"sla-report-slack git pull failed to start: {exc}")
-        return {"ok": False, "changed": False, "output": "", "error": f"Could not run git: {exc}"}
-
-    output = (proc.stdout or "") + (proc.stderr or "")
-    if proc.returncode != 0:
-        # Surfaces git's own error verbatim (auth failure, diverged history,
-        # network unreachable, etc.) rather than a generic "failed" message.
-        tail = output.strip().splitlines()[-1] if output.strip() else f"exit code {proc.returncode}"
-        log_fn(f"sla-report-slack git pull failed: {tail}")
-        return {"ok": False, "changed": False, "output": output, "error": tail}
-
-    after = _head()
-    changed = bool(before and after and before != after)
-    log_fn(f"sla-report-slack git pull succeeded (changed={changed}).")
-    return {"ok": True, "changed": changed, "output": output, "error": None}
-
-
-# --- The /sla page's second, heavier refresh button: actually trigger
-# sla-report-slack's own GitHub Actions workflow (rather than only waiting
-# for its weekdays-9am schedule, or someone clicking "Run workflow" on
-# GitHub directly), then pull the result once it's done. Deliberately kept
-# as a SEPARATE button from pull_sla_report_data() above, not a replacement
-# for it -- this one is slower (bounded by how long that workflow's own run
-# takes) and, unlike the plain git-pull button, DOES cause a real Zendesk
-# scan and DOES send sla-report-slack's own daily email, because that
-# workflow's "Run SLA report" step hardcodes DRY_RUN: "false" regardless of
-# how the run was triggered. Needs a GitHub token (see
-# SLA_REPORT_GITHUB_TOKEN below) instead of Zendesk/Gmail credentials --
-# those stay exactly where they already live, in sla-report-slack's own
-# GitHub Secrets, used only by the workflow run on GitHub's servers, never
-# read or copied by this project.
-SLA_REPORT_GITHUB_TOKEN = os.getenv("SLA_REPORT_GITHUB_TOKEN", "")
-# A personal access token scoped to the sla-report-slack repo, added to THIS
-# project's own .env (never typed into this file or committed anywhere).
-# Needs permission to dispatch workflow runs and read Actions run status on
-# that one repo: a classic PAT needs the `repo` scope if sla-report-slack is
-# private (or `public_repo` if it's public); a fine-grained token needs
-# "Actions: Read and write" on that repo specifically.
-SLA_REPORT_GITHUB_REPO = os.getenv("SLA_REPORT_GITHUB_REPO", "cvee-csa/sla-report-slack")
-SLA_REPORT_WORKFLOW_FILE = "sla-report.yml"
-SLA_REPORT_WORKFLOW_REF = "main"
-
-SLA_WORKFLOW_POLL_INTERVAL_SECONDS = 8
-SLA_WORKFLOW_MAX_CONSECUTIVE_POLL_ERRORS = 3  # See trigger_sla_report_workflow's
-# two polling loops below: a REQUEST-level error (bad/expired token, repo or
-# workflow name rejected, a persistent network failure -- anything where
-# _github_api_request itself returns a non-2xx status or no status at all)
-# is fundamentally different from "the run just isn't there/isn't done yet",
-# which is the expected, repeatedly-true-until-it-isn't state most polls
-# see. Treating both the same way (silently sleep and retry until the whole
-# SLA_WORKFLOW_TRIGGER_TIMEOUT_SECONDS elapses) means a persistent failure
-# -- one that will clearly never resolve itself, like a revoked token --
-# only ever surfaces after the FULL timeout, as a generic "couldn't find
-# the run"/"still running" message with no hint of the real cause. Bailing
-# out after this many CONSECUTIVE request-level errors (reset back to zero
-# by any successful request, even one that just says "not found yet") lets
-# a real, persistent problem surface in seconds instead of minutes, while a
-# single transient blip (one dropped connection, one rate-limit hiccup) is
-# still tolerated exactly as before.
-
-SLA_WORKFLOW_TRIGGER_TIMEOUT_SECONDS = 240  # Bounds the ENTIRE dispatch ->
-# find-the-run -> wait-for-completion cycle, not just one HTTP call. A
-# workflow_dispatch run of this scan script has historically finished in
-# well under a minute, so 4 minutes leaves real margin for GitHub Actions
-# runner queueing without leaving the button's own "still working" state
-# (and the HTTP request it's waiting on) hanging indefinitely if something
-# upstream is genuinely stuck.
-
-
-def _github_api_request(path: str, method: str = "GET", body: dict = None, timeout: int = 15):
-    """One shared helper for every GitHub REST call trigger_sla_report_workflow
-    needs, so auth headers and error handling live in exactly one place.
-    Returns (status_code, parsed_json_or_None, error_str_or_None). Never
-    raises for an HTTP error response (only for something lower-level like a
-    DNS/connect failure) -- callers turn a 401/404/etc. into a clear message
-    without needing their own try/except at every call site."""
-    url = f"https://api.github.com{path}"
-    data = json.dumps(body).encode("utf-8") if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method)
-    req.add_header("Authorization", f"Bearer {SLA_REPORT_GITHUB_TOKEN}")
-    req.add_header("Accept", "application/vnd.github+json")
-    req.add_header("X-GitHub-Api-Version", "2022-11-28")
-    req.add_header("User-Agent", "sla-task-firstreply-local-tool")
-    if data is not None:
-        req.add_header("Content-Type", "application/json")
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            raw = resp.read()
-            return resp.status, (json.loads(raw) if raw else None), None
-    except urllib.error.HTTPError as exc:
-        raw = exc.read()
-        try:
-            parsed = json.loads(raw) if raw else None
-        except Exception:
-            parsed = None
-        detail = (parsed or {}).get("message") if isinstance(parsed, dict) else None
-        return exc.code, parsed, (detail or f"HTTP {exc.code}")
-    except Exception as exc:
-        return None, None, str(exc)
-
-
-def trigger_sla_report_workflow(log_fn=print) -> dict:
-    """The /sla page's "Run full refresh" button: dispatches
-    sla-report-slack's sla-report.yml via the workflow_dispatch API it
-    already exposes for manual runs on GitHub itself, waits for that run to
-    finish, then calls pull_sla_report_data() to sync the result into this
-    Mac's checkout -- the workflow run only ever updates the GitHub remote,
-    same as any other trigger of that workflow.
-
-    Both polling loops below bail out early (well before
-    SLA_WORKFLOW_TRIGGER_TIMEOUT_SECONDS elapses) after
-    SLA_WORKFLOW_MAX_CONSECUTIVE_POLL_ERRORS consecutive request-level
-    failures -- a revoked token, a typo'd repo/workflow name, or a
-    persistent network problem surfaces in seconds with the actual error,
-    rather than only after the full timeout with a generic "couldn't find
-    the run"/"still running" message that doesn't hint at the real cause.
-    An ordinary "200 but nothing to report yet" response resets that
-    counter, so a single transient blip is still tolerated exactly as
-    before.
-
-    Always returns a dict, never raises:
-      ok         -- whether the whole trigger-wait-pull cycle succeeded
-      changed    -- whether the follow-up pull actually moved HEAD
-      conclusion -- the workflow run's own conclusion ("success",
-                    "failure", "cancelled", ...), or None if it never
-                    reached "completed" within the timeout
-      run_url    -- the run's github.com URL once known, so a failure
-                    message can link straight to its logs
-      error      -- a human-readable reason when ok is False
-    """
-    if not SLA_REPORT_GITHUB_TOKEN:
-        return {
-            "ok": False, "changed": False, "conclusion": None, "run_url": None,
-            "error": "No SLA_REPORT_GITHUB_TOKEN set -- add one to this project's own .env to use this button.",
-        }
-
-    dispatch_time = datetime.now(timezone.utc)
-    log_fn(f"Dispatching {SLA_REPORT_WORKFLOW_FILE} on {SLA_REPORT_GITHUB_REPO} (workflow_dispatch)")
-    status, _parsed, err = _github_api_request(
-        f"/repos/{SLA_REPORT_GITHUB_REPO}/actions/workflows/{SLA_REPORT_WORKFLOW_FILE}/dispatches",
-        method="POST", body={"ref": SLA_REPORT_WORKFLOW_REF},
-    )
-    if status != 204:
-        log_fn(f"workflow_dispatch failed: {err}")
-        return {
-            "ok": False, "changed": False, "conclusion": None, "run_url": None,
-            "error": f"Couldn't start the workflow: {err}",
-        }
-
-    # workflow_dispatch itself returns no run id, so the new run has to be
-    # found by polling the runs list for one created at/after the moment we
-    # just dispatched it (a few seconds of slack for clock skew between here
-    # and GitHub's own clock).
-    deadline = time_module.monotonic() + SLA_WORKFLOW_TRIGGER_TIMEOUT_SECONDS
-    run = None
-    consecutive_errors = 0
-    last_err = None
-    while time_module.monotonic() < deadline:
-        status, parsed, err = _github_api_request(
-            f"/repos/{SLA_REPORT_GITHUB_REPO}/actions/workflows/{SLA_REPORT_WORKFLOW_FILE}/runs"
-            f"?event=workflow_dispatch&per_page=5"
-        )
-        if status == 200 and parsed:
-            consecutive_errors = 0
-            for candidate in parsed.get("workflow_runs", []):
-                try:
-                    created_dt = datetime.strptime(
-                        candidate.get("created_at", ""), "%Y-%m-%dT%H:%M:%SZ"
-                    ).replace(tzinfo=timezone.utc)
-                except ValueError:
-                    continue
-                if created_dt >= dispatch_time - timedelta(seconds=10):
-                    run = candidate
-                    break
-        else:
-            # status is None (a lower-level connect/DNS/timeout failure) or
-            # a real non-2xx HTTP response -- distinct from the ordinary
-            # "200 but no matching run yet" case above, and worth counting
-            # toward an early bail-out (see SLA_WORKFLOW_MAX_CONSECUTIVE_POLL_ERRORS).
-            consecutive_errors += 1
-            last_err = err
-            log_fn(f"Polling for the dispatched run failed ({err}) -- {consecutive_errors} consecutive error(s) so far.")
-            if consecutive_errors >= SLA_WORKFLOW_MAX_CONSECUTIVE_POLL_ERRORS:
-                return {
-                    "ok": False, "changed": False, "conclusion": None, "run_url": None,
-                    "error": f"Couldn't check for the dispatched run: {last_err}",
-                }
-        if run:
-            break
-        time_module.sleep(SLA_WORKFLOW_POLL_INTERVAL_SECONDS)
-
-    if not run:
-        log_fn("Never found the dispatched run -- it may still be queued behind other runs.")
-        return {
-            "ok": False, "changed": False, "conclusion": None, "run_url": None,
-            "error": (
-                f"Started the workflow but couldn't find its run within "
-                f"{SLA_WORKFLOW_TRIGGER_TIMEOUT_SECONDS}s -- check "
-                f"https://github.com/{SLA_REPORT_GITHUB_REPO}/actions directly."
-            ),
-        }
-
-    run_id = run["id"]
-    run_url = run.get("html_url")
-    log_fn(f"Found run {run_id} ({run_url}) -- waiting for it to complete.")
-    conclusion = None
-    consecutive_errors = 0
-    last_err = None
-    while time_module.monotonic() < deadline:
-        status, parsed, err = _github_api_request(
-            f"/repos/{SLA_REPORT_GITHUB_REPO}/actions/runs/{run_id}"
-        )
-        if status == 200 and parsed:
-            consecutive_errors = 0
-            if parsed.get("status") == "completed":
-                conclusion = parsed.get("conclusion")
-                run_url = parsed.get("html_url", run_url)
-                break
-        else:
-            consecutive_errors += 1
-            last_err = err
-            log_fn(f"Polling run {run_id}'s status failed ({err}) -- {consecutive_errors} consecutive error(s) so far.")
-            if consecutive_errors >= SLA_WORKFLOW_MAX_CONSECUTIVE_POLL_ERRORS:
-                return {
-                    "ok": False, "changed": False, "conclusion": None, "run_url": run_url,
-                    "error": f"Couldn't check run {run_id}'s status: {last_err} -- see {run_url}.",
-                }
-        time_module.sleep(SLA_WORKFLOW_POLL_INTERVAL_SECONDS)
-
-    if conclusion is None:
-        log_fn(f"Workflow run {run_id} hadn't completed within {SLA_WORKFLOW_TRIGGER_TIMEOUT_SECONDS}s.")
-        return {
-            "ok": False, "changed": False, "conclusion": None, "run_url": run_url,
-            "error": (
-                f"The workflow is still running after {SLA_WORKFLOW_TRIGGER_TIMEOUT_SECONDS}s -- "
-                f"it'll finish on its own; check {run_url} or click \"Check for newer data\" shortly."
-            ),
-        }
-
-    if conclusion != "success":
-        log_fn(f"Workflow run {run_id} finished with conclusion={conclusion}.")
-        return {
-            "ok": False, "changed": False, "conclusion": conclusion, "run_url": run_url,
-            "error": f'The workflow finished with status "{conclusion}" -- see {run_url}.',
-        }
-
-    log_fn(f"Workflow run {run_id} succeeded -- pulling the result locally.")
-    pull_result = pull_sla_report_data(log_fn=log_fn)
-    return {
-        "ok": pull_result["ok"], "changed": pull_result["changed"],
-        "conclusion": conclusion, "run_url": run_url,
-        "error": pull_result["error"],
-    }
-
 # How far back each scan looks for candidate tickets. Widened from the
 # original 24h: a ticket that arrives and ages past this window before this
 # Mac ever wakes up to scan it (e.g. the lid stays closed over a long
@@ -1293,14 +947,74 @@ def guess_requester_name(client, requester_id: int, description: str, log_fn=pri
     return attempted, "none", "no_match"
 
 
+# resolve_requester_name and resolve_assignee_name (below) each used to make
+# a live get_user() call on every single invocation, with no caching at all
+# -- unlike resolve_own_agent_id/resolve_it_operations_agent_id just above,
+# which already got this same treatment via _agent_id_cache once the
+# identical problem was noticed there. In practice that meant: once per
+# ticket in build_drafts() during every scan, once per matched ticket on
+# every fetch_flagged_tickets()/fetch_recent_tickets()/
+# fetch_recently_solved_tickets() cache refresh, AND once per OPEN TASK on
+# literally every single /tasks page load (reconcile_personal_tasks() checks
+# each open task's ticket status directly, but the /tasks page itself then
+# calls resolve_requester_name for whichever of those same tickets appear
+# elsewhere) -- with the same requester or assignee often showing up across
+# several of those, each one paying its own fresh live lookup. This shared
+# cache/helper gives get_user()-for-a-name the same treatment
+# _agent_id_cache already gives get_user()-for-an-id.
+USER_NAME_CACHE_TTL_SECONDS = AGENT_ID_CACHE_TTL_SECONDS  # same 120s cadence as the panel caches around it
+_user_name_cache: dict = {}  # user_id -> {"name": str|None, "resolved_at": datetime}
+# Same "lock only the dict access, never the network call" posture as
+# _agent_id_cache_lock above, for the identical reason: review_server.py
+# serves every request on its own thread, so two nearly-simultaneous
+# lookups for the same user id are a real concurrent path, not just a
+# theoretical one.
+_user_name_cache_lock = threading.Lock()
+
+
+def _cached_get_user_name(client, user_id, log_fn=print):
+    """Shared get_user(user_id)->display name lookup, serving a cached name
+    within USER_NAME_CACHE_TTL_SECONDS of the last successful lookup for
+    that id, with zero Zendesk calls on a cache hit. A failed lookup (a
+    404 for a deleted user, a transient API error) is NOT cached, so it
+    gets retried on the very next call rather than being stuck returning
+    "failed" for the rest of the window -- same posture as
+    _resolve_agent_id_by_email above.
+
+    Returns (name, ok). ok=False means the lookup itself failed -- callers
+    need to tell that apart from "the lookup succeeded and this user
+    genuinely has no name on file" to fall back correctly."""
+    if not user_id:
+        return None, True
+    now = datetime.now()
+    with _user_name_cache_lock:
+        cached = _user_name_cache.get(user_id)
+        if cached and (now - cached["resolved_at"]).total_seconds() < USER_NAME_CACHE_TTL_SECONDS:
+            return cached["name"], True
+
+    try:
+        user = client.get_user(user_id)
+    except Exception as exc:
+        log_fn(f"get_user({user_id}) failed ({exc})")
+        return None, False
+
+    name = user.get("name")
+    with _user_name_cache_lock:
+        _user_name_cache[user_id] = {"name": name, "resolved_at": now}
+    return name, True
+
+
 def resolve_requester_name(client, requester_id, description: str, log_fn=print):
     """Resolve the requester's name the reliable way first: a direct
-    get_user(requester_id) lookup, which asks Zendesk for the exact user
-    record behind this ticket's requester_id -- no text-parsing, no
-    first-name collision risk, since we're matching on an exact numeric id
-    rather than guessing from a name that might appear in the ticket body.
-    This is why ticket #156312 (whose description was just "This is a test
-    ticket." -- nothing name-shaped to parse) can still show a real name.
+    get_user(requester_id) lookup (see _cached_get_user_name -- cached, so
+    repeat lookups for the same requester across tickets/panels/scans
+    within USER_NAME_CACHE_TTL_SECONDS cost nothing), which asks Zendesk for
+    the exact user record behind this ticket's requester_id -- no
+    text-parsing, no first-name collision risk, since we're matching on an
+    exact numeric id rather than guessing from a name that might appear in
+    the ticket body. This is why ticket #156312 (whose description was just
+    "This is a test ticket." -- nothing name-shaped to parse) can still show
+    a real name.
 
     Falls back to guess_requester_name()'s text-parsing heuristic only if the
     direct lookup itself fails (requester_id missing, the user record 404s,
@@ -1311,14 +1025,11 @@ def resolve_requester_name(client, requester_id, description: str, log_fn=print)
     plus one new reason value: "direct_lookup", paired with confidence
     "confirmed", for the normal/successful path."""
     if requester_id:
-        try:
-            user = client.get_user(requester_id)
-        except Exception as exc:
-            log_fn(f"get_user({requester_id}) failed ({exc}); falling back to text-based guess")
-        else:
-            name = user.get("name")
-            if name:
-                return name, "confirmed", "direct_lookup"
+        name, ok = _cached_get_user_name(client, requester_id, log_fn=log_fn)
+        if not ok:
+            log_fn(f"resolve_requester_name({requester_id}): lookup failed; falling back to text-based guess")
+        elif name:
+            return name, "confirmed", "direct_lookup"
 
     return guess_requester_name(client, requester_id, description, log_fn=log_fn)
 
@@ -1373,23 +1084,22 @@ def shorten_subject(subject: str) -> str:
 
 def resolve_assignee_name(client, assignee_id, log_fn=print):
     """Direct get_user(assignee_id) lookup for the "someone else is already
-    working this" badge -- mirrors resolve_requester_name's reliable path,
-    but with no text-parsing fallback needed: assignee_id is an exact
-    numeric id straight from the ticket (Zendesk's own "Assignee" field),
-    so there's no first-name-collision risk to guard against the way there
-    is for a name merely mentioned in ticket text.
+    working this" badge (see _cached_get_user_name -- cached, same as
+    resolve_requester_name's use of it, so the same assignee showing up
+    across several tickets doesn't pay a fresh live lookup each time) --
+    mirrors resolve_requester_name's reliable path, but with no text-parsing
+    fallback needed: assignee_id is an exact numeric id straight from the
+    ticket (Zendesk's own "Assignee" field), so there's no
+    first-name-collision risk to guard against the way there is for a name
+    merely mentioned in ticket text.
 
     Returns the assignee's display name, or None on any failure (missing
     id, a 404, or an API error) -- callers fall back to showing the bare
     id in that case rather than leaving the badge out entirely."""
     if not assignee_id:
         return None
-    try:
-        user = client.get_user(assignee_id)
-    except Exception as exc:
-        log_fn(f"get_user({assignee_id}) failed while resolving assignee name ({exc})")
-        return None
-    return user.get("name")
+    name, ok = _cached_get_user_name(client, assignee_id, log_fn=log_fn)
+    return name if ok else None
 
 
 def resolve_own_agent_id(client, log_fn=print):
@@ -1511,21 +1221,38 @@ def find_candidates(client, log_fn=print, agent_user_id=None) -> list:
     candidates = []
     page = 1
     per_page = 25
-    # Sorted newest-first and stopped as soon as a ticket older than
-    # LOOKBACK_HOURS shows up, so in ordinary use this never gets anywhere
-    # near Zendesk's own 1000-result search cap the way an untargeted scan
-    # (fetch_flagged_tickets, which has no time-window filter at all) can.
-    # Still worth a defensive backstop rather than an unbounded `while
-    # True`, though, for the same reason fetch_flagged_tickets has one: an
-    # IT-Operations group busy enough to create over 1000 tickets within
-    # LOOKBACK_HOURS would otherwise page straight into that cap and raise
-    # a 422 from inside the try/except below anyway, just needlessly late.
+    # Sorted by *updated_at* (not created_at) for the same reason
+    # fetch_flagged_tickets() sorts that way instead of by created_at: a
+    # ticket that's been sitting in some OTHER group for weeks, then gets
+    # reassigned into IT-Operations today, is exactly as new to us as one
+    # created five minutes ago -- but its created_at is still whatever it
+    # was when Zendesk first made the ticket. Sorting/cutting off by
+    # created_at would put that ticket wherever its original creation date
+    # falls (almost certainly past the LOOKBACK_HOURS cutoff below), so the
+    # scan would stop paging before ever reaching it, silently and
+    # permanently excluding a ticket that genuinely needs a first reply.
+    # updated_at gets bumped by the group change itself, so a just-
+    # reassigned ticket sorts near the front like it should. For a ticket
+    # that's genuinely just sitting untouched, updated_at and created_at
+    # are the same value, so ordinary stale-ticket behavior (and the
+    # LOOKBACK_HOURS margin sized for a closed-lid weekend, see above) is
+    # unchanged.
+    #
+    # Stopped as soon as a ticket older than LOOKBACK_HOURS shows up, so in
+    # ordinary use this never gets anywhere near Zendesk's own 1000-result
+    # search cap the way an untargeted scan (fetch_flagged_tickets, which
+    # has no time-window filter at all) can. Still worth a defensive
+    # backstop rather than an unbounded `while True`, though, for the same
+    # reason fetch_flagged_tickets has one: an IT-Operations group busy
+    # enough to create/update over 1000 tickets within LOOKBACK_HOURS would
+    # otherwise page straight into that cap and raise a 422 from inside the
+    # try/except below anyway, just needlessly late.
     max_page = ZENDESK_SEARCH_RESULT_CAP // per_page
     while page <= max_page:
         try:
             result = client.get_tickets(
                 group_id=IT_OPERATIONS_GROUP_ID,
-                sort_by="created_at",
+                sort_by="updated_at",
                 sort_order="desc",
                 per_page=per_page,
                 page=page,
@@ -1545,8 +1272,8 @@ def find_candidates(client, log_fn=print, agent_user_id=None) -> list:
 
         stop_paging = False
         for ticket in tickets:
-            created = datetime.fromisoformat(ticket["created_at"].replace("Z", "+00:00"))
-            if created < cutoff:
+            updated = datetime.fromisoformat(ticket["updated_at"].replace("Z", "+00:00"))
+            if updated < cutoff:
                 stop_paging = True
                 break
             if ticket.get("status") not in ("new", "open"):
@@ -2154,8 +1881,8 @@ def cached_security_ticket_count(group_id) -> int:
     "genuinely nothing to badge" -- there's no separate "unknown" state
     worth distinguishing here the way fetch_recent_tickets' own {"error":
     ...} does, since a header badge that's merely absent reads fine either
-    way (compare _top_nav_html's sla_breached, which does the same
-    "unavailable means no badge" collapse).
+    way (compare cached_flagged_ticket_count, which does the same
+    "unavailable means no badge" collapse for the Discussion nav badge).
 
     This exists for review_server._top_nav_html's IT-Security nav badge,
     which renders on EVERY page via _page() -- calling fetch_recent_tickets
@@ -2497,6 +2224,451 @@ def fetch_recently_solved_tickets(client, limit: int = RECENTLY_SOLVED_LIMIT, lo
         if cached:
             return {"items": cached["items"], "error": None, "capped": cached["capped"]}
         return {"items": [], "error": f"Could not load recently solved tickets ({exc}).", "capped": False}
+
+
+
+# ---------------------------------------------------------------------------
+# SLA dashboard (/sla) -- live four-rule SLA evaluation over the
+# IT-Operations queue, mirroring the sibling sla-report-slack project's
+# own daily email report (zendesk_sla_slack_report.py), plus a read-only
+# look at that project's own daily-snapshot history file for trend data.
+# Deliberately built on ONLY client.get_tickets/client.get_ticket_comments
+# -- the same Zendesk API surface every other read-only panel in this file
+# already uses -- rather than that sibling project's ticket-metrics API
+# call, so this stays consistent with the rest of this tool instead of
+# introducing a second way of talking to Zendesk.
+# ---------------------------------------------------------------------------
+
+# Same four thresholds (business hours) as the standalone daily email
+# report this mirrors, kept as the same numbers on purpose so a ticket
+# this page calls "breached" matches what that report would say about it.
+# SLA_RESOLUTION_HRS is overridable via env var for the same reason that
+# report's own copy is.
+SLA_INITIAL_RESPONSE_HRS = 2
+SLA_REQUESTER_WAIT_HRS = 4
+SLA_NO_UPDATE_HRS = 8
+SLA_RESOLUTION_HRS = float(os.getenv("SLA_RESOLUTION_HRS", "40"))  # 5 business days x 8 hrs/day
+SLA_DUE_SOON_PCT = 0.75  # flag when 75% of a threshold has elapsed
+
+# Non-terminal statuses worth evaluating at all -- solved/closed tickets
+# are excluded up front (rather than fetched, evaluated, and short-
+# circuited inside evaluate_sla_ticket) so a comments fetch is never spent
+# on a ticket whose SLA checks are guaranteed to come back on_track anyway.
+SLA_TRACKED_STATUSES = ("new", "open", "pending", "hold")
+
+
+def business_hours_between(start, end) -> float:
+    """Elapsed BUSINESS_HOURS-only hours between two datetimes, in the
+    system's own local time -- this tool runs locally on the machine whose
+    business hours actually matter, unlike the GitHub-Actions-hosted
+    sibling report, which has to convert to an explicitly configured
+    TIMEZONE env var instead. Reuses BUSINESS_HOURS/BUSINESS_WEEKDAYS
+    (defined above) rather than a second copy of "what counts as a
+    business hour," the same reasoning next_scan_target already follows.
+
+    Tolerant of naive or tz-aware datetimes for either argument -- ticket
+    timestamps parsed from Zendesk arrive tz-aware (UTC); `now` is usually
+    a plain datetime.now(). Tz-aware values are converted to local time via
+    .astimezone() and then stripped back to naive (.replace(tzinfo=None))
+    -- naive ones are assumed to already be local -- so both ends of the
+    comparison always land in the same naive-local basis; astimezone()
+    alone would leave a tz-aware result that can't be compared against a
+    naive `now`. Returns 0.0 for missing input or a non-positive span,
+    never raises."""
+    if start is None or end is None:
+        return 0.0
+    if start.tzinfo is not None:
+        start = start.astimezone().replace(tzinfo=None)
+    if end.tzinfo is not None:
+        end = end.astimezone().replace(tzinfo=None)
+    if end <= start:
+        return 0.0
+
+    work_start, work_end = BUSINESS_HOURS.start, BUSINESS_HOURS.stop
+    total = 0.0
+    cursor = start
+    for _ in range(370):  # comfortably covers a year of elapsed time; not unbounded
+        if cursor.date() > end.date():
+            break
+        if cursor.weekday() in BUSINESS_WEEKDAYS:
+            day_start = cursor.replace(hour=work_start, minute=0, second=0, microsecond=0)
+            day_end = cursor.replace(hour=work_end, minute=0, second=0, microsecond=0)
+            seg_start = max(cursor, day_start)
+            seg_end = min(end, day_end)
+            if seg_end > seg_start:
+                total += (seg_end - seg_start).total_seconds() / 3600
+        cursor = (cursor + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    return round(total, 2)
+
+
+def _sla_state(elapsed: float, threshold: float) -> str:
+    if elapsed >= threshold:
+        return "breached"
+    if elapsed >= threshold * SLA_DUE_SOON_PCT:
+        return "due_soon"
+    return "on_track"
+
+
+def _parse_zendesk_dt(s):
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def _is_agent_comment(c: dict, requester_id, agent_user_id=None) -> bool:
+    """True if a comment counts as "an agent touched this ticket" -- any
+    comment (public OR internal; unlike _has_public_reply_from_other,
+    which only cares about public ones) from someone other than the
+    requester, or from this tool's own configured account even when that
+    happens to equal requester_id (the same self-referential-test-ticket
+    carve-out _first_public_reply_from_other uses)."""
+    author = c.get("author_id")
+    return author != requester_id or (agent_user_id is not None and author == agent_user_id)
+
+
+def _first_agent_comment(comments: list, requester_id, agent_user_id=None):
+    for c in comments:
+        if _is_agent_comment(c, requester_id, agent_user_id):
+            return c
+    return None
+
+
+def _last_agent_comment(comments: list, requester_id, agent_user_id=None):
+    match = None
+    for c in comments:
+        if _is_agent_comment(c, requester_id, agent_user_id):
+            match = c
+    return match
+
+
+def _last_public_comment(comments: list):
+    match = None
+    for c in comments:
+        if c.get("public"):
+            match = c
+    return match
+
+
+def evaluate_sla_ticket(ticket: dict, comments: list, now, assignee_name=None, requester_name=None, agent_user_id=None) -> dict:
+    """Evaluates one ticket against the four SLA rules above, using only
+    client.get_tickets/client.get_ticket_comments data (see this section's
+    header comment for why). "First/last agent comment" is derived from
+    comments directly rather than a metrics-endpoint timestamp, which is
+    the one place this necessarily diverges in method from the sibling
+    report -- the classification (breached/due_soon/on_track per rule) is
+    intended to match, even though the exact elapsed-hours figure may
+    differ by a few minutes from what that report would compute for the
+    same ticket.
+
+    Returns a dict shaped for both _sla_rule_cards_html/_sla_kpi_strip_html
+    and (via url/subject/requester_name/assignee_name/already_ours)
+    _render_readonly_ticket_row, so a ticket can be listed consistently
+    wherever it needs to show up on the /sla page. breached_rules/
+    due_soon_rules are lists of (rule_key, detail) tuples, not pre-
+    formatted strings -- there's exactly one caller (this page), so there's
+    no format-then-reparse indirection to keep in sync the way the sibling
+    report's own string-embedded rule_key needs."""
+    tid = ticket.get("id")
+    status = ticket.get("status", "")
+    requester_id = ticket.get("requester_id")
+    assignee_id = ticket.get("assignee_id")
+    created_at = _parse_zendesk_dt(ticket.get("created_at"))
+    updated_at = _parse_zendesk_dt(ticket.get("updated_at"))
+
+    base = {
+        "ticket_id": tid,
+        "subject": ticket.get("subject", ""),
+        "status": status,
+        "priority": ticket.get("priority") or "normal",
+        "url": ticket_url(tid),
+        "requester_id": requester_id,
+        "requester_name": requester_name,
+        "assignee_id": assignee_id,
+        "assignee_name": assignee_name,
+        "already_ours": bool(assignee_id) and agent_user_id is not None and assignee_id == agent_user_id,
+        # Raw ISO string (not the parsed created_at above) -- kept only so
+        # the /sla page's "awaiting first response" list can sort oldest-
+        # first; ISO 8601 strings already sort correctly as plain text, so
+        # there's no need to hand back a datetime object for it.
+        "created_at": ticket.get("created_at"),
+    }
+
+    # Terminal tickets, and self-service personal tasks that slipped
+    # through anyway (defensive -- fetch_sla_tickets already filters these
+    # out by status/PERSONAL_TASK_TAG before this is ever called) -- SLA
+    # checks don't apply to either.
+    if status in ("solved", "closed") or (requester_id and assignee_id and requester_id == assignee_id):
+        return {**base, "sla_status": "on_track", "breached_rules": [], "due_soon_rules": []}
+
+    breached, due_soon = [], []
+
+    # 1. Initial response -- any agent comment at all (public or internal).
+    if _first_agent_comment(comments, requester_id, agent_user_id) is None and created_at:
+        elapsed = business_hours_between(created_at, now)
+        state = _sla_state(elapsed, SLA_INITIAL_RESPONSE_HRS)
+        if state == "breached":
+            breached.append(("initial_response", f"{elapsed:.1f}h elapsed, no reply yet / {SLA_INITIAL_RESPONSE_HRS}h limit"))
+        elif state == "due_soon":
+            due_soon.append(("initial_response", f"{round(SLA_INITIAL_RESPONSE_HRS - elapsed, 1)}h remaining, no reply yet"))
+
+    # 2. Requester wait -- open, has comments, requester spoke last in public.
+    if status == "open" and comments:
+        last_public = _last_public_comment(comments)
+        requester_spoke_last = last_public is None or last_public.get("author_id") == requester_id
+        if requester_spoke_last:
+            last_agent = _last_agent_comment(comments, requester_id, agent_user_id)
+            anchor = _parse_zendesk_dt(last_agent.get("created_at")) if last_agent else created_at
+            if anchor:
+                elapsed = business_hours_between(anchor, now)
+                state = _sla_state(elapsed, SLA_REQUESTER_WAIT_HRS)
+                if state == "breached":
+                    breached.append(("requester_wait", f"{elapsed:.1f}h since last agent action / {SLA_REQUESTER_WAIT_HRS}h limit"))
+                elif state == "due_soon":
+                    due_soon.append(("requester_wait", f"{round(SLA_REQUESTER_WAIT_HRS - elapsed, 1)}h remaining"))
+
+    # 3. No-update window -- open only (pending means waiting on requester).
+    if status == "open":
+        last_agent = _last_agent_comment(comments, requester_id, agent_user_id)
+        anchor = _parse_zendesk_dt(last_agent.get("created_at")) if last_agent else updated_at
+        if anchor:
+            elapsed = business_hours_between(anchor, now)
+            state = _sla_state(elapsed, SLA_NO_UPDATE_HRS)
+            if state == "breached":
+                breached.append(("no_update", f"{elapsed:.1f}h since last agent action / {SLA_NO_UPDATE_HRS}h limit"))
+            elif state == "due_soon":
+                due_soon.append(("no_update", f"{round(SLA_NO_UPDATE_HRS - elapsed, 1)}h remaining"))
+
+    # 4. Resolution age -- skip pending (waiting on requester) and hold (paused).
+    if created_at and status not in ("pending", "hold"):
+        elapsed = business_hours_between(created_at, now)
+        state = _sla_state(elapsed, SLA_RESOLUTION_HRS)
+        if state == "breached":
+            breached.append(("resolution_age", f"{elapsed:.1f}h / {SLA_RESOLUTION_HRS:.0f}h limit"))
+        elif state == "due_soon":
+            due_soon.append(("resolution_age", f"{round(SLA_RESOLUTION_HRS - elapsed, 1)}h remaining"))
+
+    sla_status = "breached" if breached else ("due_soon" if due_soon else "on_track")
+    return {**base, "sla_status": sla_status, "breached_rules": breached, "due_soon_rules": due_soon}
+
+
+SLA_CACHE_TTL_SECONDS = SECURITY_CACHE_TTL_SECONDS  # same cadence as the other read-only Zendesk-derived panels
+SLA_TICKET_PER_PAGE = 100
+SLA_TICKET_SCAN_PAGES = int(os.getenv("SLA_TICKET_SCAN_PAGES", "10"))
+_sla_ticket_cache: dict = {}
+# Same reasoning as _flagged_ticket_cache_lock -- guards the dict read and
+# the one-shot replacement, never the multi-page get_tickets() scan (or its
+# per-ticket get_ticket_comments calls) itself.
+_sla_ticket_cache_lock = threading.Lock()
+
+
+def fetch_sla_tickets(client, log_fn=print, force: bool = False) -> dict:
+    """Returns {"items": [...evaluate_sla_ticket dicts...], "error": str|None,
+    "capped": bool} -- every non-terminal IT-Operations ticket (excluding
+    personal tasks, see PERSONAL_TASK_TAG), each evaluated against the four
+    SLA rules above. Same scan/cache shape as fetch_flagged_tickets/
+    fetch_recently_solved_tickets (paged via IT_OPERATIONS_GROUP_ID,
+    SLA_CACHE_TTL_SECONDS cadence, fails open to the last good result on a
+    total failure) -- the one cost specific to this one is a
+    client.get_ticket_comments call per ticket (needed for the
+    initial_response/requester_wait/no_update rules), the same per-ticket
+    cost find_candidates already accepts for its own candidate scan. A
+    single ticket's comments failing to fetch skips just that ticket
+    (logged, not fatal) rather than discarding the whole scan."""
+    global _sla_ticket_cache
+    now_dt = datetime.now()
+    with _sla_ticket_cache_lock:
+        cached = _sla_ticket_cache or None
+        if not force and cached and (now_dt - cached["fetched_at"]).total_seconds() < SLA_CACHE_TTL_SECONDS:
+            return {"items": cached["items"], "error": None, "capped": cached["capped"]}
+
+    if client.client is None:
+        if cached:
+            return {"items": cached["items"], "error": None, "capped": cached["capped"]}
+        return {"items": [], "error": "Zendesk isn't connected right now -- see the reconnect banner above.", "capped": False}
+
+    try:
+        agent_user_id = resolve_own_agent_id(client, log_fn=log_fn)
+        items = []
+        capped = False
+        page = 1
+        max_page = min(SLA_TICKET_SCAN_PAGES, ZENDESK_SEARCH_RESULT_CAP // SLA_TICKET_PER_PAGE)
+        while page <= max_page:
+            try:
+                result = client.get_tickets(
+                    group_id=IT_OPERATIONS_GROUP_ID,
+                    sort_by="updated_at",
+                    sort_order="desc",
+                    per_page=SLA_TICKET_PER_PAGE,
+                    page=page,
+                )
+            except Exception as exc:
+                log_fn(f"fetch_sla_tickets() page {page} failed ({exc}) -- "
+                       f"stopping with {len(items)} item(s) already found")
+                capped = True
+                break
+            tickets = result.get("tickets", [])
+            if not tickets:
+                break
+            for ticket in tickets:
+                if ticket.get("status") not in SLA_TRACKED_STATUSES:
+                    continue
+                if PERSONAL_TASK_TAG in (ticket.get("tags") or []):
+                    continue
+                try:
+                    comments = client.get_ticket_comments(ticket["id"])
+                except Exception as exc:
+                    log_fn(f"fetch_sla_tickets(): comments fetch failed for #{ticket.get('id')} ({exc}) -- skipping")
+                    continue
+                name, name_confidence, _ = resolve_requester_name(
+                    client, ticket.get("requester_id"), ticket.get("description") or "", log_fn=log_fn
+                )
+                assignee_id = ticket.get("assignee_id")
+                assignee_name = resolve_assignee_name(client, assignee_id, log_fn=log_fn) if assignee_id else None
+                items.append(evaluate_sla_ticket(
+                    ticket, comments, now_dt,
+                    assignee_name=assignee_name,
+                    requester_name=name if name_confidence == "confirmed" else None,
+                    agent_user_id=agent_user_id,
+                ))
+            if not result.get("has_more"):
+                break
+            page += 1
+        else:
+            capped = True
+
+        with _sla_ticket_cache_lock:
+            _sla_ticket_cache = {"items": items, "fetched_at": now_dt, "capped": capped}
+        return {"items": items, "error": None, "capped": capped}
+    except Exception as exc:
+        log_fn(f"fetch_sla_tickets() failed ({exc})")
+        if cached:
+            return {"items": cached["items"], "error": None, "capped": cached["capped"]}
+        return {"items": [], "error": f"Could not load SLA data ({exc}).", "capped": False}
+
+
+def cached_sla_breach_count() -> int:
+    """Best-effort breach count from fetch_sla_tickets' own cache, WITHOUT
+    triggering a fetch of its own -- same reasoning as
+    cached_flagged_ticket_count/cached_security_ticket_count above, for the
+    nav badge. Returns 0 on a cold/expired cache."""
+    with _sla_ticket_cache_lock:
+        cached = _sla_ticket_cache
+        if not cached or (datetime.now() - cached["fetched_at"]).total_seconds() >= SLA_CACHE_TTL_SECONDS:
+            return 0
+        return sum(1 for item in cached["items"] if item.get("sla_status") == "breached")
+
+
+# Read-only look at the sibling sla-report-slack project's own daily-
+# snapshot history file -- NEVER written to from here. That file is
+# exclusively owned by that project's own GitHub Actions job, which
+# commits it back to ITS OWN repo after every run; this tool only ever
+# reads it, the same one-directional relationship _render_sla_page's own
+# "history as of <date>" note makes explicit on the page itself.
+# Overridable via env var for anyone whose clone of that repo doesn't sit
+# at the default relative path -- the default assumes the two repos are
+# cloned as sibling folders under ~/Desktop/git, which is how they exist
+# on this machine today.
+SLA_HISTORY_FILE = Path(os.getenv(
+    "SLA_HISTORY_FILE",
+    str(Path.home() / "Desktop" / "git" / "sla-report-slack" / "data" / "sla_history.json"),
+))
+
+
+def sla_history_snapshot() -> dict:
+    """Read-only load of the sibling project's sla_history.json, for the
+    /sla page's trend chart. Returns {"entries": [...], "error": str|None,
+    "as_of": str|None} -- "as_of" is the last entry's own "date" field
+    (falling back to the file's own mtime) so the page can honestly label
+    how fresh this is: this file is only ever as current as the last
+    `git pull` of that OTHER repo on this machine, since this tool never
+    fetches or writes it. A missing file or unreadable JSON degrades to an
+    empty "entries" list with an explanatory "error", never raises."""
+    try:
+        raw = SLA_HISTORY_FILE.read_text()
+    except FileNotFoundError:
+        return {"entries": [], "error": f"No history file found at {SLA_HISTORY_FILE} yet.", "as_of": None}
+    except Exception as exc:
+        return {"entries": [], "error": f"Could not read SLA history file: {exc}", "as_of": None}
+
+    try:
+        entries = json.loads(raw)
+        if not isinstance(entries, list):
+            raise ValueError("expected a JSON list of daily snapshots")
+    except Exception as exc:
+        return {"entries": [], "error": f"Could not parse SLA history file: {exc}", "as_of": None}
+
+    as_of = entries[-1].get("date") if entries else None
+    if not as_of:
+        try:
+            as_of = datetime.fromtimestamp(SLA_HISTORY_FILE.stat().st_mtime).strftime("%Y-%m-%d")
+        except Exception:
+            as_of = None
+    return {"entries": entries, "error": None, "as_of": as_of}
+
+
+# Agents excluded from the /sla page's agent-activity chart entirely --
+# not just hidden via that chart's own checkbox filter, but never listed
+# or plotted at all, no matter the selected date range. Set by explicit
+# request rather than any activity-based heuristic (e.g. former team
+# members, or names that don't belong in this specific chart for reasons
+# this file has no way to infer on its own).
+SLA_AGENT_ACTIVITY_EXCLUDE = {"Illena Armstrong", "Jim Reavis", "Ryan Bergsma"}
+
+
+def sla_chart_data(history: dict) -> dict:
+    """Reshapes sla_history_snapshot()'s raw per-day entries into the
+    parallel arrays the /sla page's Chart.js trend charts need client-side
+    -- the same shape zendesk_sla_slack_report.py's own sla_dashboard.html
+    embeds as its ALL_LABELS/ALL_ON_TRACK/ALL_DUE_SOON/ALL_BREACHED/
+    ALL_COMPLIANCE_PCT/ALL_BREACHED_IDS/ALL_AGENT_HIST_PUB/ALL_AGENT_HIST_INT
+    JS consts, so the two dashboards can render genuinely identical charts
+    from the same underlying data. Kept here rather than in
+    review_server.py since it's pure data reshaping, not HTML.
+
+    Every top-level array is the same length as "labels" (one entry per
+    tracked day, oldest first). Per-agent public/internal arrays are
+    zero-filled for any day that agent has no recorded activity --
+    including every day before this file started capturing
+    "agent_activity" at all (older entries simply lack that key). Agents
+    in SLA_AGENT_ACTIVITY_EXCLUDE are dropped here, before the data ever
+    reaches the page -- excluded from "agent_names" entirely, not merely
+    left out of some default-shown set."""
+    entries = history.get("entries") or []
+    labels = [e.get("date", "") for e in entries]
+    on_track = [e.get("on_track", 0) or 0 for e in entries]
+    due_soon = [e.get("due_soon", 0) or 0 for e in entries]
+    breached = [e.get("breached", 0) or 0 for e in entries]
+    totals = [e.get("total") or (on_track[i] + due_soon[i] + breached[i]) for i, e in enumerate(entries)]
+    compliance_pct = [e.get("compliance_pct") for e in entries]
+    breached_ids = [e.get("breached_ids") or [] for e in entries]
+
+    agent_names = sorted({
+        name for e in entries for name in (e.get("agent_activity") or {})
+        if name not in SLA_AGENT_ACTIVITY_EXCLUDE
+    })
+    agents = {}
+    for name in agent_names:
+        public, internal = [], []
+        for e in entries:
+            activity = (e.get("agent_activity") or {}).get(name) or {}
+            public.append(activity.get("public", 0) or 0)
+            internal.append(activity.get("internal", 0) or 0)
+        agents[name] = {"public": public, "internal": internal}
+
+    return {
+        "labels": labels,
+        "on_track": on_track,
+        "due_soon": due_soon,
+        "breached": breached,
+        "totals": totals,
+        "compliance_pct": compliance_pct,
+        "breached_ids": breached_ids,
+        "agent_names": agent_names,
+        "agents": agents,
+    }
 
 
 def claim_ticket(client, ticket_id, agent_user_id, log_fn=print) -> dict:
@@ -3419,202 +3591,90 @@ def archive_old_personal_tasks(after_days: int = ARCHIVE_AFTER_DAYS, log_fn=prin
     return count
 
 
-# --- SLA metrics summary page (reads sla-report-slack's own data) -----
-# Pure read of another tool's already-computed output -- no Zendesk calls,
-# no SLA-breach math of our own. Freshness is bounded by whatever this Mac
-# last `git pull`-ed of that sibling repo, since its own update runs in
-# GitHub Actions, not locally; see "stale_days" below, which the /sla page
-# uses to say so plainly rather than imply the numbers are live.
+# --- Personal activity snapshot for /overview ------------------------------
+# Replaces the old /sla page's team-wide SLA-compliance metrics (and its
+# "Your activity" per-agent charts), both of which read the sibling
+# sla-report-slack repo's precomputed sla_history.json -- removed entirely
+# along with that page, rather than kept around unused. This is a much
+# smaller thing: a purely local "how did last week go" figure for the
+# Overview page, computed from data this tool already has on hand
+# (pending_drafts.json) and nothing else -- no sibling repo, no GitHub
+# Actions, no separate history file to keep fresh.
 
 
-def _sla_trend(entries: list, key: str):
-    """Compares the rolling 7-day average of `key` to the preceding 7 days
-    -- the same week-over-week comparison sla-report-slack's own email
-    already shows (see its README's "History & trend tracking" section),
-    read from the same file rather than recomputed independently. Returns
-    None until there are at least 14 daily snapshots to compare two full
-    windows (sla-report-slack's own email gates its trend block at 8 days,
-    since it only needs one full week plus one prior day; this needs a
-    full second week, hence 14)."""
-    if len(entries) < 14:
-        return None
-    recent = entries[-7:]
-    prior = entries[-14:-7]
-    recent_avg = sum((e.get(key) or 0) for e in recent) / 7
-    prior_avg = sum((e.get(key) or 0) for e in prior) / 7
-    if prior_avg == 0:
-        pct_change = None if recent_avg == 0 else 100.0
-    else:
-        pct_change = ((recent_avg - prior_avg) / prior_avg) * 100
-    return {"recent_avg": recent_avg, "prior_avg": prior_avg, "pct_change": pct_change}
+def _previous_business_week_bounds(now: datetime | None = None) -> tuple[datetime, datetime]:
+    """The most recently completed Monday-through-Friday business week, as
+    a half-open [start, end) range -- start is last Monday at midnight, end
+    is last Saturday at midnight (i.e. the instant last week's business
+    days ended; whatever happened over that weekend is deliberately
+    excluded, same as it would be from a "last week at the office" figure).
+    A fixed calendar range rather than a trailing "last N days" window on
+    purpose: it reads the same all week long (doesn't creep forward a day
+    at a time the way a rolling window would) and always means the one
+    full business week just before whichever week `now` falls in, in a
+    "here's how last week went" sense. `now` is a parameter (defaulting to
+    datetime.now()) so tests can pin it instead of depending on the real
+    clock."""
+    now = now or datetime.now()
+    start_of_this_week = (now - timedelta(days=now.weekday())).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    start_of_last_week = start_of_this_week - timedelta(days=7)
+    end_of_last_business_week = start_of_last_week + timedelta(days=5)  # last Saturday, 00:00
+    return start_of_last_week, end_of_last_business_week
 
 
-def _load_sla_entries(log_fn=print):
-    """Shared read+parse+sort step for every /sla data function -- both
-    load_sla_summary and load_sla_agent_series need "the sorted list of
-    daily snapshots from the sibling repo's history file," and previously
-    only the former had this logic; factored out here so a second copy
-    of the same missing-file/malformed-file handling couldn't quietly
-    drift from the first the way this project's already been burned by
-    duplicated logic before.
+def personal_activity_summary(now: datetime | None = None) -> dict:
+    """How many replies (public or internal) this tool posted during last
+    business week (the most recently completed Monday-through-Friday
+    business week -- see _previous_business_week_bounds; whatever happened
+    over that weekend doesn't count), and how long they sat waiting on
+    average -- from posted_at minus created_at on each pending_drafts.json
+    entry with status "posted". created_at here is this tool's own "first
+    seen" timestamp (set in merge_candidates when a candidate is first
+    drafted), not the ticket's original Zendesk creation time, so this
+    measures "how long did it sit in MY queue," a genuinely different
+    (and, for a personal pace check, more useful) number than the SLA
+    page's old ticket-age-based compliance figures. Don't present
+    avg_hours as an SLA or compliance measurement -- it isn't one.
 
-    Returns (entries, error): entries is a date-sorted list on success
-    (error is None); on any failure entries is None and error is a
-    human-readable string explaining why, ready to hand back as-is in an
-    "available": False response."""
-    if not SLA_HISTORY_PATH.exists():
-        return None, (
-            f"No sla_history.json found at {SLA_HISTORY_PATH} -- "
-            "has the sla-report-slack repo been checked out as a sibling "
-            "folder next to this one, and has it run at least once?"
-        )
-    try:
-        entries = json.loads(SLA_HISTORY_PATH.read_text())
-        if not isinstance(entries, list) or not entries:
-            raise ValueError("file does not contain a non-empty JSON list")
-    except Exception as exc:
-        log_fn(f"_load_sla_entries: failed to read/parse {SLA_HISTORY_PATH} ({exc})")
-        return None, f"Could not read sla_history.json ({exc})."
-    return sorted(entries, key=lambda e: e.get("date", "")), None
-
-
-def load_sla_summary(log_fn=print) -> dict:
-    """Reads the sibling sla-report-slack repo's data/sla_history.json and
-    returns everything the /sla page needs. Always returns a dict and never
-    raises -- "available" is False (with "error" explaining why) if the
-    file is missing, unreadable, malformed, or empty, so a page render
-    never breaks just because that repo hasn't been cloned as a sibling
-    folder yet, or hasn't run there.
-
-    On success, returns:
-      latest        -- the most recent daily snapshot dict, as-is from
-                        sla_history.json (total, breached, due_soon,
-                        on_track, compliance_pct, breached_ids, rules, ...)
-      history_days   -- how many daily snapshots are in the file
-      stale_days     -- days between the latest snapshot's date and today
-                        on this Mac (None if the date couldn't be parsed)
-      trend          -- {"breached": ..., "due_soon": ..., "total": ...},
-                        each either a _sla_trend() dict or None
-      dashboard_path -- absolute path to sla_dashboard.html (for a file://
-                        link out to the full multi-chart dashboard)
-      dashboard_exists -- whether that file actually exists
-    """
-    entries, error = _load_sla_entries(log_fn=log_fn)
-    if entries is None:
-        return {"available": False, "error": error}
-
-    latest = entries[-1]
-
-    stale_days = None
-    try:
-        latest_date = datetime.strptime(latest["date"], "%Y-%m-%d").date()
-        stale_days = (datetime.now().date() - latest_date).days
-    except Exception:
-        pass
+    Returns {"count": int, "public_count": int, "internal_count": int,
+    "avg_hours": float|None, "week_start": date, "week_end": date}.
+    week_start/week_end are date objects for last Monday and last Friday
+    (inclusive on both ends), handy for labeling the figure with the
+    actual date range it covers. avg_hours is None when there's nothing
+    to average (zero posted items in the window, or every one of them is
+    missing a parseable created_at/posted_at pair -- old enough entries
+    predating one of those fields, in practice)."""
+    week_start, week_end_exclusive = _previous_business_week_bounds(now)
+    data = _cached_load_pending()
+    public_count = 0
+    internal_count = 0
+    wait_hours = []
+    for entry in data.values():
+        if entry.get("status") != "posted":
+            continue
+        try:
+            posted_dt = datetime.fromisoformat(entry.get("posted_at") or "")
+        except ValueError:
+            continue
+        if not (week_start <= posted_dt < week_end_exclusive):
+            continue
+        if entry.get("posted_public"):
+            public_count += 1
+        else:
+            internal_count += 1
+        try:
+            created_dt = datetime.fromisoformat(entry.get("created_at") or "")
+        except ValueError:
+            continue
+        wait_hours.append((posted_dt - created_dt).total_seconds() / 3600)
 
     return {
-        "available": True,
-        "error": None,
-        "latest": latest,
-        "history_days": len(entries),
-        "stale_days": stale_days,
-        "trend": {
-            "breached": _sla_trend(entries, "breached"),
-            "due_soon": _sla_trend(entries, "due_soon"),
-            "total": _sla_trend(entries, "total"),
-        },
-        "dashboard_path": str(SLA_DASHBOARD_PATH),
-        "dashboard_exists": SLA_DASHBOARD_PATH.exists(),
-    }
-
-
-SLA_AGENT_RANGE_OPTIONS = [7, 14, 30, 90]  # pill choices on the /sla page's
-# date-range selector, plus an implicit "All" -- see load_sla_agent_series's
-# `days` param and _render_sla_page's range-pill row. Kept as one shared
-# list so the server route (parsing ?range=) and the page's rendered pills
-# can't quietly drift out of sync with each other.
-
-
-def load_sla_agent_series(agent_name: str = None, days: int = None, log_fn=print) -> dict:
-    """The personal counterpart to load_sla_summary: a day-by-day series of
-    just one agent's own reply activity and solved-ticket counts, for the
-    /sla page's "Your activity" charts -- everything else on that page
-    (queue health, violations by rule) stays team-wide because
-    sla_history.json has no historical record of which agent a breached or
-    due-soon ticket was assigned to on a given day, only the two fields
-    this function reads (agent_activity, solved_by_agent), which ARE
-    already recorded per-agent per-day. Reusing that existing data here
-    rather than inventing a new per-agent history file mirrors the same
-    "read what's already computed" principle load_sla_summary follows.
-
-    Defaults to SLA_AGENT_NAME (this tool's one actual user) if agent_name
-    isn't passed. Always returns a dict, never raises.
-
-    `days`, if given, limits the series to the most recent N daily
-    snapshots (via a plain list slice) -- this is the /sla page's date-range
-    selector. None (the default) returns the full history, same as before
-    this parameter existed. Asking for more days than actually exist just
-    returns everything available (a slice never errors on an out-of-range
-    length), so a "90" pill against 15 days of real history quietly behaves
-    like "All" rather than failing.
-
-    On success, returns:
-      agent_name -- who this series is for
-      days_requested -- the `days` argument as passed (None if unset),
-                    echoed back so the caller can render which range pill
-                    is "active" without re-threading its own copy of it.
-      dates      -- ISO date strings, oldest first, already sliced to the
-                    requested range
-      public     -- public-reply counts per date (int)
-      internal   -- internal-comment counts per date (int)
-      solved     -- solved-ticket counts per date (int)
-      tracked    -- per-date bool: whether that day's snapshot actually
-                    recorded agent_activity data at all. A handful of the
-                    most recent runs in practice haven't (see README) --
-                    those days render as explicitly "not tracked" rather
-                    than a misleading "0 activity," since the two aren't
-                    the same claim.
-      total_public / total_internal / total_solved -- sums over the
-                    (possibly range-limited) series shown, for a quick
-                    one-line summary above the charts.
-      history_days_total -- how many daily snapshots exist in the file in
-                    total, regardless of the requested range -- lets the
-                    page say "showing the last 30 of 90 days" accurately
-                    when a range is narrower than the full history.
-    """
-    name = agent_name or SLA_AGENT_NAME
-    entries, error = _load_sla_entries(log_fn=log_fn)
-    if entries is None:
-        return {"available": False, "error": error}
-
-    history_days_total = len(entries)
-    if days:
-        entries = entries[-days:]
-
-    dates, public, internal, solved, tracked = [], [], [], [], []
-    for e in entries:
-        dates.append(e.get("date", "?"))
-        activity = e.get("agent_activity")
-        this_day_tracked = isinstance(activity, dict)
-        tracked.append(this_day_tracked)
-        agent_activity = (activity or {}).get(name) or {}
-        public.append(int(agent_activity.get("public") or 0))
-        internal.append(int(agent_activity.get("internal") or 0))
-        solved_map = e.get("solved_by_agent")
-        solved.append(int((solved_map or {}).get(name) or 0))
-
-    return {
-        "available": True,
-        "error": None,
-        "agent_name": name,
-        "days_requested": days,
-        "history_days_total": history_days_total,
-        "dates": dates,
-        "public": public,
-        "internal": internal,
-        "solved": solved,
-        "tracked": tracked,
-        "total_public": sum(public),
-        "total_internal": sum(internal),
-        "total_solved": sum(solved),
+        "count": public_count + internal_count,
+        "public_count": public_count,
+        "internal_count": internal_count,
+        "avg_hours": (sum(wait_hours) / len(wait_hours)) if wait_hours else None,
+        "week_start": week_start.date(),
+        "week_end": (week_end_exclusive - timedelta(days=1)).date(),
     }
