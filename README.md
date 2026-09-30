@@ -27,7 +27,7 @@ A few more optional knobs, all with sensible defaults so you only need to touch 
 
 **For the `/sla` page's "Run full refresh" button (optional):** this one needs a GitHub personal access token, since it actually triggers `sla-report-slack`'s own GitHub Actions workflow rather than just reading what's already there. Add `SLA_REPORT_GITHUB_TOKEN=...` to this repo's own `.env` — a classic PAT needs the `repo` scope if `sla-report-slack` is private (or `public_repo` if it's public), a fine-grained token needs "Actions: Read and write" scoped to just that repo. Generate it yourself at github.com/settings/tokens and paste it into `.env` directly; never share the token value in chat. If `SLA_REPORT_GITHUB_TOKEN` isn't set, the button still appears but fails with a clear on-page message when clicked, rather than breaking anything else. `SLA_REPORT_GITHUB_REPO` (default `cvee-csa/sla-report-slack`) is also overridable if that repo's owner/name ever changes. Clicking this button no longer blocks the page for however long that workflow run takes -- it starts in the background and returns immediately, with a small status line under the buttons that updates on its own (polling every few seconds) once the run actually finishes, then reloads the page so the refreshed numbers show up without you needing to do it by hand.
 
-**For the `/standup` page:** no extra setup if the separate, private `meetingnotestool` repo is cloned at `~/Desktop/git/meetingnotestool`. This tool reads that project's built `dist/standup_data.json`, and writes only its `decisions.json` when you click one of the page's decision buttons. Set `STANDUP_DATA_FILE` in `.env` if it lives somewhere else. Without that file, `/standup` shows why and every other page keeps working.
+**For the `/standup` pages:** no extra setup if the separate, private `meetingnotestool` repo is cloned at `~/Desktop/git/meetingnotestool`. This tool reads that project's built `dist/standup_data.json`, and writes only its `decisions.json` when you click one of the page's decision buttons. Set `STANDUP_DATA_FILE` in `.env` if it lives somewhere else. Without that file, `/standup` shows why and every other page keeps working.
 
 ### Notification helper app (one-time setup, optional but recommended)
 
@@ -126,9 +126,27 @@ Every promoted task is also filed under the **IT-Operations group** by default, 
 
 Both `pending_drafts.json` and `personal_tasks.json` used to only ever grow -- nothing removed a resolved entry (posted, dismissed, already-handled-elsewhere, or a completed personal task) from either file, so both crept larger the longer this tool stayed in daily use. Both now get a lightweight archiving pass: entries in a terminal state, once their resolving timestamp is more than 30 days old, move out of the live file into a sibling `*_archive.json` file (`pending_drafts_archive.json` / `personal_tasks_archive.json`) rather than being deleted outright -- history is kept, just moved out of the file every single mutation has to read and rewrite. This runs automatically as part of the existing detection scan (`scan_and_merge`, so on both the 2-minute cron tick and a manual Refresh) for the pending queue, and as part of the existing reconcile pass (`reconcile_personal_tasks`, so on every /tasks page load) for personal tasks -- no new schedule or setup needed, and nothing still active (still pending, still a draft, still open) is ever touched regardless of age.
 
-A **Standup** page (`/standup`, linked from the header nav next to Tasks) shows your view of the Operations Standup notes: what changed since the previous standup (newly blocked, newly done, new topics, other updates, and action items added or resolved), your open standup action items oldest first with how long each has been open, the active topics you own, and active work grouped by what it's waiting on. Its nav badge counts your open standup action items. Each date links to that standup's notes. Owners with a dotted underline were inferred rather than stated in the notes, and a "check" tag marks a guessed name or detail. Everything on the page except the Zendesk tickets section comes from the separate `meetingnotestool` project, which parses the notes, owns all of the status logic, and keeps the fuller tracker (every workstream, quiet-topic triage, and each meeting's parsed notes).
+The **Standup** pages (`/standup`, linked from the header nav next to Tasks) are the tracker for the Operations Standup notes. Everything on them except the Zendesk tickets section comes from the separate `meetingnotestool` project, which parses the notes and owns all of the status logic. These pages only display its view and record your decisions.
 
-The page also lets you record your own calls, since the notes rarely say when something is finished:
+A sub-nav moves between the pages. Each is server-rendered and works without JavaScript; filters are plain query parameters, like `/sla?range=`.
+
+- **Overview** (`/standup`):
+  - *Since:* what changed since an earlier standup: newly blocked, newly done, new topics, other updates, and action items added or resolved. It compares with the previous standup by default; `?since=` picks any of the last 8.
+  - Your open action items, oldest first with how long each has been open.
+  - The active topics you own.
+  - Active work grouped by what it's waiting on.
+  - Zendesk tickets.
+  - Your recently resolved items.
+  - The quiet topics needing a decision.
+- **Topic history** (`/standup/topic/<base64url key>`): every update for one topic, newest first, with each action item under the update it came from.
+- **Workstreams** (`/standup/workstreams?q=&owner=`): every active, decided or blocked topic, grouped by workstream.
+- **Meetings** (`/standup/meetings`, `/standup/meetings/<date>`): every standup, and everything parsed from one of them.
+- **Action items** (`/standup/actions?show=open|resolved|all&owner=&q=`): team-wide.
+- **Closed** (`/standup/closed`): done and dropped topics.
+
+Topic names link to their history page and dates link to that standup's notes. The nav badge counts your open standup action items. Owners with a dotted underline were inferred rather than stated in the notes, and a "check" tag marks a guessed name or detail.
+
+The pages also let you record your own calls, since the notes rarely say when something is finished. Each button sends you back to the page you clicked it on, and so does its Undo:
 
 - **Your open action items:** **Done** or **Dropped**.
 - **Recently resolved for you:** **Still open**, for an item the notes resolved by mistake, or **Undo** on one you closed.

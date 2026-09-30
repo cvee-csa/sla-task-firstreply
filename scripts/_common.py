@@ -2623,7 +2623,7 @@ STANDUP_DATA_FILE = Path(os.getenv(
     "STANDUP_DATA_FILE",
     str(Path.home() / "Desktop" / "git" / "meetingnotestool" / "dist" / "standup_data.json"),
 ))
-STANDUP_SCHEMA_VERSION = 1
+STANDUP_SCHEMA_VERSION = 2
 
 # (mtime_ns, size) -> parsed view. The nav badge reads this on every page
 # render, so a re-parse only happens when meetingnotestool actually
@@ -2691,13 +2691,12 @@ def load_standup_decisions() -> dict:
 
 
 def _standup_known_ids(view: dict) -> tuple:
-    """(action ids, topic keys) this page could legitimately act on -- a
-    decision for anything else is refused rather than written."""
-    since = view.get("since") or {}
-    action_lists = [view.get("my_open_actions"), view.get("my_resolved_actions"),
-                    since.get("new_actions"), since.get("resolved_actions")]
-    actions = {a.get("id") for lst in action_lists for a in (lst or []) if a.get("id")}
-    topics = {t.get("key") for t in (view.get("quiet_topics") or []) if t.get("key")}
+    """(action ids, topic keys) a decision may be recorded for -- your own
+    action items and any topic in the view. Anything else is refused rather
+    than written."""
+    me = view.get("me")
+    actions = {aid for aid, a in (view.get("actions") or {}).items() if me and a.get("owner") == me}
+    topics = set((view.get("topics") or {}).keys())
     return actions, topics
 
 
@@ -2740,48 +2739,46 @@ def apply_standup_decisions(view: dict, decisions: dict) -> dict:
     meetingnotestool's next build. Idempotent: once that build has applied a
     decision itself, applying it again here changes nothing.
 
-    Action items: done/dropped moves an item from your open list to your
-    resolved list (marked "by you, pending" until the next build); open
-    moves a resolved one back. Quiet topics: the decision rides on the
-    topic as "decision", but only if made on or after the topic's latest
-    mention -- a later standup update wins, same rule build.py uses."""
+    Action items: done/dropped resolves the item ("by you", marked pending
+    until the next build); open clears a resolution the notes gave it. Your
+    open and resolved lists are then rebuilt from the items themselves.
+    Topics: the decision rides on the topic as "decision" -- and done/dropped
+    becomes its status -- but only if made on or after the topic's latest
+    mention; a later standup update wins, the same rule build.py uses."""
     v = copy.deepcopy(view)
     acts = decisions.get("actions") or {}
     tops = decisions.get("topics") or {}
+    actions = v.get("actions") or {}
+    topics = v.get("topics") or {}
 
-    still_open, newly_resolved = [], []
-    for a in v.get("my_open_actions") or []:
-        d = acts.get(a.get("id")) or {}
-        if d.get("outcome") in ("done", "dropped"):
-            a["resolution"] = {"date": str(d.get("at", ""))[:10], "outcome": d["outcome"], "note": "Marked by you",
-                               "by_you": True, "pending": True}
-            newly_resolved.append(a)
-        else:
-            still_open.append(a)
-    resolved = []
-    for a in v.get("my_resolved_actions") or []:
-        d = acts.get(a.get("id")) or {}
-        if d.get("outcome") == "open":
+    for aid, d in acts.items():
+        a = actions.get(aid)
+        outcome = (d or {}).get("outcome")
+        if not a:
+            continue
+        r = a.get("resolution")
+        if outcome in ("done", "dropped"):
+            if not (r and r.get("by_you") and r.get("outcome") == outcome):
+                a["resolution"] = {"date": str(d.get("at", ""))[:10], "outcome": outcome, "note": "Marked by you",
+                                   "by_you": True, "pending": True}
+        elif outcome == "open" and r:
             a["resolution"] = None
-            still_open.append(a)
-        else:
-            resolved.append(a)
-    v["my_open_actions"] = sorted(still_open, key=lambda a: (a.get("date") or "", a.get("id") or ""))
-    v["my_resolved_actions"] = newly_resolved + resolved
 
-    for group in (v.get("since") or {}).values():
-        for a in group:
-            if isinstance(a, dict) and a.get("id") in acts:
-                a["decision"] = (acts[a["id"]] or {}).get("outcome")
+    me = v.get("me")
+    mine = [a for a in actions.values() if me and a.get("owner") == me]
+    v["my_open_actions"] = [a["id"] for a in sorted((a for a in mine if not a.get("resolution")),
+                                                    key=lambda a: (a.get("date") or "", a.get("id") or ""))]
+    v["my_resolved_actions"] = [a["id"] for a in sorted((a for a in mine if a.get("resolution")),
+                                                        key=lambda a: (a["resolution"].get("date") or "", a.get("id") or ""),
+                                                        reverse=True)[:20]]
 
-    closed = 0
-    for t in v.get("quiet_topics") or []:
-        d = tops.get(t.get("key")) or {}
-        if d.get("decision") in STANDUP_TOPIC_DECISIONS and str(d.get("at", ""))[:10] >= (t.get("last_date") or ""):
-            t["decision"] = d["decision"]
-        closed += t.get("decision") in ("done", "dropped")
-    if "counts" in v:
-        v["counts"] = dict(v["counts"], quiet_topics=max(0, (v["counts"].get("quiet_topics") or 0) - closed))
+    for key, d in tops.items():
+        t = topics.get(key)
+        decision = (d or {}).get("decision")
+        if t and decision in STANDUP_TOPIC_DECISIONS and str(d.get("at", ""))[:10] >= (t.get("last_date") or ""):
+            t["decision"] = decision
+            if decision in ("done", "dropped"):
+                t["status"] = decision
     return v
 
 
@@ -2830,7 +2827,7 @@ def add_standup_action_to_tasks(action_id: str, log_fn=print) -> dict:
     view = standup_view()["view"]
     if not view:
         return {"ok": False, "error": "Standup data isn't available, so no task was added."}
-    action = next((a for a in view.get("my_open_actions") or [] if a.get("id") == action_id), None)
+    action = (view.get("actions") or {}).get(action_id) if action_id in (view.get("my_open_actions") or []) else None
     if action is None:
         return {"ok": False, "error": "That action item isn't one of your open standup items any more. No task was added."}
     if action_id in standup_tasks_by_action():
