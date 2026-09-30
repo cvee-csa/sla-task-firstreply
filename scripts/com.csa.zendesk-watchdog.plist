@@ -5,15 +5,23 @@
     <key>Label</key>
     <string>com.csa.zendesk-watchdog</string>
 
-    <!-- Deliberately plain system python3, NOT the zendesk-mcp-server venv.
-         watchdog.py has zero third-party dependencies on purpose, so it
-         keeps working even if that venv breaks again (that's the whole
-         point of it). If /usr/bin/python3 doesn't exist on this Mac for
-         some reason, point this at any other python3: nothing here needs
-         a specific interpreter or any installed package. -->
+    <!-- Deliberately NOT the zendesk-mcp-server venv: watchdog.py has zero
+         third-party dependencies on purpose, so it keeps working even if
+         that venv breaks again (that's the whole point of it). This is the
+         standalone uv-managed CPython that venv is built on, not the venv
+         itself -- no installed packages are involved.
+
+         Not /usr/bin/python3 any more: macOS's privacy protection blocks
+         the Command Line Tools python3 from reading anything under
+         ~/Desktop when launchd runs it ("Operation not permitted" in
+         watchdog.err.log on every run), so the watchdog never actually
+         ran. This interpreter already has that access (it's what the
+         review server and first-reply check run on). If a uv upgrade
+         removes this exact version, point this at the new
+         ~/.local/share/uv/python/cpython-*/bin/python3.x. -->
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/bin/python3</string>
+        <string>/Users/catherinevee/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/bin/python3.12</string>
         <string>/Users/catherinevee/Desktop/git/sla-task-firstreply/scripts/watchdog.py</string>
     </array>
 
