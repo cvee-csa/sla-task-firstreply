@@ -125,6 +125,9 @@ _TOPIC_ICON_FILES = {
     # "breach"/"breach-clear" above (a specific rule's own violation
     # state, not the page's general topic).
     "sla": "stopwatch-csa-blue.png",
+    # /standup -- same conversation glyph as "flagged" (Discussion), own
+    # key per the "different things that share a glyph" rule above.
+    "standup": "conversation-csa-blue.png",
 }
 
 # B68FBF-only recolor of the same badges (see recolor_topic_icons.py) -- each
@@ -146,6 +149,7 @@ _TOPIC_ICON_FILES_B68FBF = {
     "breach-clear": "checkmark-b68fbf.png",
     "solved": "checkmark-b68fbf.png",
     "sla": "stopwatch-b68fbf.png",
+    "standup": "conversation-b68fbf.png",
 }
 
 
@@ -1904,6 +1908,28 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
     font-size: 0.78rem; font-weight: 600; padding: 0.15rem 0.55rem;
     border-radius: 999px; margin-right: 0.4rem;
   }}
+  /* /standup (see _render_standup_page) -- status is an outlined pill in
+     an existing theme token's color, so every theme (B68FBF included)
+     picks it up without its own rules. Blocked borrows --flag-alert-color
+     because it already means "needs attention" everywhere else here. */
+  .standup-layout {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1.25rem; align-items: start; }}
+  .standup-layout .overview-section {{ margin-bottom: 0; min-width: 0; }}
+  .standup-section-since, .standup-section-decide, .standup-section-tickets {{ grid-column: 1 / -1; }}
+  .standup-task-chip {{ text-decoration: none; align-self: center; }}
+  .standup-note {{ font-size: 0.82rem; color: var(--muted); margin-top: 0.2rem; font-style: italic; }}
+  @media (max-width: 900px) {{ .standup-layout {{ grid-template-columns: minmax(0, 1fr); }} }}
+  .standup-status {{
+    display: inline-block; font-size: 0.7rem; font-weight: 600; padding: 0.05rem 0.5rem;
+    border-radius: 999px; border: 1px solid currentColor; margin-left: 0.45rem; vertical-align: 1px;
+  }}
+  .standup-status-blocked {{ color: var(--flag-alert-color); }}
+  .standup-status-active {{ color: var(--accent); }}
+  .standup-status-decided {{ color: var(--link); }}
+  .standup-status-quiet, .standup-status-done {{ color: var(--muted); }}
+  .standup-update {{ font-size: 0.88rem; margin: 0.2rem 0; overflow-wrap: anywhere; }}
+  .standup-check {{ font-size: 0.7rem; font-weight: 600; color: var(--flag-color); border-bottom: 1px dotted currentColor; cursor: help; }}
+  .standup-inferred {{ text-decoration: underline dotted; text-underline-offset: 3px; }}
+  .standup-group-heading {{ font-size: 0.82rem; font-weight: 600; color: var(--muted); margin: 1rem 0 0.4rem; text-transform: uppercase; letter-spacing: 0.04em; }}
   /* Avatar-initials bubble next to a resolved person's name -- a stable
      per-name color (see _avatar_html) rather than a photo, for a quick
      visual anchor when scanning a list of names. */
@@ -2352,6 +2378,10 @@ def _top_nav_html(current_path: str = "") -> str:
     flagged_count = _common.cached_flagged_ticket_count()
     security_count = _common.cached_security_ticket_count(_common.IT_SECURITY_GROUP_ID)
     sla_breach_count = _common.cached_sla_breach_count()
+    # A local file read (mtime-cached in _common.standup_snapshot), not a
+    # Zendesk call -- so unlike Discussion/Security this one is always
+    # current, the same way Tasks' own count is.
+    standup_count = _common.standup_open_action_count()
 
     def _badge(count, warn=False):
         if not count:
@@ -2406,6 +2436,10 @@ def _top_nav_html(current_path: str = "") -> str:
         # that needs escalating, not just a to-do count.
         + _link("/sla", "clock", "SLA", _badge(sla_breach_count, warn=True))
         + _link("/tasks", "check-square", "Tasks", _badge(tasks_count))
+        # Standup sits next to Discussion (the standup-tagged tickets) --
+        # its badge is your open standup action items, read from the
+        # sibling meetingnotestool project (see _render_standup_page).
+        + _link("/standup", "bar-chart", "Standup", _badge(standup_count))
         + _link("/flagged", "flag", "Discussion", _badge(flagged_count))
         + _link("/security", "shield", "Security", _badge(security_count))
         # No badge here on purpose, unlike the three above -- those counts
@@ -3076,7 +3110,7 @@ def _render_ticket(item: dict) -> str:
 </div>"""
 
 
-def _render_readonly_ticket_row(item: dict, return_to: str = "/firstreply") -> str:
+def _render_readonly_ticket_row(item: dict, return_to: str = "/firstreply", extra_html: str = "") -> str:
     """One read-only ticket row: link, subject, status, requester,
     assignee, and a Claim button when it isn't already ours -- shared by
     the IT-Security page (_render_security_page/_render_security_column)
@@ -3144,6 +3178,7 @@ def _render_readonly_ticket_row(item: dict, return_to: str = "/firstreply") -> s
 <div class="mini-ticket">
   <div class="mini-ticket-head">{link} — {subject}</div>
   <div class="mini-ticket-meta">{status} &middot; Requester: {requester} &middot; Assignee: {assignee_label_html}{solved_meta}</div>
+  {extra_html}
   {claim_html}
 </div>"""
 
@@ -3887,6 +3922,325 @@ def _render_overview_page(
     return _page(body, banner=banner, current_path="/overview", wide=True)
 
 
+_STANDUP_STATUS_LABELS = {"blocked": "Blocked", "active": "Active", "decided": "Decided", "quiet": "Quiet", "done": "Done"}
+_STANDUP_OUTCOME_LABELS = {"done": "Done", "dropped": "Dropped", "superseded": "Superseded"}
+_STANDUP_DECISION_MESSAGES = {
+    ("action", "done"): "Action item marked done.",
+    ("action", "dropped"): "Action item marked dropped.",
+    ("action", "open"): "Action item marked still open.",
+    ("action", "clear"): "Your decision on that action item was cleared.",
+    ("topic", "done"): "Topic marked done.",
+    ("topic", "dropped"): "Topic marked dropped.",
+    ("topic", "keep"): "Keeping watch on that topic.",
+    ("topic", "clear"): "Your decision on that topic was cleared.",
+}
+_STANDUP_TRIAGE_GROUPS = [
+    ("possibly_stuck", "Possibly stuck", "Still needed, with no recent progress. Worth raising at standup."),
+    ("likely_done", "Likely done", "The work looks finished but was never reported done."),
+    ("likely_dropped", "Likely dropped", "Abandoned or replaced by another plan."),
+    (None, "Not yet sorted", "No suggestion yet."),
+]
+
+
+_STANDUP_TICKET_RE = re.compile(r"(\b[Tt]ickets?\s*#?|#)(\d{5,7})\b")
+
+
+def _standup_text_html(text) -> str:
+    """Escapes standup text and links Zendesk ticket numbers in it ("ticket
+    123456", "#123456") to that ticket, when ZENDESK_SUBDOMAIN is set."""
+    escaped = html.escape(str(text or ""))
+
+    def _link(m):
+        url = _common.ticket_url(m.group(2))
+        return f'<a href="{html.escape(url)}" target="_blank" rel="noopener">{m.group(0)}</a>' if url else m.group(0)
+
+    return _STANDUP_TICKET_RE.sub(_link, escaped)
+
+
+_STANDUP_TASK_STATUS_LABELS = {"draft": "draft", "open": "open ticket", "done": "done"}
+
+
+def _b64url(text: str) -> str:
+    return base64.urlsafe_b64encode(text.encode("utf-8")).decode("ascii").rstrip("=")
+
+
+def _standup_decide_form(kind: str, item_id: str, decision: str, label: str, css: str, icon: str) -> str:
+    """One small POST form for /standup/decide. Every one of these is an
+    outlined button (the page's single-primary-action rule), and none of
+    them touches Zendesk -- they only write meetingnotestool's decisions.json."""
+    return (
+        f'<form method="post" action="/standup/decide">'
+        f'<input type="hidden" name="kind" value="{html.escape(kind)}">'
+        f'<input type="hidden" name="id" value="{html.escape(item_id)}">'
+        f'<input type="hidden" name="decision" value="{html.escape(decision)}">'
+        f'<button type="submit" class="{css}" data-loading-text="Saving…">{_icon(icon, "icon-sm")}<span>{html.escape(label)}</span></button>'
+        f"</form>"
+    )
+
+
+def _standup_date(iso_date: str) -> str:
+    """'Sep 29' for a YYYY-MM-DD standup date; the raw string if it isn't one."""
+    try:
+        d = datetime.strptime(iso_date, "%Y-%m-%d")
+    except (TypeError, ValueError):
+        return html.escape(str(iso_date or ""))
+    return f"{d.strftime('%b')} {d.day}"
+
+
+def _standup_days_open(iso_date: str) -> str:
+    try:
+        n = (datetime.now().date() - datetime.strptime(iso_date, "%Y-%m-%d").date()).days
+    except (TypeError, ValueError):
+        return ""
+    return f"open {n}d" if n > 0 else "raised today"
+
+
+def _standup_status_html(status: str) -> str:
+    label = _STANDUP_STATUS_LABELS.get(status or "", "")
+    return f'<span class="standup-status standup-status-{html.escape(status)}">{label}</span>' if label else ""
+
+
+def _standup_check_html(note) -> str:
+    """Small "check" marker for a guessed name or detail -- the note itself
+    rides in the title so the row stays one line."""
+    return f' <span class="standup-check" title="{html.escape(note)}">check</span>' if note else ""
+
+
+def _standup_notes_link(url, label: str) -> str:
+    return f'<a href="{html.escape(url)}" target="_blank" rel="noopener">{label}</a>' if url else label
+
+
+def _render_standup_topic_row(t: dict, show_before: bool = False, controls: str = "", note: str = "") -> str:
+    """One standup topic: name, current status, latest update, and what it's
+    waiting on. Read-only; the date links to that standup's Gemini notes."""
+    before = ""
+    if show_before and t.get("before") and t.get("before") != t.get("status"):
+        before = f' <span class="meta">(was {_STANDUP_STATUS_LABELS.get(t["before"], t["before"]).lower()})</span>'
+    owners = ", ".join(t.get("owners") or [])
+    waiting = f' &middot; Waiting on {html.escape(t["waiting_on"])}' if t.get("waiting_on") else ""
+    return f"""
+<div class="mini-ticket">
+  <div class="mini-ticket-head">{html.escape(t.get("name", ""))}{_standup_status_html(t.get("status"))}{before}</div>
+  <div class="standup-update">{_standup_text_html(t.get("last_update", ""))}{_standup_check_html(t.get("check"))}</div>
+  <div class="mini-ticket-meta">{_standup_notes_link(t.get("doc_url"), _standup_date(t.get("last_date")))} &middot; {html.escape(t.get("workstream", ""))}{" &middot; " + html.escape(owners) if owners else ""}{waiting}</div>
+  {f'<div class="standup-note">{html.escape(note)}</div>' if note else ""}
+  {f'<div class="mini-claim-form">{controls}</div>' if controls else ""}
+</div>"""
+
+
+def _render_standup_action_row(a: dict, show_owner: bool = False, controls: str = "") -> str:
+    """One standup action item: the task, when it was raised (linked to that
+    standup's notes), its topic, and either how long it's been open or how
+    it was resolved."""
+    if a.get("resolution"):
+        r = a["resolution"]
+        state = f'{_STANDUP_OUTCOME_LABELS.get(r.get("outcome"), "Resolved")} {_standup_date(r.get("date"))}'
+        if r.get("by_you"):
+            state += " by you" + (" (the tracker picks this up on its next build)" if r.get("pending") else "")
+        elif r.get("note"):
+            state += f' &middot; {html.escape(r["note"])}'
+    else:
+        state = _standup_days_open(a.get("date"))
+    owner = ""
+    if show_owner and a.get("owner"):
+        owner = f' &middot; <span class="{"standup-inferred" if a.get("owner_inferred") else ""}" title="{"Owner inferred, not stated in the notes" if a.get("owner_inferred") else ""}">{html.escape(a["owner"])}</span>'
+    topic = f' &middot; {html.escape(a["topic"])}' if a.get("topic") else ""
+    return f"""
+<div class="mini-ticket">
+  <div class="mini-ticket-head">{_standup_text_html(a.get("task", ""))}{_standup_check_html(a.get("check"))}</div>
+  <div class="mini-ticket-meta">Raised {_standup_notes_link(a.get("doc_url"), _standup_date(a.get("date")))}{topic}{owner} &middot; {state}</div>
+  {f'<div class="mini-claim-form">{controls}</div>' if controls else ""}
+</div>"""
+
+
+def _render_standup_page(snapshot: dict, banner: str = "", banner_undo_path: str = "",
+                         tagged_tickets: list | None = None, tickets_error: str = "", tasks_by_action: dict | None = None) -> bytes:
+    """Native /standup page: your view of the Operations Standup notes --
+    what changed since the previous standup, your open action items and
+    topics, and what active work is waiting on someone else.
+
+    Read-only and purely local. Everything shown comes from the sibling
+    meetingnotestool project's precomputed dist/standup_data.json (see
+    _common.standup_snapshot); that project owns all of the parsing and
+    status logic. The page's only write is your own Done / Dropped / Still
+    open / Keep watching calls, which go to that project's decisions.json
+    (see _common.record_standup_decision) and show here immediately via
+    _common.apply_standup_decisions. Nothing from the notes
+    is stored in this repo. The fuller tracker (every workstream, quiet-topic
+    triage, and each meeting's parsed notes) stays in meetingnotestool's own
+    page, linked from here."""
+    heading = f'<h2>{_topic_icon("standup")}Standup</h2>'
+    view = snapshot.get("view")
+    if not view:
+        body = f"""
+{heading}
+<p class="flag-alert">{html.escape(snapshot.get("error") or "Standup data isn't available.")}</p>
+<p class="meta">This page reads the standup view built by the separate meetingnotestool project. Set <code>STANDUP_DATA_FILE</code> if that checkout isn't at the default path.</p>
+"""
+        return _page(body, banner=banner, current_path="/standup", wide=True)
+
+    since = view.get("since") or {}
+    prev = _standup_date(view.get("previous_standup"))
+    latest = _standup_date(view.get("latest_standup"))
+    mine = view.get("my_open_actions") or []
+    my_topics = view.get("my_topics") or []
+    waiting = view.get("waiting_on") or []
+    resolved_mine = view.get("my_resolved_actions") or []
+    quiet = view.get("quiet_topics") or []
+
+    tasks_by_action = tasks_by_action or {}
+
+    def _task_link_or_button(aid: str) -> str:
+        task = tasks_by_action.get(aid)
+        if task:
+            label = _STANDUP_TASK_STATUS_LABELS.get(task.get("status"), task.get("status") or "")
+            ticket = f" #{task['ticket_id']}" if task.get("ticket_id") else ""
+            return f'<a class="stat-chip standup-task-chip" href="/tasks#task-{html.escape(str(task.get("local_id", "")))}">In My tasks ({html.escape(label)}{ticket})</a>'
+        return (
+            f'<form method="post" action="/standup/add-task"><input type="hidden" name="id" value="{html.escape(aid)}">'
+            f'<button type="submit" class="internal" data-loading-text="Adding…">{_icon("check-square", "icon-sm")}<span>Add to My tasks</span></button></form>'
+        )
+
+    def _action_controls(a: dict) -> str:
+        aid = a.get("id") or ""
+        r = a.get("resolution")
+        if not r:
+            return (_standup_decide_form("action", aid, "done", "Done", "claim", "check-circle")
+                    + _standup_decide_form("action", aid, "dropped", "Dropped", "remove", "trash")
+                    + _task_link_or_button(aid))
+        if r.get("by_you"):
+            return _standup_decide_form("action", aid, "clear", "Undo", "remove", "refresh")
+        return _standup_decide_form("action", aid, "open", "Still open", "remove", "refresh")
+
+    def _topic_controls(t: dict) -> str:
+        key = t.get("key") or ""
+        if t.get("decision"):
+            return _standup_decide_form("topic", key, "clear", "Undo", "remove", "refresh")
+        return (_standup_decide_form("topic", key, "done", "Done", "claim", "check-circle")
+                + _standup_decide_form("topic", key, "dropped", "Dropped", "remove", "trash")
+                + _standup_decide_form("topic", key, "keep", "Keep watching", "remove", "search"))
+
+    def _section(title: str, count, body_html: str, key: str) -> str:
+        count_html = f" ({count})" if count is not None else ""
+        return f"""<div class="security-panel overview-section standup-section-{key}">
+  <div class="overview-section-head"><h2 class="column-heading">{html.escape(title)}{count_html}</h2></div>
+  {body_html}
+</div>"""
+
+    def _grid(rows: list) -> str:
+        return f'<div class="mini-ticket-grid">{"".join(rows)}</div>'
+
+    def _empty(text: str) -> str:
+        return f'<p class="empty">{_topic_icon("standup", "topic-icon-empty")}{html.escape(text)}</p>'
+
+    # --- since the previous standup
+    groups = [
+        ("Newly blocked", since.get("newly_blocked") or []),
+        ("Newly done", since.get("newly_done") or []),
+        ("New topics", since.get("new_topics") or []),
+        ("Other updates", since.get("other_updates") or []),
+    ]
+    new_actions = since.get("new_actions") or []
+    resolved = since.get("resolved_actions") or []
+    chips = "".join(
+        f'<span class="stat-chip">{len(items)} {label.lower()}</span>' for label, items in groups[:3]
+    ) + f'<span class="stat-chip">{len(new_actions)} new action items</span><span class="stat-chip">{len(resolved)} resolved</span>'
+    since_parts = [f'<p class="meta">{chips}</p>']
+    for label, items in groups:
+        if items:
+            since_parts.append(f'<h3 class="standup-group-heading">{label} ({len(items)})</h3>'
+                               + _grid([_render_standup_topic_row(t, show_before=True) for t in items]))
+    if new_actions:
+        since_parts.append(f'<h3 class="standup-group-heading">New action items ({len(new_actions)})</h3>'
+                           + _grid([_render_standup_action_row(a, show_owner=True) for a in new_actions]))
+    if resolved:
+        since_parts.append(f'<h3 class="standup-group-heading">Action items resolved ({len(resolved)})</h3>'
+                           + _grid([_render_standup_action_row(a, show_owner=True) for a in resolved]))
+    if len(since_parts) == 1:
+        since_parts.append(_empty("Nothing changed."))
+
+    waiting_parts = [
+        f'<h3 class="standup-group-heading">{html.escape(g.get("on", ""))} ({len(g.get("topics") or [])})</h3>'
+        + _grid([_render_standup_topic_row(t) for t in g.get("topics") or []])
+        for g in waiting
+    ]
+
+    decided = [t for t in quiet if t.get("decision")]
+    undecided = [t for t in quiet if not t.get("decision")]
+    quiet_parts = []
+    for suggest, label, hint in _STANDUP_TRIAGE_GROUPS:
+        group = [t for t in undecided if ((t.get("triage") or {}).get("suggest")) == suggest]
+        if not group:
+            continue
+        rows = [_render_standup_topic_row(t, controls=_topic_controls(t), note=(t.get("triage") or {}).get("why", "")) for t in group]
+        quiet_parts.append(
+            f'<details class="recently-handled" data-storage-key="csa-standup-quiet-{suggest or "unsorted"}"'
+            f'{" open" if suggest == "possibly_stuck" else ""}><summary>{label} ({len(group)})</summary>'
+            f'<p class="meta">{html.escape(hint)}</p>{_grid(rows)}</details>'
+        )
+    if decided:
+        labels = {"done": "Marked done by you", "dropped": "Marked dropped by you", "keep": "Keeping watch"}
+        rows = [_render_standup_topic_row(t, controls=_topic_controls(t), note=labels.get(t["decision"], "")) for t in decided]
+        quiet_parts.append(
+            f'<details class="recently-handled" data-storage-key="csa-standup-quiet-decided"><summary>Decided by you ({len(decided)})</summary>'
+            '<p class="meta">Done and dropped topics leave this list once the tracker rebuilds. A topic raised again at a later standup comes back here.</p>'
+            f"{_grid(rows)}</details>"
+        )
+
+    mentions = view.get("ticket_mentions") or {}
+
+    def _mention_line(tid) -> str:
+        where = mentions.get(str(tid)) or []
+        if not where:
+            return ""
+        first = where[0]
+        more = f" and {len(where) - 1} more" if len(where) > 1 else ""
+        return (f'<div class="standup-note">Mentioned at the {_standup_notes_link(first.get("doc_url"), _standup_date(first.get("date")) + " standup")}'
+                f' ({html.escape(first.get("topic", ""))}){more}</div>')
+
+    tagged_tickets = tagged_tickets or []
+    tagged_ids = {str(i.get("ticket_id")) for i in tagged_tickets}
+    if tickets_error:
+        tagged_html = f'<p class="flag-alert">{html.escape(tickets_error)}</p>'
+    elif tagged_tickets:
+        tagged_html = _grid([_render_readonly_ticket_row(i, return_to="/standup", extra_html=_mention_line(i.get("ticket_id"))) for i in tagged_tickets])
+    else:
+        tagged_html = _empty('No open tickets tagged "standup" right now.')
+    untagged = [tid for tid in mentions if tid not in tagged_ids]
+    mention_rows = []
+    for tid in sorted(untagged, key=lambda k: (mentions[k][0].get("date") or ""), reverse=True):
+        url = _common.ticket_url(tid)
+        link = f'<a href="{html.escape(url)}" target="_blank" rel="noopener" class="tid">#{html.escape(tid)}</a>' if url else f'<span class="tid">#{html.escape(tid)}</span>'
+        mention_rows.append(f'<div class="mini-ticket"><div class="mini-ticket-head">{link}</div>{_mention_line(tid)}</div>')
+    tickets_html = (
+        f'<h3 class="standup-group-heading">Tagged "standup" in Zendesk ({len(tagged_tickets)})</h3>{tagged_html}'
+        + (f'<h3 class="standup-group-heading">Mentioned in the notes ({len(mention_rows)})</h3>{_grid(mention_rows)}' if mention_rows else "")
+    )
+
+    me = html.escape(view.get("me") or "you")
+    tracker = view.get("tracker_url")
+    links = [_standup_notes_link(view.get("latest_doc_url"), f"latest notes ({latest})")]
+    if tracker:
+        links.append(_standup_notes_link(tracker, "full tracker"))
+    counts = view.get("counts") or {}
+    body = f"""
+{heading}
+<p class="meta">Your view of the Operations Standup, built from {view.get("standup_count", 0)} standups' Gemini notes by the separate meetingnotestool project (data built {html.escape(str(view.get("generated_at", ""))[:16].replace("T", " "))}). Your Done / Dropped / Still open / Keep watching calls are saved to that project's decisions.json, the only thing this page writes, and show here right away. Open the {" or the ".join(links)}.</p>
+<p class="meta"><span class="stat-chip">{counts.get("live_topics", 0)} active topics</span><span class="stat-chip">{counts.get("quiet_topics", 0)} quiet</span><span class="stat-chip">{counts.get("open_actions", 0)} open action items team-wide</span></p>
+<div class="standup-layout">
+{_section(f"Since the {prev} standup", None, "".join(since_parts), "since")}
+{_section(f"Your open action items, oldest first", len(mine), _grid([_render_standup_action_row(a, controls=_action_controls(a)) for a in mine]) if mine else _empty(f"Nothing open for {me}."), "mine")}
+{_section("Your topics", len(my_topics), _grid([_render_standup_topic_row(t) for t in my_topics]) if my_topics else _empty("No active topics."), "topics")}
+{_section("Waiting on others", sum(len(g.get("topics") or []) for g in waiting), "".join(waiting_parts) if waiting_parts else _empty("Nothing is waiting on anyone."), "waiting")}
+{_section("Zendesk tickets", None, tickets_html, "tickets")}
+{_section("Recently resolved for you", len(resolved_mine), ('<p class="meta">Resolved from later notes, or by you. If the notes got one wrong, mark it still open.</p>' + _grid([_render_standup_action_row(a, controls=_action_controls(a)) for a in resolved_mine])) if resolved_mine else _empty("Nothing resolved yet."), "resolved")}
+{_section("Needs a decision", len(undecided), ('<p class="meta">Topics that aren\'t done and haven\'t come up lately, sorted by a suggested disposition from the later notes. Your call is saved to the tracker and survives future refreshes.</p>' + "".join(quiet_parts)) if quiet_parts else _empty("No quiet topics."), "decide")}
+</div>
+<p class="meta">Owners with a dotted underline were inferred rather than stated in the notes; a "check" tag marks a guessed name or detail (hover for why). Statuses, resolutions and waiting-on are AI judgments from the notes -- confirm in the linked notes before acting.</p>
+"""
+    return _page(body, banner=banner, banner_undo_path=banner_undo_path, current_path="/standup", wide=True)
+
+
 def _identity_select_html(field_name: str) -> str:
     """The Assignee/Requester <select> on a draft's promote form -- same
     two options (PERSONAL_TASK_IDENTITY_LABELS) either way, resolved
@@ -4451,6 +4805,22 @@ class Handler(BaseHTTPRequestHandler):
             ))
             return
 
+        if parsed.path == "/standup":
+            # Purely local and read-only: renders the sibling
+            # meetingnotestool project's precomputed view -- no Zendesk
+            # call, and nothing is ever written to that project.
+            # One cached Zendesk read (the same fetch /flagged and /overview
+            # make, FLAGGED_CACHE_TTL_SECONDS) for the standup-tagged tickets
+            # section; everything else here is local.
+            flagged = _common.fetch_flagged_tickets(_common.make_client(), log_fn=_log)
+            self._send_html(_render_standup_page(
+                _common.standup_view(), banner=banner, banner_undo_path=banner_undo_path,
+                tagged_tickets=[i for i in flagged["items"] if "standup" in (i.get("matched_tags") or [])],
+                tickets_error=flagged["error"] or "",
+                tasks_by_action=_common.standup_tasks_by_action(),
+            ))
+            return
+
         if parsed.path == "/":
             # The main queue's real URL, below -- kept alive as a redirect
             # (not removed, not still rendering the page itself) so an old
@@ -4535,6 +4905,47 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         parts = parsed.path.strip("/").split("/")
 
+        if parts == ["standup", "decide"]:
+            # Your call on one standup action item or quiet topic -- see
+            # _common.record_standup_decision. The only write this tool
+            # makes to the meetingnotestool project, and only to its
+            # decisions.json. Undo restores whatever was there before.
+            form = self._parse_form_body()
+            kind = form.get("kind", [""])[0]
+            item_id = form.get("id", [""])[0]
+            decision = form.get("decision", [""])[0]
+            ok, error, previous = _common.record_standup_decision(kind, item_id, decision)
+            if not ok:
+                self._redirect(f"/standup?msg={quote(error)}")
+                return
+            message = _STANDUP_DECISION_MESSAGES.get((kind, decision), "Recorded.")
+            # Path segments, not a query string: do_GET unquotes the undo
+            # value on top of parse_qs's own decoding, so a topic key with
+            # "&" or "," in it wouldn't survive a query string. base64url
+            # only ever uses [A-Za-z0-9_-], which decodes to itself.
+            undo = f"/standup/undo/{kind}/{_b64url(item_id)}/{previous or 'clear'}"
+            self._redirect(f"/standup?msg={quote(message)}&undo={quote(undo)}")
+            return
+
+        if parts == ["standup", "add-task"]:
+            # A local My tasks draft only (see _common.add_standup_action_to_tasks)
+            # -- promoting it to a Zendesk ticket stays a separate click on /tasks.
+            form = self._parse_form_body()
+            result = _common.add_standup_action_to_tasks(form.get("id", [""])[0], log_fn=_log)
+            message = ("Added to My tasks as a draft. Promote it on the Tasks page when you're ready."
+                       if result.get("ok") else result.get("error") or "No task was added.")
+            self._redirect(f"/standup?msg={quote(message)}")
+            return
+
+        if len(parts) == 5 and parts[:2] == ["standup", "undo"]:
+            try:
+                item_id = base64.urlsafe_b64decode(parts[3] + "=" * (-len(parts[3]) % 4)).decode("utf-8")
+            except Exception:
+                item_id = ""
+            ok, error, _ = _common.record_standup_decision(parts[2], item_id, parts[4])
+            self._redirect(f"/standup?msg={quote('Undone.' if ok else error)}")
+            return
+
         if parts == ["refresh"]:
             # return_to (see _refresh_button_html's hidden field) sends you
             # back to whichever page you actually clicked Refresh from --
@@ -4547,7 +4958,7 @@ class Handler(BaseHTTPRequestHandler):
             # wherever it says would be an open redirect.
             form = self._parse_form_body()
             return_to = form.get("return_to", ["/firstreply"])[0]
-            if return_to not in ("/firstreply", "/overview", "/tasks", "/flagged", "/security", "/solved", "/reconnect"):
+            if return_to not in ("/firstreply", "/overview", "/tasks", "/standup", "/flagged", "/security", "/solved", "/reconnect"):
                 return_to = "/firstreply"
             message = self._refresh()
             self._redirect(f"{return_to}?msg={quote(message)}")
@@ -4660,7 +5071,7 @@ class Handler(BaseHTTPRequestHandler):
             # from the request body, and blindly redirecting wherever it
             # says would be an open redirect.
             return_to = form.get("return_to", ["/firstreply"])[0]
-            if return_to not in ("/firstreply", "/security", "/flagged", "/overview"):
+            if return_to not in ("/firstreply", "/security", "/flagged", "/overview", "/standup"):
                 return_to = "/firstreply"
             message = self._claim(ticket_id)
             self._redirect(f"{return_to}?msg={quote(message)}")

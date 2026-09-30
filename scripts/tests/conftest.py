@@ -62,4 +62,11 @@ def isolated_output_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(_common, "_security_ticket_cache", {})
     monkeypatch.setattr(_common, "_flagged_ticket_cache", {})
     monkeypatch.setattr(_common, "_pending_ticket_actions_in_progress", set())
+    # /standup reads a sibling project's file that exists on this Mac --
+    # point it at a nonexistent tmp path so no test ever reads real
+    # standup notes (and the Standup nav badge starts cold like the rest).
+    monkeypatch.setattr(_common, "STANDUP_DATA_FILE", tmp_path / "standup_data.json")
+    monkeypatch.setattr(_common, "_standup_cache", {})
+    monkeypatch.setattr(_common, "STANDUP_DECISIONS_FILE", tmp_path / "decisions.json")
+    monkeypatch.setattr(_common, "STANDUP_DECISIONS_LOCK_FILE", tmp_path / "standup_decisions.json.lock")
     yield

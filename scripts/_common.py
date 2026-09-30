@@ -6,6 +6,7 @@ duplicated (and drifting) across files, so this time there's one source of
 truth both scripts import from.
 """
 
+import copy
 import fcntl
 import json
 import os
@@ -2609,6 +2610,240 @@ def sla_history_snapshot() -> dict:
     return {"entries": entries, "error": None, "as_of": as_of}
 
 
+# Read-only look at the sibling meetingnotestool project's precomputed
+# standup view -- NEVER written to from here, same one-directional
+# relationship as SLA_HISTORY_FILE above. That project (a separate,
+# private repo) parses the Operations Standup notes and owns all of the
+# status logic; its build writes this one file, and /standup only renders
+# it. Nothing from the standup notes is stored in this repo -- it's read
+# at request time from that other checkout -- so none of it can end up
+# in this repo's git history. Overridable via env var for a clone that
+# doesn't sit at the default sibling path.
+STANDUP_DATA_FILE = Path(os.getenv(
+    "STANDUP_DATA_FILE",
+    str(Path.home() / "Desktop" / "git" / "meetingnotestool" / "dist" / "standup_data.json"),
+))
+STANDUP_SCHEMA_VERSION = 1
+
+# (mtime_ns, size) -> parsed view. The nav badge reads this on every page
+# render, so a re-parse only happens when meetingnotestool actually
+# rebuilds the file, not on every request.
+_standup_cache: dict = {}
+_standup_cache_lock = threading.Lock()
+
+
+def standup_snapshot() -> dict:
+    """Read-only load of meetingnotestool's dist/standup_data.json for the
+    /standup page. Returns {"view": dict|None, "error": str|None}. A missing
+    file, unreadable JSON, or an unexpected schema version degrades to
+    view=None with an explanatory error, never raises -- the rest of this
+    tool keeps working whether or not that sibling project is set up."""
+    try:
+        st = STANDUP_DATA_FILE.stat()
+    except FileNotFoundError:
+        return {"view": None, "error": f"No standup data found at {STANDUP_DATA_FILE} yet -- run meetingnotestool's build.py."}
+    except Exception as exc:
+        return {"view": None, "error": f"Could not read standup data: {exc}"}
+    key = (STANDUP_DATA_FILE, st.st_mtime_ns, st.st_size)
+    with _standup_cache_lock:
+        if key in _standup_cache:
+            return _standup_cache[key]
+    try:
+        view = json.loads(STANDUP_DATA_FILE.read_text())
+        if not isinstance(view, dict):
+            raise ValueError("expected a JSON object")
+        if view.get("schema") != STANDUP_SCHEMA_VERSION:
+            raise ValueError(f"schema {view.get('schema')!r}, expected {STANDUP_SCHEMA_VERSION} -- this page and meetingnotestool's build.py are out of step")
+        result = {"view": view, "error": None}
+    except Exception as exc:
+        result = {"view": None, "error": f"Could not parse standup data: {exc}"}
+    with _standup_cache_lock:
+        _standup_cache.clear()
+        _standup_cache[key] = result
+    return result
+
+
+# The one file this tool writes in meetingnotestool: your own calls on
+# standup action items and quiet topics. IDs, a decision and a timestamp
+# only -- no free text -- so nothing from the notes is copied into it.
+# meetingnotestool's build.py applies it permanently on its next build;
+# apply_standup_decisions() below shows it on /standup immediately.
+STANDUP_DECISIONS_FILE = Path(os.getenv(
+    "STANDUP_DECISIONS_FILE",
+    str(Path.home() / "Desktop" / "git" / "meetingnotestool" / "decisions.json"),
+))
+STANDUP_DECISIONS_LOCK_FILE = OUTPUT_DIR / "standup_decisions.json.lock"
+STANDUP_ACTION_DECISIONS = {"done", "dropped", "open"}
+STANDUP_TOPIC_DECISIONS = {"done", "dropped", "keep"}
+
+
+def load_standup_decisions() -> dict:
+    """Plain read of decisions.json; an empty store if it's missing or
+    unreadable (same fail-open read posture as load_pending)."""
+    empty = {"schema": 1, "actions": {}, "topics": {}}
+    try:
+        data = json.loads(STANDUP_DECISIONS_FILE.read_text())
+    except Exception:
+        return empty
+    if not isinstance(data, dict):
+        return empty
+    return {"schema": 1, "actions": dict(data.get("actions") or {}), "topics": dict(data.get("topics") or {})}
+
+
+def _standup_known_ids(view: dict) -> tuple:
+    """(action ids, topic keys) this page could legitimately act on -- a
+    decision for anything else is refused rather than written."""
+    since = view.get("since") or {}
+    action_lists = [view.get("my_open_actions"), view.get("my_resolved_actions"),
+                    since.get("new_actions"), since.get("resolved_actions")]
+    actions = {a.get("id") for lst in action_lists for a in (lst or []) if a.get("id")}
+    topics = {t.get("key") for t in (view.get("quiet_topics") or []) if t.get("key")}
+    return actions, topics
+
+
+def record_standup_decision(kind: str, item_id: str, decision: str) -> tuple:
+    """Sets (or with decision="clear", removes) your decision on one standup
+    action item or quiet topic in decisions.json. Returns (ok, message,
+    previous_decision_or_None) -- the previous value is what an Undo puts
+    back. Refuses unknown kinds/decisions, IDs the current standup view
+    doesn't contain, and a missing meetingnotestool checkout (it never
+    creates that project's folder)."""
+    allowed = {"action": STANDUP_ACTION_DECISIONS, "topic": STANDUP_TOPIC_DECISIONS}.get(kind)
+    if allowed is None or (decision not in allowed and decision != "clear"):
+        return False, "That standup decision isn't one this page knows how to record.", None
+    view = standup_snapshot()["view"]
+    if not view:
+        return False, "Standup data isn't available, so nothing was recorded.", None
+    known_actions, known_topics = _standup_known_ids(view)
+    if item_id not in (known_actions if kind == "action" else known_topics):
+        return False, "That standup item isn't in the current view (it may have changed since the page loaded). Nothing was recorded.", None
+    if not STANDUP_DECISIONS_FILE.parent.is_dir():
+        return False, f"No meetingnotestool folder at {STANDUP_DECISIONS_FILE.parent}, so nothing was recorded.", None
+    section = "actions" if kind == "action" else "topics"
+    field = "outcome" if kind == "action" else "decision"
+    with open(STANDUP_DECISIONS_LOCK_FILE, "w") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        data = load_standup_decisions()
+        previous = (data[section].get(item_id) or {}).get(field)
+        if decision == "clear":
+            data[section].pop(item_id, None)
+        else:
+            data[section][item_id] = {field: decision, "at": datetime.now().astimezone().isoformat(timespec="seconds")}
+        data[section] = dict(sorted(data[section].items()))
+        _atomic_write_json(STANDUP_DECISIONS_FILE, data)
+    return True, "", previous
+
+
+def apply_standup_decisions(view: dict, decisions: dict) -> dict:
+    """Returns a copy of the standup view with your decisions.json calls
+    applied, so /standup reflects a click immediately instead of waiting for
+    meetingnotestool's next build. Idempotent: once that build has applied a
+    decision itself, applying it again here changes nothing.
+
+    Action items: done/dropped moves an item from your open list to your
+    resolved list (marked "by you, pending" until the next build); open
+    moves a resolved one back. Quiet topics: the decision rides on the
+    topic as "decision", but only if made on or after the topic's latest
+    mention -- a later standup update wins, same rule build.py uses."""
+    v = copy.deepcopy(view)
+    acts = decisions.get("actions") or {}
+    tops = decisions.get("topics") or {}
+
+    still_open, newly_resolved = [], []
+    for a in v.get("my_open_actions") or []:
+        d = acts.get(a.get("id")) or {}
+        if d.get("outcome") in ("done", "dropped"):
+            a["resolution"] = {"date": str(d.get("at", ""))[:10], "outcome": d["outcome"], "note": "Marked by you",
+                               "by_you": True, "pending": True}
+            newly_resolved.append(a)
+        else:
+            still_open.append(a)
+    resolved = []
+    for a in v.get("my_resolved_actions") or []:
+        d = acts.get(a.get("id")) or {}
+        if d.get("outcome") == "open":
+            a["resolution"] = None
+            still_open.append(a)
+        else:
+            resolved.append(a)
+    v["my_open_actions"] = sorted(still_open, key=lambda a: (a.get("date") or "", a.get("id") or ""))
+    v["my_resolved_actions"] = newly_resolved + resolved
+
+    for group in (v.get("since") or {}).values():
+        for a in group:
+            if isinstance(a, dict) and a.get("id") in acts:
+                a["decision"] = (acts[a["id"]] or {}).get("outcome")
+
+    closed = 0
+    for t in v.get("quiet_topics") or []:
+        d = tops.get(t.get("key")) or {}
+        if d.get("decision") in STANDUP_TOPIC_DECISIONS and str(d.get("at", ""))[:10] >= (t.get("last_date") or ""):
+            t["decision"] = d["decision"]
+        closed += t.get("decision") in ("done", "dropped")
+    if "counts" in v:
+        v["counts"] = dict(v["counts"], quiet_topics=max(0, (v["counts"].get("quiet_topics") or 0) - closed))
+    return v
+
+
+def standup_view() -> dict:
+    """standup_snapshot() with your decisions applied -- what /standup and
+    its nav badge actually show. {"view": dict|None, "error": str|None}."""
+    snap = standup_snapshot()
+    if not snap["view"]:
+        return snap
+    return {"view": apply_standup_decisions(snap["view"], load_standup_decisions()), "error": None}
+
+
+def standup_open_action_count() -> int:
+    """Nav-badge count: your open standup action items, after your own
+    decisions. 0 (no badge) when the standup data isn't available, same
+    fail-quiet posture as the other cache-backed badges."""
+    view = standup_view()["view"]
+    return len(view.get("my_open_actions") or []) if view else 0
+
+
+def standup_tasks_by_action() -> dict:
+    """{standup action item id: personal task} for every My tasks entry made
+    from /standup's "Add to My tasks", live or archived, so the page can show
+    "In My tasks" instead of offering the button again. Purely local."""
+    out = {}
+    try:
+        archived = json.loads(PERSONAL_TASKS_ARCHIVE_FILE.read_text())
+    except Exception:
+        archived = []
+    for v in list(archived if isinstance(archived, list) else []) + list(load_personal_tasks().values()):
+        if isinstance(v, dict) and v.get("standup_action_id"):
+            out[v["standup_action_id"]] = v
+    return out
+
+
+def add_standup_action_to_tasks(action_id: str, log_fn=print) -> dict:
+    """/standup's "Add to My tasks": saves one of your open standup action
+    items as a local My tasks draft (add_personal_task -- no Zendesk call;
+    promoting it to a real ticket stays a separate click on /tasks).
+
+    The draft's notes say only which standup it came from, deliberately
+    without the Google Doc link: a promoted task's notes can end up in a
+    Zendesk ticket, and the standup notes aren't meant to travel there.
+    Refuses an action item that isn't one of your open ones in the current
+    view, or one that already has a task (live or archived)."""
+    view = standup_view()["view"]
+    if not view:
+        return {"ok": False, "error": "Standup data isn't available, so no task was added."}
+    action = next((a for a in view.get("my_open_actions") or [] if a.get("id") == action_id), None)
+    if action is None:
+        return {"ok": False, "error": "That action item isn't one of your open standup items any more. No task was added."}
+    if action_id in standup_tasks_by_action():
+        return {"ok": False, "error": "That standup action item is already in My tasks."}
+    try:
+        raised = datetime.strptime(action.get("date", ""), "%Y-%m-%d")
+        when = f"{raised.strftime('%b')} {raised.day}"
+    except ValueError:
+        when = action.get("date", "")
+    return add_personal_task(action.get("task", ""), f"From the {when} Operations Standup.", log_fn=log_fn,
+                             standup_action_id=action_id)
+
+
 # Agents excluded from the /sla page's agent-activity chart entirely --
 # not just hidden via that chart's own checkbox filter, but never listed
 # or plotted at all, no matter the selected date range. Set by explicit
@@ -2863,7 +3098,7 @@ def _parse_est_mins(est_mins) -> tuple:
     return parsed, None
 
 
-def add_personal_task(subject: str, notes: str, est_mins=None, category: str = "", log_fn=print) -> dict:
+def add_personal_task(subject: str, notes: str, est_mins=None, category: str = "", log_fn=print, standup_action_id: str = "") -> dict:
     """Saves a personal task as a local-only draft -- no Zendesk call at
     all. This is deliberately the ONLY thing "Add task" does now: the
     first version of this feature created a real Zendesk ticket
@@ -2886,9 +3121,14 @@ def add_personal_task(subject: str, notes: str, est_mins=None, category: str = "
     still newest-first, same as before manual reordering existed -- see
     move_personal_task_draft() for how that value changes afterward.
 
+    standup_action_id (optional) links the draft back to the standup action
+    item it came from (/standup's "Add to My tasks"). It's checked inside the
+    same lock as the write, so a double-click can't create two drafts for
+    one action item; see standup_tasks_by_action() for the archive check.
+
     Returns {"ok": True, "local_id": str, "error": None} on success, or
-    {"ok": False, "error": str} if the subject is blank or est_mins is
-    given but invalid; never raises."""
+    {"ok": False, "error": str} if the subject is blank, est_mins is given
+    but invalid, or that standup action item already has a task; never raises."""
     subject = (subject or "").strip()
     if not subject:
         return {"ok": False, "error": "A task needs a subject."}
@@ -2898,8 +3138,12 @@ def add_personal_task(subject: str, notes: str, est_mins=None, category: str = "
         return {"ok": False, "error": est_mins_error}
 
     local_id = uuid.uuid4().hex[:12]
+    duplicate = []
 
     def _mutate(data):
+        if standup_action_id and any(v.get("standup_action_id") == standup_action_id for v in data.values()):
+            duplicate.append(True)
+            return
         existing_positions = [v.get("position", 0) for v in data.values() if v.get("status") == "draft"]
         position = (max(existing_positions) + 1) if existing_positions else 0
         data[local_id] = {
@@ -2914,8 +3158,12 @@ def add_personal_task(subject: str, notes: str, est_mins=None, category: str = "
             "est_mins": est_mins_int,
             "position": position,
         }
+        if standup_action_id:
+            data[local_id]["standup_action_id"] = standup_action_id
 
     update_personal_tasks(_mutate)
+    if duplicate:
+        return {"ok": False, "error": "That standup action item is already in My tasks."}
     log_fn(f"Saved task draft {local_id}: {subject}")
     return {"ok": True, "local_id": local_id, "error": None}
 
