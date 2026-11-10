@@ -1780,6 +1780,194 @@ def fetch_recently_worked_on(client, limit: int = RECENTLY_WORKED_ON_LIMIT, log_
         return {"items": local_items[:limit], "capped": False, "zendesk_unavailable": True}
 
 
+# --- Previous-workday activity recap (/standup/yesterday) ------------------
+# "What did I do on <day>?" for standup: every public reply and internal
+# note this tool's own Zendesk account left on a given local calendar day,
+# plus tickets assigned to it that sit solved with their last update on that
+# day. Distinct from fetch_recently_worked_on above (last-N, no day window,
+# one row per ticket): this one is bounded by a DAY, lists every event, and
+# pages back only as far as that day requires.
+ACTIVITY_SCAN_PAGES = int(os.getenv("ACTIVITY_SCAN_PAGES", "10"))
+ACTIVITY_TICKET_PER_PAGE = 100
+ACTIVITY_COMMENT_CHECK_LIMIT = int(os.getenv("ACTIVITY_COMMENT_CHECK_LIMIT", "150"))
+ACTIVITY_CACHE_TTL_SECONDS = 120
+_activity_cache: dict = {}
+_activity_cache_lock = threading.Lock()
+
+
+def previous_workday(today=None):
+    """The most recent BUSINESS_WEEKDAYS date strictly before `today` (a
+    date, default: today's local date) -- Monday gives the prior Friday,
+    Tuesday through Friday give the day before."""
+    day = today or datetime.now().date()
+    day = day - timedelta(days=1)
+    while day.weekday() not in BUSINESS_WEEKDAYS:
+        day -= timedelta(days=1)
+    return day
+
+
+def adjacent_workday(day, step: int):
+    """The business day `step` (+1 or -1) away from `day`."""
+    delta = timedelta(days=1 if step > 0 else -1)
+    day = day + delta
+    while day.weekday() not in BUSINESS_WEEKDAYS:
+        day += delta
+    return day
+
+
+def _activity_events_from_local(day_iso: str) -> dict:
+    """{ticket_id: item} built from replies sent THROUGH this tool on
+    `day_iso` (pending_drafts.json "posted" entries) -- the offline
+    fallback, and a supplement for anything the live scan missed."""
+    out = {}
+    for it in recent_replied_items(limit=None):
+        at = str(it.get("posted_at", ""))
+        if at[:10] != day_iso:
+            continue
+        tid = str(it.get("ticket_id"))
+        entry = out.setdefault(tid, {
+            "ticket_id": it.get("ticket_id"),
+            "subject": it.get("subject", ""),
+            "url": it.get("url") or ticket_url(it.get("ticket_id")),
+            "requester_name": it.get("requester_name") if it.get("name_confidence") == "confirmed" else None,
+            "events": [],
+        })
+        entry["events"].append({"at": at, "kind": "public" if it.get("posted_public") else "internal"})
+    return out
+
+
+def _finish_activity_items(by_ticket: dict) -> list:
+    items = []
+    for entry in by_ticket.values():
+        entry["events"].sort(key=lambda e: e["at"])
+        entry["first_at"] = entry["events"][0]["at"]
+        items.append(entry)
+    items.sort(key=lambda i: i["first_at"])
+    return items
+
+
+def fetch_activity_for_day(client, day, log_fn=print, force: bool = False) -> dict:
+    """Returns {"items": [...], "capped": bool, "zendesk_unavailable": bool}
+    for the local calendar `day` (a date). Each item is one ticket with
+    "events": [{"at": local-iso, "kind": "public"|"internal"|"solved"}],
+    items ordered by each ticket's first event that day.
+
+    Live path: pages IT-Operations tickets by updated_at desc and stops at
+    the first ticket last updated BEFORE `day` (nothing older can carry
+    activity on it). Every ticket updated on/after `day` has its comments
+    checked for ones authored by this tool's own account dated `day`;
+    a ticket assigned to that account with status solved and updated_at on
+    `day` additionally gets a "solved" event (updated_at stands in for the
+    solve time -- the same proxy fetch_recently_solved_tickets uses, so a
+    ticket touched again after being solved will not show as solved on
+    `day`). capped=True means the page or comment-check budget ran out
+    before the scan reached the day boundary, so older-in-scan activity may
+    be missing. Scoped to IT-Operations like the other group-bound scans.
+    Offline (or on failure) it falls back to replies sent through this
+    tool, flagged zendesk_unavailable=True."""
+    global _activity_cache
+    now = datetime.now()
+    day_iso = day.isoformat()
+    with _activity_cache_lock:
+        cached = _activity_cache.get(day_iso)
+        if (not force and cached and (now - cached["fetched_at"]).total_seconds() < ACTIVITY_CACHE_TTL_SECONDS):
+            return {k: cached[k] for k in ("items", "capped", "zendesk_unavailable")}
+
+    def _store(result):
+        with _activity_cache_lock:
+            _activity_cache[day_iso] = {**result, "fetched_at": now}
+        return result
+
+    local = _activity_events_from_local(day_iso)
+    if client.client is None:
+        return _store({"items": _finish_activity_items(local), "capped": False, "zendesk_unavailable": True})
+
+    try:
+        agent_user_id = resolve_own_agent_id(client, log_fn=log_fn)
+        if agent_user_id is None:
+            raise RuntimeError("could not resolve this tool's own Zendesk account")
+
+        found = {}
+        capped = False
+        checked = 0
+        page = 1
+        reached_boundary = False
+        max_page = min(ACTIVITY_SCAN_PAGES, ZENDESK_SEARCH_RESULT_CAP // ACTIVITY_TICKET_PER_PAGE)
+        while page <= max_page and not reached_boundary:
+            try:
+                result = client.get_tickets(
+                    group_id=IT_OPERATIONS_GROUP_ID, sort_by="updated_at", sort_order="desc",
+                    per_page=ACTIVITY_TICKET_PER_PAGE, page=page,
+                )
+            except Exception as exc:
+                log_fn(f"fetch_activity_for_day() page {page} failed ({exc}) -- stopping with {len(found)} ticket(s) found")
+                capped = True
+                break
+            tickets = result.get("tickets", [])
+            if not tickets:
+                break
+            stop_budget = False
+            for ticket in tickets:
+                updated_local = _zendesk_ts_to_local_iso(ticket.get("updated_at", ""))
+                if updated_local and updated_local[:10] < day_iso:
+                    reached_boundary = True
+                    break
+                if checked >= ACTIVITY_COMMENT_CHECK_LIMIT:
+                    stop_budget = True
+                    break
+                checked += 1
+                tid = ticket.get("id")
+                events = []
+                try:
+                    comments = client.get_ticket_comments(tid)
+                except Exception as exc:
+                    log_fn(f"fetch_activity_for_day(): get_ticket_comments(#{tid}) failed ({exc}), skipping")
+                    comments = []
+                for c in comments:
+                    if c.get("author_id") != agent_user_id:
+                        continue
+                    at = _zendesk_ts_to_local_iso(c.get("created_at", ""))
+                    if at and at[:10] == day_iso:
+                        events.append({"at": at, "kind": "public" if c.get("public") else "internal"})
+                if (
+                    ticket.get("status") == "solved" and ticket.get("assignee_id") == agent_user_id
+                    and updated_local and updated_local[:10] == day_iso
+                ):
+                    events.append({"at": updated_local, "kind": "solved"})
+                if not events:
+                    continue
+                name, name_confidence, _ = resolve_requester_name(
+                    client, ticket.get("requester_id"), ticket.get("description") or "", log_fn=log_fn
+                )
+                found[str(tid)] = {
+                    "ticket_id": tid,
+                    "subject": ticket.get("subject", ""),
+                    "url": ticket_url(tid),
+                    "requester_name": name if name_confidence == "confirmed" else None,
+                    "events": events,
+                }
+            if stop_budget:
+                capped = True
+                break
+            if not result.get("has_more"):
+                reached_boundary = True
+            page += 1
+        if not reached_boundary and not capped:
+            capped = True
+
+        # Replies sent through this tool for tickets the live scan did not
+        # surface (outside the scanned group/window) still belong on the list.
+        for tid, entry in local.items():
+            if tid not in found:
+                found[tid] = entry
+        return _store({"items": _finish_activity_items(found), "capped": capped, "zendesk_unavailable": False})
+    except Exception as exc:
+        log_fn(f"fetch_activity_for_day() failed ({exc})")
+        if cached:
+            return {k: cached[k] for k in ("items", "capped", "zendesk_unavailable")}
+        return {"items": _finish_activity_items(local), "capped": False, "zendesk_unavailable": True}
+
+
 # --- IT-Security "recent activity" column -----------------------------
 # A read-only companion panel, distinct from the IT-Operations working
 # queue above: no candidate filtering, no already-replied check, no

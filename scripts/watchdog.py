@@ -36,7 +36,14 @@ STATE_FILE = OUTPUT_DIR / "watchdog_state.json"
 REVIEW_SERVER_ERR_LOG = OUTPUT_DIR / "review_server.err.log"
 FIRST_REPLY_ERR_LOG = OUTPUT_DIR / "launchd.err.log"
 
-REVIEW_SERVER_URL = "http://127.0.0.1:8765/"
+# Hits review_server.py's dedicated /healthz route, not "/". "/" redirects
+# to /firstreply, which makes a live, synchronous Zendesk API call on every
+# request -- that routinely takes 20s+, well past the 5s timeout below, so
+# this used to time out on nearly every tick even though the server was
+# perfectly healthy (just waiting on Zendesk). /healthz touches no cache,
+# file, or network call and answers instantly, so a timeout here means the
+# process is actually stuck -- not just that Zendesk is slow right now.
+REVIEW_SERVER_URL = "http://127.0.0.1:8765/healthz"
 
 # Mirrors _common.py's BUSINESS_HOURS / BUSINESS_WEEKDAYS / CRON_INTERVAL_SECONDS.
 # Duplicated here on purpose rather than imported -- see module docstring.

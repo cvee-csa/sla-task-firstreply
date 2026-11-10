@@ -3961,6 +3961,7 @@ _STANDUP_TICKET_RE = re.compile(r"(\b[Tt]ickets?\s*#?|#)(\d{5,7})\b")
 _STANDUP_RETURN_RE = re.compile(r"^/standup(/[A-Za-z0-9_\-./]*)?(\?[A-Za-z0-9_=&%+\-.]*)?$")
 _STANDUP_SUBNAV = [
     ("/standup", "Overview"),
+    ("/standup/yesterday", "Workday recap"),
     ("/standup/workstreams", "Workstreams"),
     ("/standup/meetings", "Meetings"),
     ("/standup/actions", "Action items"),
@@ -4217,15 +4218,19 @@ def _standup_topic_matches(t: dict, q: str, owner: str) -> bool:
     return True
 
 
+def _standup_subnav_html(current: str) -> str:
+    aria_current = ' aria-current="page"'
+    return "".join(
+        f'<a class="sla-range-btn{" active" if path == current else ""}" href="{path}"{aria_current if path == current else ""}>{label}</a>'
+        for path, label in _STANDUP_SUBNAV
+    )
+
+
 def _standup_frame(ctx_view: dict, current: str, body: str, banner: str, banner_undo_path: str) -> bytes:
     """Shared /standup chrome: heading, freshness line, and the sub-nav
     between the standup pages. Every page passes current_path="/standup"
     so the top nav keeps Standup highlighted."""
-    aria_current = ' aria-current="page"'
-    subnav = "".join(
-        f'<a class="sla-range-btn{" active" if path == current else ""}" href="{path}"{aria_current if path == current else ""}>{label}</a>'
-        for path, label in _STANDUP_SUBNAV
-    )
+    subnav = _standup_subnav_html(current)
     latest = _standup_date(ctx_view.get("latest_standup"))
     page = f"""
 <h2>{_topic_icon("standup")}Standup</h2>
@@ -4233,6 +4238,97 @@ def _standup_frame(ctx_view: dict, current: str, body: str, banner: str, banner_
 <nav class="standup-subnav" aria-label="Standup pages">{subnav}</nav>
 {body}
 <p class="meta">Owners with a dotted underline were inferred rather than stated in the notes; a "check" tag marks a guessed name or detail (hover for why). Statuses, resolutions and waiting-on are AI judgments from the notes -- confirm in the linked notes before acting.</p>
+"""
+    return _page(page, banner=banner, banner_undo_path=banner_undo_path, current_path="/standup", wide=True)
+
+
+_ACTIVITY_KIND_LABELS = {"public": "Public reply", "internal": "Internal note", "solved": "Solved"}
+
+
+def _activity_day_label(day) -> str:
+    return day.strftime("%A, %b %d").replace(" 0", " ")
+
+
+def _activity_plain_text(items: list) -> str:
+    lines = []
+    for it in items:
+        who = f" ({it['requester_name']})" if it.get("requester_name") else ""
+        parts = ", ".join(
+            f"{_ACTIVITY_KIND_LABELS.get(e['kind'], e['kind']).lower()} {_format_clock_time(e['at'])}" for e in it["events"]
+        )
+        lines.append(f"#{it['ticket_id']} {it.get('subject', '')}{who} - {parts}")
+    return "\n".join(lines)
+
+
+def _render_standup_yesterday_page(result: dict, day, default_day, today, banner: str = "", banner_undo_path: str = "") -> bytes:
+    """/standup/yesterday: your own ticket activity (public replies, internal
+    notes, solves) for one local calendar day -- the previous workday by
+    default -- for recounting it at standup. Independent of the
+    meetingnotestool snapshot, so it still works when that data is missing."""
+    items = result["items"]
+    counts = {"public": 0, "internal": 0, "solved": 0}
+    for it in items:
+        for e in it["events"]:
+            counts[e["kind"]] = counts.get(e["kind"], 0) + 1
+    prev_day = _common.adjacent_workday(day, -1)
+    next_day = _common.adjacent_workday(day, 1)
+    next_link = (
+        f'<a class="sla-range-btn" href="/standup/yesterday?date={next_day.isoformat()}">{_activity_day_label(next_day)} &rarr;</a>'
+        if next_day <= today else ""
+    )
+    reset_link = (
+        '<a class="sla-range-btn" href="/standup/yesterday">Previous workday</a>' if day != default_day else ""
+    )
+    date_form = (
+        f'<form method="get" action="/standup/yesterday" class="activity-date-form">'
+        f'<a class="sla-range-btn" href="/standup/yesterday?date={prev_day.isoformat()}">&larr; {_activity_day_label(prev_day)}</a> '
+        f'<label class="meta" for="activity-date">Day</label> '
+        f'<input type="date" id="activity-date" name="date" value="{day.isoformat()}" max="{today.isoformat()}"> '
+        f'<button type="submit" class="sla-range-btn">Show</button> {next_link} {reset_link}</form>'
+    )
+
+    notes = []
+    if result.get("zendesk_unavailable"):
+        notes.append("Zendesk was unreachable, so only replies sent through this tool are listed; replies and solves made directly in Zendesk are missing.")
+    if result.get("capped"):
+        notes.append("The Zendesk scan hit its page or comment-check limit before covering the whole day; some activity may be missing.")
+    notes_html = "".join(f'<p class="flag-alert">{html.escape(n)}</p>' for n in notes)
+
+    if items:
+        summary = (
+            f'{len(items)} ticket{"s" if len(items) != 1 else ""}: '
+            f'{counts["public"]} public repl{"ies" if counts["public"] != 1 else "y"}, '
+            f'{counts["internal"]} internal note{"s" if counts["internal"] != 1 else ""}, '
+            f'{counts["solved"]} solved.'
+        )
+        rows = []
+        for it in items:
+            tid = it["ticket_id"]
+            link = f'<a href="{html.escape(it.get("url") or "")}" target="_blank">#{tid}</a>' if it.get("url") else f"#{tid}"
+            who = f'{html.escape(it["requester_name"])} &mdash; ' if it.get("requester_name") else ""
+            chips = " ".join(
+                f'<span class="handled-kind">{html.escape(_ACTIVITY_KIND_LABELS.get(e["kind"], e["kind"]))}</span> '
+                f'<span class="handled-time">{html.escape(_format_clock_time(e["at"]))}</span>'
+                for e in it["events"]
+            )
+            rows.append(f'<li>{link} &mdash; {who}{html.escape(it.get("subject", ""))} {chips}</li>')
+        body = (
+            f'<p class="meta">{html.escape(summary)}</p>'
+            f'<ul class="activity-list">{"".join(rows)}</ul>'
+            f'<details class="recently-handled"><summary>Copy as text</summary>'
+            f'<pre>{html.escape(_activity_plain_text(items))}</pre></details>'
+        )
+    else:
+        body = f'<p class="empty">No ticket activity found for {html.escape(_activity_day_label(day))}.</p>'
+
+    page = f"""
+<h2>{_topic_icon("standup")}Standup</h2>
+<nav class="standup-subnav" aria-label="Standup pages">{_standup_subnav_html("/standup/yesterday")}</nav>
+<h3>{html.escape(_activity_day_label(day))}{" (previous workday)" if day == default_day else ""}</h3>
+{date_form}
+{notes_html}
+{body}
+<p class="meta">Covers IT-Operations tickets. Solved means assigned to you, solved, and last updated that day; a ticket touched again after being solved is not counted as solved.</p>
 """
     return _page(page, banner=banner, banner_undo_path=banner_undo_path, current_path="/standup", wide=True)
 
@@ -5016,6 +5112,23 @@ class Handler(BaseHTTPRequestHandler):
         return parse_qs(raw_body)
 
     def do_GET(self):
+        # /healthz: a deliberately trivial, dependency-free liveness probe
+        # for watchdog.py (see its REVIEW_SERVER_URL). Every other route
+        # below can block for seconds on a live Zendesk call --
+        # /firstreply's "recently worked on" sidebar fetch routinely takes
+        # 20s+ -- which used to be exactly what tripped the watchdog's old
+        # 5s check against "/": it would give up and close its socket
+        # mid-request, and this process would then hit a
+        # ConnectionResetError writing to that now-dead socket once the
+        # real (successful) response finally finished -- a working
+        # response mistaken for an outage. This route touches no cache, no
+        # file, no network call, so it answers instantly regardless of
+        # what Zendesk is doing, keeping "is the process alive" fully
+        # decoupled from "is Zendesk slow right now". Checked before
+        # anything else in this handler, including the cache reset below.
+        if self.path == "/healthz":
+            self._write_body(b"ok", "text/plain; charset=utf-8", 200)
+            return
         # See _common._request_cache: gives every GET its own fresh read
         # of pending_drafts.json/personal_tasks.json the first time each
         # is actually needed this request, instead of carrying over
@@ -5135,9 +5248,26 @@ class Handler(BaseHTTPRequestHandler):
             # _common.standup_view). All local reads except the Overview's
             # standup-tagged tickets, which reuse the cached fetch /flagged
             # and /overview make.
-            snap = _common.standup_view()
             sub = parsed.path[len("/standup"):].strip("/").split("/")
             arg = lambda name: qs.get(name, [""])[0]
+            if sub == ["yesterday"]:
+                # Needs only Zendesk (and local history), not the
+                # meetingnotestool snapshot, so it is served before that
+                # snapshot is read and keeps working when it is missing.
+                today = datetime.now().date()
+                default_day = _common.previous_workday(today)
+                try:
+                    day = datetime.strptime(arg("date"), "%Y-%m-%d").date()
+                    if day > today:
+                        day = default_day
+                except ValueError:
+                    day = default_day
+                result = _common.fetch_activity_for_day(_common.make_client(), day, log_fn=_log)
+                self._send_html(_render_standup_yesterday_page(
+                    result, day, default_day, today, banner=banner, banner_undo_path=banner_undo_path,
+                ))
+                return
+            snap = _common.standup_view()
             if sub == [""]:
                 flagged = _common.fetch_flagged_tickets(_common.make_client(), log_fn=_log)
                 page = _render_standup_page(
