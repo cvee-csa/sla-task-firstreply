@@ -84,6 +84,147 @@ def _harden_file_permissions(path) -> None:
         pass
 
 
+# --- Real page-load progress (the /sla, /firstreply, ... loading bar) --------
+# The browser cannot see inside a pending navigation, so progress is measured
+# on the server: while a request carrying a progress id (the csa_pid cookie
+# that review_server.py's loading bar sets on click/submit) is being served,
+# every Zendesk API call it makes through make_client() is counted. The bar
+# polls /__progress for done / expected, where expected is the number of
+# calls the previous load of the same route needed (learned, not guessed).
+# Until a route has been loaded once, expected is unknown and the bar falls
+# back to a simulated creep -- it never reports a percentage it cannot
+# justify. A load that makes no API calls (all caches warm) has nothing to
+# measure, and finishes in milliseconds anyway.
+PROGRESS_COOKIE_NAME = "csa_pid"
+_PROGRESS_ID_RE = re.compile(r"^[a-f0-9]{16}$")
+_PROGRESS_KEEP_SECONDS = 300
+_PROGRESS_MAX_RECORDS = 500
+_PROGRESS_PCT_CAP = 0.95  # only "finished" may report 100%
+_progress_registry: dict = {}
+_progress_history: dict = {}
+_progress_lock = threading.Lock()
+_progress_tls = threading.local()
+
+
+class _Progress:
+    __slots__ = ("id", "created", "updated", "done", "parts", "finished", "lock")
+
+    def __init__(self, pid: str):
+        self.id = pid
+        self.created = self.updated = time_module.time()
+        self.done = 0
+        self.parts: list = []  # expected calls per request in this navigation chain (None = unknown)
+        self.finished = False
+        self.lock = threading.Lock()
+
+    def note_call(self) -> None:
+        with self.lock:
+            self.done += 1
+            self.updated = time_module.time()
+
+
+def progress_id_from_cookie(cookie_header: str):
+    """The validated progress id carried by a Cookie header, or None."""
+    if not cookie_header:
+        return None
+    try:
+        from http.cookies import SimpleCookie
+        jar = SimpleCookie()
+        jar.load(cookie_header)
+        morsel = jar.get(PROGRESS_COOKIE_NAME)
+    except Exception:
+        return None
+    value = morsel.value if morsel else ""
+    return value if _PROGRESS_ID_RE.match(value) else None
+
+
+def progress_begin(pid: str, key: str):
+    """Starts (or, after a redirect, continues) tracking for one request on
+    this thread. Returns a token for progress_end."""
+    now = time_module.time()
+    with _progress_lock:
+        for old_id in [i for i, r in _progress_registry.items() if now - r.updated > _PROGRESS_KEEP_SECONDS]:
+            del _progress_registry[old_id]
+        while len(_progress_registry) >= _PROGRESS_MAX_RECORDS:
+            del _progress_registry[min(_progress_registry, key=lambda i: _progress_registry[i].updated)]
+        progress = _progress_registry.get(pid)
+        if progress is None or progress.finished:
+            progress = _Progress(pid)
+            _progress_registry[pid] = progress
+        progress.parts.append(_progress_history.get(key))
+        progress.updated = now
+    _progress_tls.current = progress
+    return (progress, key, progress.done)
+
+
+def progress_end(token, redirected: bool = False) -> None:
+    """Ends one request. A redirect leaves the record open so the follow-up
+    GET (same cookie) continues it; anything else finishes it."""
+    progress, key, done_at_begin = token
+    _progress_tls.current = None
+    calls = progress.done - done_at_begin
+    with _progress_lock:
+        if calls > 0:
+            _progress_history[key] = calls
+        progress.updated = time_module.time()
+        if not redirected:
+            progress.finished = True
+
+
+def progress_snapshot(pid: str) -> dict:
+    with _progress_lock:
+        progress = _progress_registry.get(pid)
+    if progress is None:
+        return {"known": False, "done": 0, "expected": None, "pct": None, "finished": False}
+    done = progress.done
+    parts = progress.parts
+    expected = sum(parts) if parts and all(x is not None for x in parts) else None
+    if progress.finished:
+        pct = 1.0
+    elif expected:
+        pct = min(done / expected, _PROGRESS_PCT_CAP)
+    else:
+        pct = None
+    return {"known": True, "done": done, "expected": expected, "pct": pct, "finished": progress.finished}
+
+
+class _ProgressClient:
+    """Transparent wrapper around a ZendeskClient that counts completed
+    Zendesk API calls for the request that created it. Everything else
+    (attribute reads and writes, other methods) passes straight through."""
+    _COUNTED = frozenset({
+        "get_tickets", "get_ticket", "get_ticket_comments", "get_ticket_attachment", "search_users", "get_user",
+        "get_groups", "get_all_articles", "post_comment", "create_ticket", "update_ticket",
+    })
+
+    def __init__(self, inner, progress):
+        object.__setattr__(self, "_inner", inner)
+        object.__setattr__(self, "_progress", progress)
+
+    def __getattr__(self, name):
+        attr = getattr(self._inner, name)
+        if name in self._COUNTED and callable(attr):
+            progress = self._progress
+
+            def counted(*args, **kwargs):
+                try:
+                    return attr(*args, **kwargs)
+                finally:
+                    progress.note_call()
+            return counted
+        return attr
+
+    def __setattr__(self, name, value):
+        setattr(self._inner, name, value)
+
+
+def progress_wrap(client):
+    """client, wrapped to count API calls when this thread is serving a
+    tracked request; otherwise returned unchanged."""
+    current = getattr(_progress_tls, "current", None)
+    return _ProgressClient(client, current) if current is not None else client
+
+
 def make_client() -> ZendeskClient:
     # The shared oauth token file (see resolve_token_path -- also read and
     # refreshed by the sibling zendesk-mcp-server project) is written by
@@ -94,7 +235,7 @@ def make_client() -> ZendeskClient:
     # fresh client on essentially every request, so this runs often enough
     # to matter shortly after any token refresh.
     _harden_file_permissions(resolve_token_path())
-    return ZendeskClient(
+    return progress_wrap(ZendeskClient(
         subdomain=os.getenv("ZENDESK_SUBDOMAIN"),
         email=os.getenv("ZENDESK_EMAIL"),
         token=os.getenv("ZENDESK_API_KEY"),
@@ -104,7 +245,7 @@ def make_client() -> ZendeskClient:
         oauth_scopes=os.getenv("ZENDESK_OAUTH_SCOPES", "read write"),
         oauth_token_path=resolve_token_path(),
         timeout=int(os.getenv("ZENDESK_TIMEOUT_SECONDS", "30")),
-    )
+    ))
 
 
 def _atomic_write_json(path: Path, data) -> None:

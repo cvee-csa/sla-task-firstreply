@@ -296,6 +296,10 @@ _ICONS = {
     "sun": '<circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>',
     "moon": '<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>',
     "monitor": '<rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line>',
+    # Seasonal-theme glyphs (Halloween / Christmas): the toggle buttons and
+    # the small header accent both use these, same line-icon style as above.
+    "pumpkin": '<ellipse cx="12" cy="14" rx="9.5" ry="7"></ellipse><path d="M12 7c-3.2 2.4-3.2 11.6 0 14"></path><path d="M12 7c3.2 2.4 3.2 11.6 0 14"></path><path d="M12 7c0-1.8.8-3.2 2.4-4"></path>',
+    "tree": '<polyline points="12 3 17 10 14.5 10 18.5 16 14 16 16.5 20 7.5 20 10 16 5.5 16 9.5 10 7 10 12 3"></polyline><line x1="12" y1="20" x2="12" y2="22"></line>',
     # Added for the filter-as-you-type boxes (see _filter_box_html) on the
     # main queue, /flagged, /security, /solved, and the "Recently worked
     # on" sidebar.
@@ -533,9 +537,9 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
 (function() {
   try {
     var t = localStorage.getItem('csa-theme');
-    if (t === 'light' || t === 'dark' || t === 'b68fbf') {
+    if (t === 'light' || t === 'dark' || t === 'b68fbf' || t === 'halloween' || t === 'christmas') {
       document.documentElement.classList.add('theme-' + t);
-      document.documentElement.style.colorScheme = t === 'dark' ? 'dark' : 'light';
+      document.documentElement.style.colorScheme = (t === 'dark' || t === 'halloween' || t === 'christmas') ? 'dark' : 'light';
     }
     var favicon = document.getElementById('favicon');
     if (favicon) {
@@ -545,7 +549,7 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
     var themeColorMeta = document.getElementById('theme-color-meta');
     if (themeColorMeta) {
       var isDark = t === 'dark' || (!t && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
-      themeColorMeta.content = t === 'b68fbf' ? '#865392' : (isDark ? '#6fa3ef' : '#1a56c4');
+      themeColorMeta.content = t === 'b68fbf' ? '#865392' : t === 'halloween' ? '#ff8a3d' : t === 'christmas' ? '#4fd17f' : (isDark ? '#6fa3ef' : '#1a56c4');
     }
   } catch (e) {}
 })();
@@ -664,10 +668,10 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
 <script>
 (function() {
   function applyTheme(mode) {
-    document.documentElement.classList.remove('theme-light', 'theme-dark', 'theme-b68fbf');
-    if (mode === 'light' || mode === 'dark' || mode === 'b68fbf') {
+    document.documentElement.classList.remove('theme-light', 'theme-dark', 'theme-b68fbf', 'theme-halloween', 'theme-christmas');
+    if (mode === 'light' || mode === 'dark' || mode === 'b68fbf' || mode === 'halloween' || mode === 'christmas') {
       document.documentElement.classList.add('theme-' + mode);
-      document.documentElement.style.colorScheme = mode === 'dark' ? 'dark' : 'light';
+      document.documentElement.style.colorScheme = (mode === 'dark' || mode === 'halloween' || mode === 'christmas') ? 'dark' : 'light';
     } else {
       document.documentElement.style.colorScheme = '';
     }
@@ -682,7 +686,7 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
     var themeColorMeta = document.getElementById('theme-color-meta');
     if (themeColorMeta) {
       var isDark = mode === 'dark' || (mode === 'system' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
-      themeColorMeta.content = mode === 'b68fbf' ? '#865392' : (isDark ? '#6fa3ef' : '#1a56c4');
+      themeColorMeta.content = mode === 'b68fbf' ? '#865392' : mode === 'halloween' ? '#ff8a3d' : mode === 'christmas' ? '#4fd17f' : (isDark ? '#6fa3ef' : '#1a56c4');
     }
   }
   window.setTheme = function(mode) {
@@ -694,7 +698,7 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
   };
   var stored = null;
   try { stored = localStorage.getItem('csa-theme'); } catch (e) {}
-  applyTheme(stored === 'light' || stored === 'dark' || stored === 'b68fbf' ? stored : 'system');
+  applyTheme(['light', 'dark', 'b68fbf', 'halloween', 'christmas'].indexOf(stored) >= 0 ? stored : 'system');
 })();
 </script>"""
     # Three small, independent behaviors bundled into one script rather than
@@ -869,16 +873,20 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
   });
 })();
 </script>"""
-    # #page-loading-bar (see its CSS) -- there's no client-side router here,
-    # every navigation is a real full-page reload, so there's no genuine
-    # progress percentage to report. This shows the same honest-fake
-    # indicator sites with a real router use for a slow request instead: an
-    # immediate small jump (feels instant, not stuck) followed by a slow
-    # crawl toward -- but deliberately never reaching -- 100%, via a long
-    # CSS transition. Whichever finishes first, the real navigation or this
-    # animation, doesn't matter: the entire DOM (bar included) gets torn
-    # down the moment the browser actually navigates away, which is what
-    # ends the "loading" state, not anything tracked in here.
+    # #page-loading-bar (see its CSS). There is no client-side router, so
+    # every navigation is a real full-page load that the browser cannot see
+    # inside. Progress is therefore measured on the server: on a click or
+    # form submit this sets a short-lived csa_pid cookie, the server counts
+    # the Zendesk API calls the resulting request(s) make, and this polls
+    # /__progress for done-vs-expected (expected = what the previous load of
+    # the same route needed; see _common.progress_snapshot). The cookie
+    # rides along on a form's redirect too, so a POST that redirects to a
+    # slow GET is one continuous bar. A route with no baseline yet (first
+    # load since the server started) gets a simulated creep toward 90%
+    # instead of a number nobody can justify; only the server reporting the
+    # load finished moves the bar past 95%. The bar -- and the whole DOM it
+    # is in -- is torn down when the browser actually navigates, which is
+    # what ends "loading".
     #
     # Fires on both plain link clicks and form submits (every action on this
     # page is one or the other) -- skipped for same-page "#" jump links,
@@ -889,21 +897,130 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
     # dialogs return false straight from the button's own onclick, which
     # pre-empts the browser ever dispatching 'submit' at all -- see
     # interaction_script above) never reaches this listener in the first
-    # place, so a cancelled confirmation correctly never shows the bar.
+    # place, so a cancelled confirmation correctly never shows the bar. The
+    # automatic /firstreply refresh does not use a click or submit, so it
+    # stays silent. If the navigation never reaches the server (the browser's
+    # unsaved-draft prompt was declined), the poll sees an unknown id for a
+    # few seconds and hides the bar again.
     loading_bar_script = """
 <script>
 (function() {
   var bar = document.getElementById('page-loading-bar');
   if (!bar) { return; }
 
-  function start() {
-    bar.style.transition = 'width 0.25s ease-out, opacity 0.15s ease';
+  var COOKIE = 'csa_pid';
+  var CARD_DELAY_MS = 1500;
+  var timer = null, id = null, startedAt = 0, shown = 0, inFlight = false, unknownSince = 0;
+  var cardTimer = null, label = '';
+  var dim = document.getElementById('page-loading-dim');
+  var card = document.getElementById('page-loading-card');
+  var cardTitle = document.getElementById('page-loading-title');
+  var cardFill = document.getElementById('page-loading-fill');
+  var cardDetail = document.getElementById('page-loading-detail');
+
+  // The id from the navigation that produced THIS page is spent.
+  try { document.cookie = COOKIE + '=; Max-Age=0; Path=/; SameSite=Strict'; } catch (e) {}
+
+  function newId() {
+    var bytes = new Uint8Array(8);
+    (window.crypto || window.msCrypto).getRandomValues(bytes);
+    return Array.prototype.map.call(bytes, function(b) { return ('0' + b.toString(16)).slice(-2); }).join('');
+  }
+
+  function setPct(pct) {
+    if (pct > shown) { shown = pct; }
+    bar.style.width = shown + '%';
+    if (cardFill) { cardFill.style.width = shown + '%'; }
+  }
+
+  // Detail card text from the latest /__progress snapshot (or none).
+  function updateCard(s) {
+    if (!card) { return; }
+    var known = s && s.known;
+    var determinate = known && s.pct !== null && s.pct !== undefined;
+    card.classList.toggle('indeterminate', !determinate);
+    if (!known) { cardDetail.textContent = 'Waiting for the server…'; }
+    else if (s.finished) { cardDetail.textContent = 'Almost done…'; }
+    else if (s.expected) { cardDetail.textContent = Math.min(s.done, s.expected) + ' of ' + s.expected + ' requests'; }
+    else if (s.done > 0) { cardDetail.textContent = s.done + ' requests so far'; }
+    else { cardDetail.textContent = 'Waiting for Zendesk…'; }
+  }
+
+  function showCard() {
+    if (!card || !id) { return; }
+    dim.classList.add('show');
+    card.classList.add('show');
+    card.setAttribute('aria-hidden', 'false');
+  }
+
+  function hideCard() {
+    clearTimeout(cardTimer);
+    cardTimer = null;
+    if (!card) { return; }
+    dim.classList.remove('show');
+    card.classList.remove('show');
+    card.setAttribute('aria-hidden', 'true');
+    cardFill.style.width = '0%';
+  }
+
+  function creep() {
+    var seconds = (Date.now() - startedAt) / 1000;
+    setPct(Math.min(90, 90 * (1 - Math.exp(-seconds / 10))));
+  }
+
+  function hide() {
+    clearInterval(timer);
+    timer = null;
+    id = null;
+    shown = 0;
+    bar.classList.remove('active');
+    bar.style.width = '0%';
+    hideCard();
+  }
+
+  function poll() {
+    if (inFlight || !id) { return; }
+    inFlight = true;
+    var mine = id;
+    fetch('/__progress?id=' + mine, {cache: 'no-store'})
+      .then(function(r) { return r.json(); })
+      .then(function(s) {
+        inFlight = false;
+        if (mine !== id) { return; }
+        updateCard(s);
+        if (!s.known) {
+          if (!unknownSince) { unknownSince = Date.now(); }
+          if (Date.now() - unknownSince > 8000) { hide(); return; }
+          creep();
+          return;
+        }
+        unknownSince = 0;
+        if (s.pct !== null && s.pct !== undefined) { setPct(Math.max(5, s.pct * 100)); } else { creep(); }
+        if (s.finished) { setPct(98); }
+      })
+      .catch(function() { inFlight = false; creep(); });
+  }
+
+  function start(text) {
+    if (timer) { return; }
+    label = text || '';
+    if (card) {
+      cardTitle.textContent = label;
+      updateCard(null);
+      cardTimer = setTimeout(showCard, CARD_DELAY_MS);
+    }
+    id = newId();
+    unknownSince = 0;
+    try { document.cookie = COOKIE + '=' + id + '; Max-Age=120; Path=/; SameSite=Strict'; } catch (e) {}
+    startedAt = Date.now();
+    shown = 0;
     bar.classList.add('active');
-    bar.style.width = '20%';
-    setTimeout(function() {
-      bar.style.transition = 'width 5s cubic-bezier(0.1, 0.6, 0.2, 1), opacity 0.15s ease';
-      bar.style.width = '85%';
-    }, 260);
+    setPct(5);
+    timer = setInterval(function() {
+      if (Date.now() - startedAt > 120000) { hide(); return; }
+      poll();
+    }, 250);
+    poll();
   }
 
   document.addEventListener('click', function(e) {
@@ -913,14 +1030,19 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
     var href = link.getAttribute('href') || '';
     if (!href || href.charAt(0) === '#' || href.indexOf('mailto:') === 0 || href.indexOf('tel:') === 0) { return; }
     if (link.target && link.target !== '_self') { return; }
-    start();
+    var labelEl = link.querySelector ? link.querySelector('.top-nav-label') : null;
+    var name = ((labelEl || link).textContent || '').replace(/\\s+/g, ' ').trim();
+    if (name.length > 40) { name = name.slice(0, 39) + '…'; }
+    start(name ? 'Loading ' + name + '…' : 'Loading…');
   });
 
   document.addEventListener('submit', function(e) {
     if (e.defaultPrevented) { return; }
     var form = e.target;
     if (form.target && form.target !== '_self') { return; }
-    start();
+    var submitter = e.submitter;
+    var busy = submitter && submitter.getAttribute ? submitter.getAttribute('data-loading-text') : '';
+    start(busy || 'Working…');
   });
 
   // A page restored from the back/forward cache never re-runs the setup
@@ -928,10 +1050,7 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
   // was in flight when the user navigated away from it -- reset it on
   // pageshow so a back/forward navigation never lands on a page with a
   // stuck bar.
-  window.addEventListener('pageshow', function() {
-    bar.classList.remove('active');
-    bar.style.width = '0%';
-  });
+  window.addEventListener('pageshow', hide);
 })();
 </script>"""
     # Animates each [data-count-target] span's own text from 0 up to its
@@ -1279,6 +1398,109 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
     --sla-ok-bg: #e6f5ec;
     --sla-ok-border: #90d0a0;
   }}
+  /* Seasonal themes -- same variable set and override mechanism as
+     html.theme-b68fbf above, plus --on-accent (the text color for the
+     filled-accent "active" pills, since a bright dark-theme accent needs
+     dark text on it). Both are DARK palettes (color-scheme is set to dark
+     by the JS above). Functional signal colors (--warning-*, --flag-*,
+     --overview-accent-*, --sla-*) are taken from html.theme-dark so alerts
+     and section stripes keep standing out.
+     Halloween: near-black with a warm tint, pumpkin-orange accent, purple
+     secondary buttons. */
+  html.theme-halloween {{
+    --bg: #120d0a;
+    --bg-translucent: rgba(18,13,10,0.78);
+    --glass-border: rgba(255,160,80,0.14);
+    --glass-shine: rgba(255,200,150,0.08);
+    --glass-shadow: rgba(0,0,0,0.5);
+    --glass-chip-bg: rgba(255,255,255,0.06);
+    --text: #f3e6d8;
+    --muted: #b39a82;
+    --muted-2: #8a7560;
+    --divider: rgba(255,170,90,0.12);
+    --card-bg: #1c1511;
+    --card-border: rgba(255,170,90,0.14);
+    --card-shadow: 0 1px 3px rgba(0,0,0,0.55), 0 1px 2px rgba(0,0,0,0.4);
+    --input-bg: #241b15;
+    --input-border: rgba(255,170,90,0.24);
+    --excerpt-bg: #211812;
+    --excerpt-border: rgba(255,170,90,0.2);
+    --link: #ff8a3d;
+    --accent: #ff8a3d;
+    --on-accent: #1a0d03;
+    --focus-ring: rgba(255,138,61,0.45);
+    --btn-approve: #c2410c;       --btn-approve-hover: #9f3409;  /* pumpkin */
+    --btn-internal: #7e3fc0;      --btn-internal-hover: #6a33a3; /* purple */
+    --btn-remove: #7a6652;        --btn-remove-hover: #66554a;   /* taupe */
+    --btn-reject: #a35a00;        --btn-reject-hover: #854800;   /* dark amber */
+    --btn-refresh: #b8500a;       --btn-refresh-hover: #963f07;  /* burnt orange */
+    --btn-claim: #5b2d8c;         --btn-claim-hover: #481f70;    /* deep purple */
+    --banner-bg: rgba(255,138,61,0.12);
+    --banner-border: rgba(255,138,61,0.38);
+    --warning-bg: rgba(201,106,52,0.14);
+    --warning-border: rgba(201,106,52,0.4);
+    --flag-color: #dba15a;
+    --flag-alert-color: #e28a5e;
+    --flag-alert-color-urgent: #e2604a;
+    --badge-bg: #5a4636;
+    --overview-accent-tasks: #22b8cf;
+    --overview-accent-discussion: #a78bda;
+    --overview-accent-security: #d4b106;
+    --sla-ok-color: #4ade80;
+    --sla-ok-bg: rgba(34,197,94,0.14);
+    --sla-ok-border: rgba(34,197,94,0.4);
+  }}
+  /* Christmas: deep pine-black, bright evergreen accent, cranberry
+     secondary buttons. */
+  html.theme-christmas {{
+    --bg: #0d1510;
+    --bg-translucent: rgba(13,21,16,0.78);
+    --glass-border: rgba(140,220,170,0.14);
+    --glass-shine: rgba(200,255,225,0.07);
+    --glass-shadow: rgba(0,0,0,0.5);
+    --glass-chip-bg: rgba(255,255,255,0.06);
+    --text: #e9f2ea;
+    --muted: #9db5a2;
+    --muted-2: #738a78;
+    --divider: rgba(150,220,175,0.11);
+    --card-bg: #15211a;
+    --card-border: rgba(150,220,175,0.13);
+    --card-shadow: 0 1px 3px rgba(0,0,0,0.55), 0 1px 2px rgba(0,0,0,0.4);
+    --input-bg: #1b2a21;
+    --input-border: rgba(150,220,175,0.24);
+    --excerpt-bg: #17241c;
+    --excerpt-border: rgba(150,220,175,0.18);
+    --link: #4fd17f;
+    --accent: #4fd17f;
+    --on-accent: #06140b;
+    --focus-ring: rgba(79,209,127,0.45);
+    --btn-approve: #1c7a44;       --btn-approve-hover: #15602f;  /* evergreen */
+    --btn-internal: #b3283a;      --btn-internal-hover: #8f1f2e; /* cranberry */
+    --btn-remove: #5f7d68;        --btn-remove-hover: #4d6654;   /* sage */
+    --btn-reject: #c23645;        --btn-reject-hover: #a02a37;   /* holly red */
+    --btn-refresh: #218a4f;       --btn-refresh-hover: #1a6e3f;  /* fir green */
+    --btn-claim: #8c1a2a;         --btn-claim-hover: #701422;    /* dark red */
+    --banner-bg: rgba(79,209,127,0.11);
+    --banner-border: rgba(79,209,127,0.35);
+    --warning-bg: rgba(201,106,52,0.14);
+    --warning-border: rgba(201,106,52,0.4);
+    --flag-color: #dba15a;
+    --flag-alert-color: #e28a5e;
+    --flag-alert-color-urgent: #e2604a;
+    --badge-bg: #3f5a47;
+    --overview-accent-tasks: #22b8cf;
+    --overview-accent-discussion: #a78bda;
+    --overview-accent-security: #d4b106;
+    --sla-ok-color: #4ade80;
+    --sla-ok-bg: rgba(34,197,94,0.14);
+    --sla-ok-border: rgba(34,197,94,0.4);
+  }}
+  /* Filled-accent "active" pills use the seasonal themes' dark --on-accent
+     text instead of white (bright accents on dark backgrounds). */
+  html.theme-halloween .sla-range-btn.active, html.theme-christmas .sla-range-btn.active,
+  html.theme-halloween .theme-toggle button.active, html.theme-christmas .theme-toggle button.active,
+  html.theme-halloween .top-nav-link.active, html.theme-christmas .top-nav-link.active,
+  html.theme-halloween .top-nav-link.active:hover, html.theme-christmas .top-nav-link.active:hover {{ color: var(--on-accent); }}
   html {{ background: var(--bg); }}
   body {{ font-family: -apple-system, system-ui, sans-serif; max-width: 1180px; margin: 2rem auto; padding: 0 1rem; color: var(--text); background: var(--bg); }}
   /* Wider content column for the card-grid pages (/security, /flagged,
@@ -1729,7 +1951,7 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
      used to be the other category here and now lives entirely separately
      (see .zendesk-status-link, below), so there's nothing left to
      separate the remaining five links from. */
-  .top-nav {{ display: flex; flex-direction: column; align-items: stretch; gap: 0.15rem; }}
+  .top-nav {{ display: flex; flex-direction: column; align-items: stretch; gap: 0.15rem; flex: 1 1 auto; min-width: 0; }}
   /* Icon + a real visible label now (see _link/_top_nav_html) -- a plain
      left-aligned row instead of the old centered icon-only pill, with
      enough padding to read as a proper nav item and enough gap between
@@ -1803,13 +2025,17 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
   /* The logo/title becomes a link back to /firstreply -- color: inherit and
      text-decoration: none keep it looking like the plain heading it
      always was, not a normal blue underlined link. */
+  /* --nav-inset = a nav link's own left padding + border, so the title,
+     logo, theme toggle and meta line start at the same x as the nav icons
+     (the link's hover/active pill still extends flush to the edge). */
+  .brand {{ --nav-inset: calc(0.7rem + 1px); }}
   .brand-home-link {{
     display: inline-flex; align-items: center; gap: 0.6rem;
-    color: inherit; text-decoration: none;
+    color: inherit; text-decoration: none; padding-left: var(--nav-inset);
   }}
   .brand-home-link:hover {{ text-decoration: none; }}
   .brand-home-link h1 {{ margin: 0; }}
-  .brand .meta {{ margin: 0.5rem 0 0 0; line-height: 1.5; }}
+  .brand .meta {{ margin: 0.5rem 0 0 var(--nav-inset); line-height: 1.5; }}
   /* Wide viewports get a true left-hand sidebar instead of a header
      pinned above the content -- position: fixed with top/bottom both 0
      spans the full viewport height, flush against the left edge (no
@@ -1890,7 +2116,7 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
        remains here) -- the button rule stays since it still governs the
        theme-toggle's own <button> elements. */
     .brand-controls-row button {{ width: 100%; justify-content: center; white-space: normal; text-align: center; }}
-    .brand-controls-row .theme-toggle {{ align-self: stretch; justify-content: center; }}
+    .brand-controls-row .theme-toggle {{ align-self: stretch; justify-content: center; margin-left: var(--nav-inset); }}
     .brand-nav-row {{ margin-top: 1.1rem; }}
     /* The one override that actually makes this a bottom-anchored footer
        rather than just another stacked row: margin-top: auto on a flex
@@ -1968,6 +2194,12 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
   .logo-b68fbf {{ display: none; }}
   html.theme-b68fbf .logo-default {{ display: none; }}
   html.theme-b68fbf .logo-b68fbf {{ display: inline; }}
+  /* Small seasonal glyph beside the header title -- hidden unless the
+     matching seasonal theme is active. */
+  .theme-deco {{ display: none; color: var(--accent); margin-left: 0.4rem; vertical-align: -0.1em; }}
+  .theme-deco .icon {{ width: 20px; height: 20px; }}
+  html.theme-halloween .theme-deco-halloween,
+  html.theme-christmas .theme-deco-christmas {{ display: inline-flex; }}
   /* Topic icons (see _topic_icon()) -- self-contained colour badges, sized
      for three different spots: next to a page's own h2 heading, floating
      above an empty-state's muted text, and inline inside the small
@@ -2141,23 +2373,59 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
      not necessarily as a background with white text on top of it. */
   ::selection {{ background: var(--accent); color: var(--bg); }}
   :root {{ scrollbar-color: var(--accent) var(--bg); }}
-  /* Page-transition loading bar (see loading_bar_script) -- this server has
-     no client-side router, every navigation is a real full-page reload, so
-     there's no genuine "38% loaded" progress to report. What this shows
-     instead is the same honest-fake indicator sites with real routers use
-     for a slow request: jump partway immediately (feels instant), creep
-     the rest of the way via a long CSS transition, and never actually
-     reach 100% -- the bar (and the whole DOM it's sitting in) just gets
-     replaced the moment the real navigation completes, which is the
-     signal that "loading" is over, not anything this bar tracks itself.
-     Colored via --accent so it matches whichever theme is active, same as
-     every other themed chrome element on this page. */
+  /* Page-transition loading bar (see loading_bar_script). Its width is real
+     progress: the server counts the Zendesk API calls the page being
+     loaded has made and compares that with how many the previous load of
+     the same route needed (see _common.progress_snapshot), and the bar
+     polls /__progress for it. A route that has not been loaded since the
+     server started has no baseline yet, so its first load falls back to a
+     simulated creep toward 90%. Only a finished load reaches 100%.
+     Colored via --accent so it matches whichever theme is active. */
   #page-loading-bar {{
     position: fixed; top: 0; left: 0; height: 3px; width: 0%;
     background: var(--accent); z-index: 9999; opacity: 0;
-    transition: width 5s cubic-bezier(0.1, 0.6, 0.2, 1), opacity 0.15s ease;
+    transition: width 0.25s ease-out, opacity 0.15s ease;
   }}
   #page-loading-bar.active {{ opacity: 1; }}
+  /* Detail card (see loading_bar_script): the thin bar above is always the
+     first signal; if the wait passes ~1.5s the content area dims slightly
+     and this card fades in with the destination name and the real request
+     count. pointer-events: none on both -- nothing here blocks clicks, and
+     the sidebar is left undimmed so navigation stays usable. */
+  #page-loading-dim, #page-loading-card {{
+    position: fixed; opacity: 0; pointer-events: none; z-index: 9998;
+    transition: opacity 0.25s ease;
+  }}
+  #page-loading-dim {{ top: 0; right: 0; bottom: 0; left: 0; background: var(--bg-translucent); }}
+  #page-loading-card {{
+    top: 40%; left: 50%; transform: translate(-50%, -50%); width: min(340px, calc(100vw - 2rem));
+    box-sizing: border-box; padding: 1rem 1.2rem; background: var(--card-bg);
+    border: 1px solid var(--card-border); border-radius: 12px; box-shadow: var(--card-shadow), 0 8px 28px var(--glass-shadow);
+    color: var(--text); z-index: 9999;
+  }}
+  #page-loading-dim.show, #page-loading-card.show {{ opacity: 1; }}
+  #page-loading-title {{ font-weight: 600; font-size: 0.95rem; margin-bottom: 0.65rem; overflow-wrap: anywhere; }}
+  #page-loading-track {{ height: 6px; border-radius: 999px; background: var(--divider); overflow: hidden; }}
+  #page-loading-fill {{
+    height: 100%; width: 0%; border-radius: 999px; background: var(--accent);
+    transition: width 0.25s ease-out;
+  }}
+  /* No baseline for this route yet: an animated stripe instead of a number
+     nobody can justify. */
+  #page-loading-card.indeterminate #page-loading-fill {{
+    width: 100% !important;
+    background: repeating-linear-gradient(45deg, var(--accent) 0 10px, transparent 10px 20px);
+    background-size: 28px 28px; animation: page-loading-stripes 0.9s linear infinite;
+  }}
+  @keyframes page-loading-stripes {{ to {{ background-position: 28px 0; }} }}
+  #page-loading-detail {{ margin-top: 0.5rem; font-size: 0.8rem; color: var(--muted); min-height: 1.1em; }}
+  @media (prefers-reduced-motion: reduce) {{
+    #page-loading-card.indeterminate #page-loading-fill {{ animation: none; }}
+  }}
+  @media (min-width: 861px) {{
+    #page-loading-dim {{ left: 240px; }}
+    #page-loading-card {{ left: calc(50% + 120px); }}
+  }}
   /* No extra prefers-reduced-motion override needed here -- the existing
      "* {{ transition-duration: 0.001ms !important; }}" rule further down
      already collapses this bar's transition too, same as every other
@@ -2243,10 +2511,16 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
 </head>
 <body{' class="wide-page"' if wide else ''}>
 <div id="page-loading-bar" aria-hidden="true"></div>
+<div id="page-loading-dim" aria-hidden="true"></div>
+<div id="page-loading-card" role="status" aria-live="polite" aria-hidden="true">
+  <div id="page-loading-title">Loading…</div>
+  <div id="page-loading-track"><div id="page-loading-fill"></div></div>
+  <div id="page-loading-detail"></div>
+</div>
 <div class="brand">
   <a class="brand-home-link" href="/firstreply">
     {logo_html}
-    <h1>Zendesk Workflow Asset for CSA</h1>
+    <h1>Zendesk Workflow Asset for CSA<span class="theme-deco theme-deco-halloween" aria-hidden="true">{_icon("pumpkin", "icon")}</span><span class="theme-deco theme-deco-christmas" aria-hidden="true">{_icon("tree", "icon")}</span></h1>
     {pending_badge_html}
   </a>
   <div class="brand-controls-row">
@@ -2255,6 +2529,8 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
       <button type="button" data-theme="light" title="Light" onclick="setTheme('light')">{_icon("sun", "icon-sm")}</button>
       <button type="button" data-theme="dark" title="Dark" onclick="setTheme('dark')">{_icon("moon", "icon-sm")}</button>
       <button type="button" data-theme="b68fbf" title="B68FBF" onclick="setTheme('b68fbf')"><span class="theme-swatch"></span></button>
+      <button type="button" data-theme="halloween" title="Halloween" onclick="setTheme('halloween')">{_icon("pumpkin", "icon-sm")}</button>
+      <button type="button" data-theme="christmas" title="Christmas" onclick="setTheme('christmas')">{_icon("tree", "icon-sm")}</button>
     </div>
   </div>
   <div class="brand-nav-row">
@@ -2873,13 +3149,11 @@ def _render_worked_on_sidebar(items: list, capped: bool = False, zendesk_unavail
     note = ""
     if zendesk_unavailable:
         note = (
-            '<p class="meta">Only showing replies sent through this tool right now -- '
-            "Zendesk isn't reachable to check for ones sent directly there.</p>"
+            '<p class="meta">Showing only replies sent through this tool; Zendesk is unreachable.</p>'
         )
     elif capped:
         note = (
-            '<p class="meta">This may not include every reply sent directly in Zendesk -- '
-            "the scan for those stopped early.</p>"
+            '<p class="meta">May miss replies sent directly in Zendesk; the scan stopped early.</p>'
         )
 
     if not items:
@@ -3552,17 +3826,15 @@ def _render_sla_page(sla_result: dict, history: dict, banner: str = "") -> bytes
         else ""
     )
     capped_note = (
-        '<p class="sla-history-note">Some tickets may be missing from this scan -- '
-        "the IT-Operations queue is large enough that this page didn't reach every page of it. "
-        "See the README for SLA_TICKET_SCAN_PAGES.</p>"
+        '<p class="sla-history-note" title="Raise SLA_TICKET_SCAN_PAGES to scan deeper (see the README).">'
+        "Some tickets may be missing: the queue exceeds this page's scan limit.</p>"
         if sla_result.get("capped")
         else ""
     )
     as_of = history.get("as_of")
     history_note = (
-        f'<p class="sla-history-note">Trend history as of {html.escape(as_of)} '
-        "-- only as fresh as the last <code>git pull</code> of the sla-report-slack repo on this machine; "
-        "this page never writes to that file.</p>"
+        f'<p class="sla-history-note" title="Only as fresh as the last git pull of the sla-report-slack repo on this machine. This page never writes to that file.">'
+        f"Trend history as of {html.escape(as_of)}.</p>"
         if as_of
         else ""
     )
@@ -3570,7 +3842,7 @@ def _render_sla_page(sla_result: dict, history: dict, banner: str = "") -> bytes
     body = f"""
 <p><a href="/firstreply">&larr; back to pending tickets</a></p>
 <h2>{_topic_icon("sla")}SLA</h2>
-<p class="meta">Historical SLA trends for the IT-Operations queue, sourced from the sibling sla-report-slack project's own daily snapshots -- the same four business-hours thresholds it tracks: initial response ({_common.SLA_INITIAL_RESPONSE_HRS}h), requester wait ({_common.SLA_REQUESTER_WAIT_HRS}h), no-update window ({_common.SLA_NO_UPDATE_HRS}h), and resolution age ({_common.SLA_RESOLUTION_HRS:g}h). The live breach count for the current queue is in the nav badge above.</p>
+<p class="meta" title="Business-hours thresholds, from the daily snapshots kept by the sla-report-slack project.">Daily SLA trends for the IT-Operations queue: initial response {_common.SLA_INITIAL_RESPONSE_HRS}h, requester wait {_common.SLA_REQUESTER_WAIT_HRS}h, no-update {_common.SLA_NO_UPDATE_HRS}h, resolution age {_common.SLA_RESOLUTION_HRS:g}h. Current breaches are in the nav badge.</p>
 {error_html}
 {capped_note}
 <h2 class="column-heading">Queue health over time</h2>
@@ -3596,7 +3868,7 @@ def _render_security_page(items: list, error: str = "", banner: str = "") -> byt
     body = f"""
 <p><a href="/firstreply">&larr; back to pending tickets</a></p>
 <h2>{_topic_icon("security")}Security</h2>
-<p class="meta">A read-only view of the IT-Security group's own queue -- any status, no already-replied filtering, no drafting -- with a Claim button if you'd like to pick one up. Previously a side panel on the main page; moved here so the main queue is a single focused list.</p>
+<p class="meta">IT-Security queue, any status. Read-only, with Claim.</p>
 {filter_html}
 {_render_security_column(items, error)}
 """
@@ -3641,18 +3913,16 @@ def _render_flagged_page(items: list, error: str = "", capped: bool = False, ban
     blocked_html = (
         f'<div class="mini-ticket-grid">{"".join(_render_readonly_ticket_row(i, return_to="/flagged") for i in blocked)}</div>'
         if blocked
-        else f'<p class="empty">{_topic_icon("flagged", "topic-icon-empty")}No tickets currently tagged &quot;block&quot;.</p>'
+        else f'<p class="empty">{_topic_icon("flagged", "topic-icon-empty")}No tickets tagged &quot;block&quot;.</p>'
     )
     standup_html = (
         f'<div class="mini-ticket-grid">{"".join(_render_readonly_ticket_row(i, return_to="/flagged") for i in standup)}</div>'
         if standup
-        else f'<p class="empty">{_topic_icon("flagged", "topic-icon-empty")}No tickets currently tagged &quot;standup&quot;.</p>'
+        else f'<p class="empty">{_topic_icon("flagged", "topic-icon-empty")}No tickets tagged &quot;standup&quot;.</p>'
     )
     capped_note = (
-        '<p class="meta">This scan stopped early -- either Zendesk\'s own 1000-result search '
-        "cap, or this tool's own scan-depth limit, was reached (sorted by most recently updated "
-        "first). An older flagged ticket that hasn't been touched in a while could in theory not "
-        "appear here.</p>"
+        '<p class="meta" title="Zendesk search returns at most 1000 results, or this tool\'s scan-depth limit was reached (most recently updated first).">'
+        "Scan limit reached; older flagged tickets may be missing.</p>"
         if capped
         else ""
     )
@@ -3666,7 +3936,7 @@ def _render_flagged_page(items: list, error: str = "", capped: bool = False, ban
     body = f"""
 <p><a href="/firstreply">&larr; back to pending tickets</a></p>
 <h2>{_topic_icon("flagged")}Discussion</h2>
-<p class="meta">Every IT-Operations ticket tagged &quot;block&quot; or &quot;standup&quot; in Zendesk, regardless of who it's assigned to or whether it's already been replied to -- separate from the pending-reply queue on the main page, which only tracks tickets that still need a first reply.</p>
+<p class="meta">IT-Operations tickets tagged &quot;block&quot; or &quot;standup&quot;, whoever they are assigned to.</p>
 {capped_note}
 {filter_html}
 <div class="two-panel">
@@ -3701,13 +3971,12 @@ def _render_solved_page(items: list, error: str = "", capped: bool = False, bann
     rows_html = (
         f'<div class="mini-ticket-grid">{"".join(_render_readonly_ticket_row(i, return_to="/solved") for i in items)}</div>'
         if items
-        else f'<p class="empty">{_topic_icon("solved", "topic-icon-empty")}No solved tickets assigned to you found in the IT-Operations group yet.</p>'
+        else f'<p class="empty">{_topic_icon("solved", "topic-icon-empty")}No solved tickets assigned to you.</p>'
     )
     capped_note = (
-        '<p class="meta">This scan stopped early -- either Zendesk\'s own 1000-result search '
-        "cap, or this tool's own scan-depth limit, was reached (sorted by most recently updated "
-        f"first) before finding {_common.RECENTLY_SOLVED_LIMIT} matching tickets. There may be "
-        "more solved tickets assigned to you further back than this page shows.</p>"
+        '<p class="meta" title="Zendesk search returns at most 1000 results, or this tool\'s scan-depth limit was reached '
+        f'before {_common.RECENTLY_SOLVED_LIMIT} matching tickets were found.">'
+        "Scan limit reached; older solved tickets may be missing.</p>"
         if capped
         else ""
     )
@@ -3716,7 +3985,7 @@ def _render_solved_page(items: list, error: str = "", capped: bool = False, bann
     body = f"""
 <p><a href="/firstreply">&larr; back to pending tickets</a></p>
 <h2>{_topic_icon("solved")}Recently solved</h2>
-<p class="meta">The last {len(items)} tickets in the IT-Operations group that are both solved and assigned to you in Zendesk, most recently solved first -- read-only, no drafting or reply actions here. Doesn't include solved tickets assigned to you in other groups (e.g. Security) -- see the docstring on _common.fetch_recently_solved_tickets for why.</p>
+<p class="meta" title="Only the IT-Operations group is scanned, because Zendesk can filter tickets by one group at a time.">Your {f"{len(items)} " if items else ""}most recently solved IT-Operations tickets. Read-only. Other groups, such as Security, are not included.</p>
 {capped_note}
 {filter_html}
 <div class="security-panel"><h2 class="column-heading">Recently solved ({len(items)})</h2>{rows_html}</div>
@@ -3832,7 +4101,7 @@ def _render_overview_page(
         )
         + "</div>"
         if tasks_capped
-        else f'<p class="empty">{_topic_icon("tasks", "topic-icon-empty")}No tasks right now.</p>'
+        else f'<p class="empty">{_topic_icon("tasks", "topic-icon-empty")}No tasks.</p>'
     )
     tasks_total = len(draft_tasks) + len(open_tasks)
 
@@ -3842,7 +4111,7 @@ def _render_overview_page(
     elif flagged_capped:
         flagged_body = f'<div class="mini-ticket-grid">{"".join(_render_readonly_ticket_row(i, return_to="/overview") for i in flagged_capped)}</div>'
     else:
-        flagged_body = f'<p class="empty">{_topic_icon("flagged", "topic-icon-empty")}No blocked or standup tickets right now.</p>'
+        flagged_body = f'<p class="empty">{_topic_icon("flagged", "topic-icon-empty")}No blocked or standup tickets.</p>'
 
     security_capped = security_items[:_OVERVIEW_SECTION_CAP]
     if security_error:
@@ -3925,7 +4194,7 @@ def _render_overview_page(
 
     body = f"""
 <h2>{_topic_icon("overview")}Overview</h2>
-<p class="meta">A single glanceable snapshot of everything that might need you right now, pulled together from Tasks, Discussion, and Security -- each section capped to the {_OVERVIEW_SECTION_CAP} most relevant, with a link through to that page's own full list to act on anything past the cap. Need to see what's waiting on a first reply? That's its own page now -- <a href="/firstreply">First Reply</a>.</p>
+<p class="meta">Everything that may need you, from Tasks, Discussion and Security. Each section shows the top {_OVERVIEW_SECTION_CAP}; follow its link for the full list.</p>
 {activity_html}
 <div class="overview-grid">
 {sections_html}
@@ -4234,10 +4503,10 @@ def _standup_frame(ctx_view: dict, current: str, body: str, banner: str, banner_
     latest = _standup_date(ctx_view.get("latest_standup"))
     page = f"""
 <h2>{_topic_icon("standup")}Standup</h2>
-<p class="meta">Built from {ctx_view.get("standup_count", 0)} Operations Standups' Gemini notes by the separate meetingnotestool project (data built {html.escape(str(ctx_view.get("generated_at", ""))[:16].replace("T", " "))}; {_standup_notes_link(ctx_view.get("latest_doc_url"), f"latest notes, {latest}")}). Your Done / Dropped / Still open / Keep watching calls are saved to that project's decisions.json, the only thing these pages write, and show here right away.</p>
+<p class="meta" title="Built by the separate meetingnotestool project. Your calls are saved to its decisions.json, the only file these pages write.">Built from {ctx_view.get("standup_count", 0)} Operations Standup notes (built {html.escape(str(ctx_view.get("generated_at", ""))[:16].replace("T", " "))}; {_standup_notes_link(ctx_view.get("latest_doc_url"), f"latest notes, {latest}")}). Your Done / Dropped / Still open / Keep watching calls are saved and show immediately.</p>
 <nav class="standup-subnav" aria-label="Standup pages">{subnav}</nav>
 {body}
-<p class="meta">Owners with a dotted underline were inferred rather than stated in the notes; a "check" tag marks a guessed name or detail (hover for why). Statuses, resolutions and waiting-on are AI judgments from the notes -- confirm in the linked notes before acting.</p>
+<p class="meta" title="Owners with a dotted underline were inferred rather than stated in the notes. A check tag marks a guessed name or detail (hover it for why). Statuses, resolutions and waiting-on are AI judgments from the notes.">Dotted-underline owners were inferred; &quot;check&quot; marks a guess. Statuses are AI judgments, so confirm in the linked notes.</p>
 """
     return _page(page, banner=banner, banner_undo_path=banner_undo_path, current_path="/standup", wide=True)
 
@@ -4328,7 +4597,7 @@ def _render_standup_yesterday_page(result: dict, day, default_day, today, banner
 {date_form}
 {notes_html}
 {body}
-<p class="meta">Covers IT-Operations tickets. Solved means assigned to you, solved, and last updated that day; a ticket touched again after being solved is not counted as solved.</p>
+<p class="meta" title="A ticket touched again after being solved is not counted as solved.">IT-Operations tickets only. Solved = assigned to you and last updated that day.</p>
 """
     return _page(page, banner=banner, banner_undo_path=banner_undo_path, current_path="/standup", wide=True)
 
@@ -4967,12 +5236,12 @@ def _render_tasks_page(draft_tasks: list, open_tasks: list, banner: str = "") ->
         )
         + "</div>"
         if draft_tasks
-        else f'<p class="empty">{_topic_icon("tasks", "topic-icon-empty")}All clear -- anything you add above shows up here first.</p>'
+        else f'<p class="empty">{_topic_icon("tasks", "topic-icon-empty")}Nothing here yet.</p>'
     )
     open_html = (
         '<div class="mini-ticket-grid">' + "\n".join(_render_open_task_row(i) for i in open_tasks) + "</div>"
         if open_tasks
-        else f'<p class="empty">{_topic_icon("tasks", "topic-icon-empty")}Nothing open right now -- all caught up here too.</p>'
+        else f'<p class="empty">{_topic_icon("tasks", "topic-icon-empty")}Nothing open.</p>'
     )
 
     completed_html = _render_recently_completed_tasks()
@@ -4980,7 +5249,7 @@ def _render_tasks_page(draft_tasks: list, open_tasks: list, banner: str = "") ->
     body = f"""
 <p><a href="/firstreply">&larr; back to pending tickets</a></p>
 <h2>{_topic_icon("tasks")}Tasks</h2>
-<p class="meta">Personal to-do tickets -- self-requested and self-assigned in Zendesk (tagged &quot;{html.escape(_common.PERSONAL_TASK_TAG)}&quot;) once promoted, kept entirely separate from the IT-Operations pending-reply queue on the main page. Jump to: <a href="#tasks-drafts">Not yet in Zendesk ({len(draft_tasks)})</a> &middot; <a href="#tasks-open">Open ({len(open_tasks)})</a></p>
+<p class="meta" title="Once promoted, each is a self-requested, self-assigned Zendesk ticket tagged &quot;{html.escape(_common.PERSONAL_TASK_TAG)}&quot;.">Personal to-do tickets, separate from the reply queue. Jump to: <a href="#tasks-drafts">Not yet in Zendesk ({len(draft_tasks)})</a> &middot; <a href="#tasks-open">Open ({len(open_tasks)})</a></p>
 <div class="ticket">
   <p class="ticket-eyebrow">New task</p>
   <form method="post" action="/tasks/new">
@@ -4988,13 +5257,13 @@ def _render_tasks_page(draft_tasks: list, open_tasks: list, banner: str = "") ->
     <textarea name="notes" placeholder="Notes (optional)"></textarea>
     <div class="new-task-extra-fields">
       {_category_select_html()}
-      <input type="number" name="est_mins" min="1" max="{_common.PERSONAL_TASK_EST_MINUTES_MAX}" step="1" placeholder="Estimated minutes (optional)">
+      <input type="number" name="est_mins" min="1" max="{_common.PERSONAL_TASK_EST_MINUTES_MAX}" step="1" placeholder="Estimated minutes (optional)" title="Optional here; pre-fills the Zendesk step, which asks again if blank.">
     </div>
     <div class="actions">
-      <button class="approve" type="submit" data-loading-text="Saving…">{_icon("send")}<span>Add task</span></button>
-      <button class="trigger" type="submit" formaction="/tasks/new/quick-solve" data-loading-text="Solving…">{_icon("send", "icon-sm")}<span>Add + Quick Solve</span></button>
+      <button class="approve" type="submit" title="Saved here only; nothing is created in Zendesk yet." data-loading-text="Saving…">{_icon("send")}<span>Add task</span></button>
+      <button class="trigger" type="submit" formaction="/tasks/new/quick-solve" title="Creates a solved Zendesk ticket in one step. Requires Estimated minutes." data-loading-text="Solving…">{_icon("send", "icon-sm")}<span>Add + Quick Solve</span></button>
     </div>
-    <div class="kbd-hint">Saved here only -- nothing is created in Zendesk until you click "Make Zendesk Ticket from Task" below. Estimated minutes here is optional and just pre-fills that step -- it's still asked for again if you leave it blank. "Add + Quick Solve" skips straight to a solved Zendesk ticket in one click -- it does need Estimated minutes filled in first.</div>
+    <div class="kbd-hint">Saved here only until you make a Zendesk ticket from it.</div>
   </form>
 </div>
 <div class="two-panel">
@@ -5026,6 +5295,10 @@ class Handler(BaseHTTPRequestHandler):
     _MIN_GZIP_BYTES = 500
 
     def log_message(self, fmt, *args):
+        # The loading bar polls /__progress several times a second while a
+        # page loads; logging each poll would bury the real requests.
+        if getattr(self, "path", "").startswith("/__progress"):
+            return
         _log(f"{self.address_string()} - {fmt % args}")
 
     def _write_body(self, body: bytes, content_type: str, status: int = 200) -> None:
@@ -5056,6 +5329,9 @@ class Handler(BaseHTTPRequestHandler):
         self._write_body(body, "text/html; charset=utf-8", status)
 
     def _redirect(self, path: str) -> None:
+        # Tells _with_progress (bottom of the Handler class) to keep this
+        # navigation's progress record open for the follow-up GET.
+        self._progress_redirected = True
         self.send_response(303)
         self.send_header("Location", path)
         # Required now that protocol_version is HTTP/1.1 (see above): a
@@ -5128,6 +5404,22 @@ class Handler(BaseHTTPRequestHandler):
         # anything else in this handler, including the cache reset below.
         if self.path == "/healthz":
             self._write_body(b"ok", "text/plain; charset=utf-8", 200)
+            return
+        # /__progress?id=<16 hex>: how far along the page load identified by
+        # that id is (Zendesk API calls done vs. the previous load's count),
+        # polled by the loading bar. Also touches nothing but an in-memory
+        # counter, so it answers instantly even while the page it reports
+        # on is blocked on Zendesk.
+        if self.path.startswith("/__progress"):
+            pid = parse_qs(urlparse(self.path).query).get("id", [""])[0]
+            snapshot = _common.progress_snapshot(pid) if _common._PROGRESS_ID_RE.match(pid) else _common.progress_snapshot("")
+            body = json.dumps(snapshot).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
             return
         # See _common._request_cache: gives every GET its own fresh read
         # of pending_drafts.json/personal_tasks.json the first time each
@@ -5327,7 +5619,7 @@ class Handler(BaseHTTPRequestHandler):
         ticket_html = (
             '<div class="ticket-list">' + "\n".join(_render_ticket(i) for i in items) + "</div>"
             if items
-            else '<p class="empty">You\'re all caught up -- nothing waiting on you right now.</p>'
+            else '<p class="empty">You\'re all caught up.</p>'
         )
         # Filter box + sort toggle sit directly above the queue -- only
         # worth showing once there's actually more than an empty-state
@@ -6123,6 +6415,34 @@ class Handler(BaseHTTPRequestHandler):
             )
         finally:
             _common._end_pending_ticket_action(ticket_id)
+
+
+_PROGRESS_UNTRACKED = ("/healthz", "/__progress")
+
+
+def _with_progress(method):
+    """Wraps a Handler do_* method so a request carrying a progress id (the
+    csa_pid cookie the loading bar sets) has its Zendesk API calls counted
+    -- see _common.progress_begin. Requests without the cookie (the
+    watchdog, auto-refresh, curl) run exactly as before."""
+    def wrapper(self):
+        if self.path.startswith(_PROGRESS_UNTRACKED):
+            return method(self)
+        pid = _common.progress_id_from_cookie(self.headers.get("Cookie", ""))
+        token = _common.progress_begin(pid, f"{self.command} {urlparse(self.path).path}") if pid else None
+        self._progress_redirected = False
+        try:
+            return method(self)
+        finally:
+            if token:
+                _common.progress_end(token, redirected=self._progress_redirected)
+    wrapper.__name__ = method.__name__
+    wrapper.__doc__ = method.__doc__
+    return wrapper
+
+
+Handler.do_GET = _with_progress(Handler.do_GET)
+Handler.do_POST = _with_progress(Handler.do_POST)
 
 
 def main() -> None:
