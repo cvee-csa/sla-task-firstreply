@@ -1101,7 +1101,7 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
 <html>
 <head>
 <meta charset="utf-8">
-<title>{title_prefix}Zendesk Workflow Asset for CSA</title>
+<title>{title_prefix}Workflow Asset</title>
 {favicon_html}
 {theme_color_meta_html}
 {theme_init_script}
@@ -2002,6 +2002,19 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
      "bottom" against). The wide sidebar media query below overrides
      margin-top to auto so this row actually pins to the bottom of the
      full-height rail instead of just trailing the nav list. */
+  /* Title/logo (.brand-home-link) sits at the bottom of the sidebar, above
+     the Zendesk status + Refresh buttons; on narrow viewports the footer
+     wrapper disappears (display: contents) and the title is ordered back to
+     the top of the card (see the max-width block below). */
+  .brand-footer {{ margin-top: 1rem; border-top: 1px solid var(--divider); padding-top: 0.75rem; }}
+  .brand-footer .brand-home-link {{ margin-bottom: 0.2rem; }}
+  .brand-footer .brand-status-row {{ margin-top: 0.75rem; padding-top: 0; border-top: none; }}
+  @media (max-width: 860px) {{
+    .brand {{ display: flex; flex-direction: column; }}
+    .brand-footer {{ display: contents; }}
+    .brand-home-link {{ order: -1; align-self: flex-start; margin-bottom: 0; }}
+    .brand-footer .brand-status-row {{ margin-top: 1rem; padding-top: 0.75rem; border-top: 1px solid var(--divider); }}
+  }}
   .brand-status-row {{
     display: flex; justify-content: center; align-items: center; flex-wrap: wrap;
     gap: 0.6rem; margin-top: 1rem; padding-top: 0.75rem;
@@ -2109,7 +2122,7 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
     .brand-home-link .stat-chip {{ margin-top: 0.4rem; }}
     .brand-controls-row {{
       flex-direction: column; align-items: stretch; justify-content: flex-start;
-      gap: 0.6rem; margin-top: 1.1rem;
+      gap: 0.6rem; margin-top: 0;
     }}
     /* No <form> left inside .brand-controls-row now that the Refresh
        button has moved to .brand-status-row below (only the theme toggle
@@ -2127,7 +2140,7 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
        before it. Centering and the divider above it still come from the
        base .brand-status-row rule -- only the vertical anchor changes
        here. */
-    .brand-status-row {{ margin-top: auto; }}
+    .brand-footer {{ margin-top: auto; }}
   }}
   .stat-chip {{
     display: inline-block; background: var(--divider); color: var(--text);
@@ -2518,11 +2531,6 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
   <div id="page-loading-detail"></div>
 </div>
 <div class="brand">
-  <a class="brand-home-link" href="/firstreply">
-    {logo_html}
-    <h1>Zendesk Workflow Asset for CSA<span class="theme-deco theme-deco-halloween" aria-hidden="true">{_icon("pumpkin", "icon")}</span><span class="theme-deco theme-deco-christmas" aria-hidden="true">{_icon("tree", "icon")}</span></h1>
-    {pending_badge_html}
-  </a>
   <div class="brand-controls-row">
     <div class="theme-toggle" role="group" aria-label="Theme">
       <button type="button" data-theme="system" title="Auto (match system)" onclick="setTheme('system')">{_icon("monitor", "icon-sm")}</button>
@@ -2537,9 +2545,16 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
     {_top_nav_html(current_path)}
   </div>
   {header_meta}
-  <div class="brand-status-row">
-    {_zendesk_status_control_html()}
-    {_refresh_button_html(current_path)}
+  <div class="brand-footer">
+    <a class="brand-home-link" href="/firstreply">
+      {logo_html}
+      <h1>Workflow Asset<span class="theme-deco theme-deco-halloween" aria-hidden="true">{_icon("pumpkin", "icon")}</span><span class="theme-deco theme-deco-christmas" aria-hidden="true">{_icon("tree", "icon")}</span></h1>
+      {pending_badge_html}
+    </a>
+    <div class="brand-status-row">
+      {_zendesk_status_control_html()}
+      {_refresh_button_html(current_path)}
+    </div>
   </div>
 </div>
 {banner_html}
