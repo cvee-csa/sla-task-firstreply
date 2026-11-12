@@ -4249,6 +4249,7 @@ _STANDUP_SUBNAV = [
     ("/standup/workstreams", "Workstreams"),
     ("/standup/meetings", "Meetings"),
     ("/standup/actions", "Action items"),
+    ("/standup/people", "By person"),
     ("/standup/closed", "Closed"),
 ]
 
@@ -4883,6 +4884,72 @@ def _render_standup_actions_page(snapshot: dict, show: str = "open", owner: str 
             + (_standup_section("Action items", len(acts), _standup_grid([ctx.action_row(a, show_owner=True) for a in acts]), "actions")
                if acts else _standup_empty("No action items match these filters.")))
     return _standup_frame(view, "/standup/actions", body, banner, banner_undo_path)
+
+
+def _standup_people(view: dict) -> list:
+    """Real owner names in the notes (not the Group / Unassigned buckets)."""
+    return [n for n in _standup_owner_options(view) if n not in ("Group", "Unassigned")]
+
+
+def _render_standup_people_page(snapshot: dict, person: str = "", q: str = "", banner: str = "",
+                                banner_undo_path: str = "", tasks_by_action: dict | None = None) -> bytes:
+    """/standup/people: one person's action items from the notes -- what the
+    notes say they will do. Open items first (oldest first, with how long
+    each has been open), then done / dropped ones newest first. Opens on
+    STANDUP_DEFAULT_PERSON; any owner in the notes can be picked."""
+    view = snapshot.get("view")
+    if not view:
+        return _standup_error_page(snapshot, banner)
+    people = _standup_people(view)
+    default = _common.STANDUP_DEFAULT_PERSON if _common.STANDUP_DEFAULT_PERSON in people else (people[0] if people else "")
+    person = person if person in people else default
+    qs = "&".join(f"{k}={quote(v)}" for k, v in (("person", person if person != default else ""), ("q", q)) if v)
+    ctx = _StandupCtx(view, "/standup/people" + (f"?{qs}" if qs else ""), tasks_by_action)
+
+    def _matches(a: dict) -> bool:
+        if not q:
+            return True
+        topic = (ctx.topic(a.get("topic_key")) or {}).get("name", "")
+        return q.lower() in (a.get("task", "") + " " + topic).lower()
+
+    mine = [a for a in ctx.actions.values() if person and a.get("owner") == person and _matches(a)]
+    open_items = sorted((a for a in mine if not a.get("resolution")), key=lambda a: (a.get("date") or "", a.get("id") or ""))
+    resolved = sorted((a for a in mine if a.get("resolution")), key=lambda a: (a.get("date") or "", a.get("id") or ""), reverse=True)
+    options = "".join(
+        f'<option value="{html.escape(n)}"{" selected" if n == person else ""}>{html.escape(n)}</option>' for n in people
+    )
+    form = f"""<form method="get" action="/standup/people" class="standup-filter">
+  <select name="person" aria-label="Person">{options}</select>
+  <input type="search" name="q" value="{html.escape(q)}" placeholder="Search tasks and topics" aria-label="Search">
+  <button type="submit" class="internal">{_icon("search", "icon-sm")}<span>Show</span></button>
+  {'<a href="/standup/people' + ('?person=' + quote(person) if person != default else '') + '" class="meta">Clear</a>' if q else ""}
+</form>"""
+    done = sum(1 for a in resolved if (a["resolution"] or {}).get("outcome") == "done")
+    dropped = sum(1 for a in resolved if (a["resolution"] or {}).get("outcome") == "dropped")
+    inferred = sum(1 for a in mine if a.get("owner_inferred"))
+    standups = len({a.get("date") for a in mine if a.get("date")})
+    summary = ""
+    if mine:
+        parts = [f"{len(open_items)} open", f"{done} done", f"{dropped} dropped"]
+        other = len(resolved) - done - dropped
+        if other:
+            parts.append(f"{other} otherwise resolved")
+        inferred_note = f"; {inferred} with an inferred owner" if inferred else ""
+        summary = (f'<p class="meta">{html.escape(person)}: {", ".join(parts)} across {standups} '
+                   f"standup{'s' if standups != 1 else ''}{inferred_note}.</p>")
+    if not mine:
+        content = _standup_empty(f"No action items for {person}." if person else "No owners found in the notes.")
+    else:
+        content = ""
+        if open_items:
+            content += _standup_section("Open", len(open_items),
+                                        _standup_grid([ctx.action_row(a, show_owner=bool(a.get("owner_inferred"))) for a in open_items]),
+                                        "people-open")
+        if resolved:
+            content += _standup_section("Done and dropped", len(resolved),
+                                        _standup_grid([ctx.action_row(a, show_owner=bool(a.get("owner_inferred"))) for a in resolved]),
+                                        "people-resolved")
+    return _standup_frame(view, "/standup/people", form + summary + content, banner, banner_undo_path)
 
 
 def _render_standup_meetings_page(snapshot: dict, banner: str = "") -> bytes:
@@ -5594,6 +5661,9 @@ class Handler(BaseHTTPRequestHandler):
             elif sub == ["actions"]:
                 page = _render_standup_actions_page(snap, show=arg("show") or "open", owner=arg("owner"), q=arg("q"), banner=banner,
                                                     banner_undo_path=banner_undo_path, tasks_by_action=_common.standup_tasks_by_action())
+            elif sub == ["people"]:
+                page = _render_standup_people_page(snap, person=arg("person"), q=arg("q"), banner=banner,
+                                                   banner_undo_path=banner_undo_path, tasks_by_action=_common.standup_tasks_by_action())
             elif sub == ["meetings"]:
                 page = _render_standup_meetings_page(snap, banner=banner)
             elif len(sub) == 2 and sub[0] == "meetings":

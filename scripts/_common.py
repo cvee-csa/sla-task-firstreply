@@ -2948,6 +2948,9 @@ def sla_history_snapshot() -> dict:
 # at request time from that other checkout -- so none of it can end up
 # in this repo's git history. Overridable via env var for a clone that
 # doesn't sit at the default sibling path.
+# Whose action items /standup/people opens on (any owner name in the notes
+# can be picked from the page; this is only the default).
+STANDUP_DEFAULT_PERSON = os.getenv("STANDUP_DEFAULT_PERSON", "Ryan").strip() or "Ryan"
 STANDUP_DATA_FILE = Path(os.getenv(
     "STANDUP_DATA_FILE",
     str(Path.home() / "Desktop" / "git" / "meetingnotestool" / "dist" / "standup_data.json"),
