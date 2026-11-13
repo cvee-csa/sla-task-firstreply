@@ -18,7 +18,37 @@ All scripts share config and logic through **`scripts/_common.py`**, so they can
 
 ## Setup
 
-**Prerequisites:** the sibling `zendesk-mcp-server` repo checked out with its own `.venv`, with `zendesk_mcp_server` installed (`pip install -e .`) alongside `zenpy`, `requests` and `python-dotenv`. This repo's `launchd` plists point at that venv's Python directly.
+### Quick start
+
+1. **Check out the repos in the expected places.** The `launchd` plists and `scripts/reload_launchd.sh` use absolute paths, so this repo goes at `~/Desktop/git/sla-task-firstreply` and the Zendesk client at `~/Desktop/git/zendeskmcp/zendesk-mcp-server`, already set up with its own `.venv` (see Prerequisites below).
+
+   ```
+   cd ~/Desktop/git
+   git clone https://github.com/cvee-csa/sla-task-firstreply.git
+   ```
+
+2. **Install this repo's one runtime dependency into that venv**, because the services run on that venv's Python:
+
+   ```
+   cd ~/Desktop/git/sla-task-firstreply
+   ~/Desktop/git/zendeskmcp/zendesk-mcp-server/.venv/bin/python3 -m pip install -r requirements.txt
+   ```
+
+3. **Create `.env`** in this repo's root. Copy `zendesk-mcp-server/.env.example` and fill it in, with `ZENDESK_OAUTH_TOKEN_PATH` set to the absolute path of `zendesk-mcp-server/.zendesk_oauth_tokens.json` (see Config below). Never commit it; it is git-ignored.
+
+4. **Install and start the three services:**
+
+   ```
+   zsh scripts/reload_launchd.sh
+   ```
+
+5. **Open http://127.0.0.1:8765/ and connect Zendesk.** If an amber banner says the connection needs attention, click **Reconnect now**, approve access in the tab it opens, then paste the redirect URL back into the page. Tickets are detected on the next 2-minute run (Mon–Fri, 9am–4pm), or click **Refresh data** to scan now.
+
+6. **Optional:** the notification helper app, and the sibling repos for `/sla` and `/standup`, are described below.
+
+Cloning to a different folder or user account: change `REPO_ROOT` in `scripts/reload_launchd.sh` and the absolute paths in the three `scripts/*.plist` files before step 4.
+
+**Prerequisites:** the sibling `zendesk-mcp-server` repo (at `~/Desktop/git/zendeskmcp/zendesk-mcp-server`) checked out with its own `.venv`, with `zendesk_mcp_server` installed (`pip install -e .`) alongside `zenpy`, `requests` and `python-dotenv`. This repo's `launchd` plists point at that venv's Python directly.
 
 **Config:** start from `zendesk-mcp-server`'s `.env.example`, or use this repo's own `.env` (git-ignored, never committed). One field is unusual: `ZENDESK_OAUTH_TOKEN_PATH` is an **absolute path** to `zendesk-mcp-server/.zendesk_oauth_tokens.json`, not a copy, because that server also refreshes the file, and one shared token file avoids two copies drifting apart.
 
@@ -30,14 +60,16 @@ Optional knobs, all with defaults:
 | `ZENDESK_NOTIFICATION_SOUND` | `Glass` | Any name from `/System/Library/Sounds`, or empty for silent |
 | `ZENDESK_LOOKBACK_HOURS` | `72` | Lookback window |
 | `ZENDESK_NOTIFIER_APP_PATH` | `~/Applications/CSA Notifier.app` | Helper app location |
-| `SLA_AGENT_NAME` | `Catherine Vee` | Whose activity `/sla`'s personal charts show; must match the name `sla-report-slack` recorded |
+| `STANDUP_PEOPLE` | `Catherine,Jesstin,Nekoashi,Ryan` | The only people offered in the `/standup` owner filters and the By person picker, spelled as the notes spell them (case-insensitive); others in the notes still appear under Everyone |
+| `OVERVIEW_PEOPLE` | `Catherine Vee,Jesstin Rojas,Nekoashi Wolf,Ryan Bergsma` | Cards on `/overview`, in order; the first is you |
+| `SLA_HISTORY_FILE` | `~/Desktop/git/sla-report-slack/data/sla_history.json` | Where `/sla` reads its daily snapshots (read-only) |
+| `SLA_RESOLUTION_HRS` | `40` | Business-hour limit for the resolution-age rule (5 business days x 8 h) |
+| `SLA_TICKET_SCAN_PAGES` | `10` | Pages of 100 tickets the live SLA scan reads before noting the queue may be larger |
 | `IT_SECURITY_COLUMN_LIMIT` | `5` | Recent IT-Security tickets on `/security` (the name predates that page moving; kept so old `.env` files still work) |
 
 **My tasks, "IT-Operations" Assignee/Requester:** set `ZENDESK_IT_OPERATIONS_EMAIL=...` in `.env` to the email of the shared Zendesk *user* account that "IT-Operations" should resolve to. It must be a real user, not the `IT_OPERATIONS_GROUP_ID` group: Zendesk's `requester_id` needs a user id, and Assignee uses the same lookup (`resolve_it_operations_agent_id`) for consistency. If unset, choosing "IT-Operations" fails with a clear on-page error instead of falling back silently; the default, "Catherine Vee", is unaffected.
 
-**`/sla` "Check for newer data":** needs only working git access to the `sla-report-slack` repo. The button runs `git pull --ff-only` there and never touches Zendesk or Gmail.
-
-**`/sla` "Run full refresh" (optional):** triggers `sla-report-slack`'s GitHub Actions workflow, so it needs a GitHub token. Add `SLA_REPORT_GITHUB_TOKEN=...` to `.env` (classic PAT: `repo` scope if the repo is private, `public_repo` if public; fine-grained: "Actions: Read and write" on that repo only). Generate it yourself at github.com/settings/tokens and never paste it in chat. Without it the button still appears and fails with a clear on-page message. `SLA_REPORT_GITHUB_REPO` (default `cvee-csa/sla-report-slack`) overrides the repo. The run starts in the background; a status line polls every few seconds and reloads the page when it finishes.
+**`/sla`:** needs the sibling `sla-report-slack` repo cloned at `~/Desktop/git/sla-report-slack` (or `SLA_HISTORY_FILE` pointed at its `data/sla_history.json`). This tool only reads that file; it never pulls, writes or commits there, so run `git pull` in that repo to get newer data. Without the file, `/sla` says so and the rest of the tool keeps working.
 
 **`/standup`:** no setup if the private `meetingnotestool` repo is cloned at `~/Desktop/git/meetingnotestool`. This tool reads that project's built `dist/standup_data.json` and writes only its `decisions.json`, when you click a decision button. Set `STANDUP_DATA_FILE` in `.env` if it lives elsewhere, and `STANDUP_DEFAULT_PERSON` (default `Ryan`) to change whose items `/standup/people` opens on. Without the file, `/standup` explains why and every other page keeps working.
 
@@ -54,19 +86,21 @@ A small Automator application gives macOS a real notification sender to track. A
 
 ### Install the services
 
+`scripts/reload_launchd.sh` is the install step and the reload step. It copies all three plists (first-reply check, review server, watchdog) into `~/Library/LaunchAgents/` and (re)loads each with `launchctl bootout` then `bootstrap`. It is safe to re-run, so run it again after pulling changes:
+
 ```
-cp scripts/com.csa.zendesk-first-reply-check.plist ~/Library/LaunchAgents/
+zsh scripts/reload_launchd.sh
+```
+
+To do one service by hand, copy its plist into `~/Library/LaunchAgents/` and register it, using `bootstrap` rather than the older `launchctl load`, which can silently leave an old definition running:
+
+```
 cp scripts/com.csa.zendesk-review-server.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.csa.zendesk-first-reply-check.plist
-launchctl load ~/Library/LaunchAgents/com.csa.zendesk-review-server.plist
+launchctl bootout gui/$(id -u)/com.csa.zendesk-review-server 2>/dev/null
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.csa.zendesk-review-server.plist
 ```
 
-`scripts/reload_launchd.sh` does the copy/reload steps (safe to re-run), handy after pulling changes. After changing a script, unload and reload its plist so `launchd` picks up the code:
-
-```
-launchctl unload ~/Library/LaunchAgents/com.csa.zendesk-first-reply-check.plist
-launchctl load ~/Library/LaunchAgents/com.csa.zendesk-first-reply-check.plist
-```
+After changing a script, reload it the same way. For just the review server, see the restart command under Troubleshooting.
 
 ## Day to day
 
@@ -109,18 +143,18 @@ Layout: on wide screens the header is a left sidebar (theme toggle, nav, then th
 
 ### SLA metrics (`/sla`)
 
-Today's totals (open, breached, due soon, on track, compliance %), a week-over-week trend (shown once 14+ daily snapshots exist), and the ticket ids currently in breach with a by-rule breakdown. These are read from the separate `sla-report-slack` repo's `data/sla_history.json` (a 90-day rolling history that repo's GitHub Actions job appends to on weekdays), so they are only as fresh as this Mac's last `git pull` of that repo. The page shows the snapshot's real date and flags it if stale beyond a normal weekend. Two trend charts sit under the queue-health chart and share its range toggle, zoom and PNG export. **First response time** plots the business-hour median, average and p90 against the 2 h limit (a p90 beyond 4x the limit is drawn at the top edge as a triangle; the tooltip keeps the true value, and also shows the share answered within the limit). **Breaches by rule** stacks each day's breaches by rule (initial response, requester wait, no update, resolution age); days before the history file began recording rules are left blank rather than zero, and a ticket can breach several rules, so a bar can exceed that day's breached count.
+Four Chart.js trend charts over the IT-Operations queue's daily snapshots. They share one **Last 7 / Last 14 / All time** toggle, scroll-to-zoom and drag-to-pan (the circular-arrow button resets the zoom), and each exports a PNG.
 
-Note: the paragraphs above and below describe an earlier layout of this page; the current page is the Chart.js charts only (queue health, first response time, breaches by rule, agent activity).
+- **Queue health over time:** meeting SLA, due soon and SLA not met as stacked areas, with compliance % as a dashed line on the right axis. Clicking a day lists that day's breached tickets as links into Zendesk.
+- **First response time:** business-hour median, average and p90 against the 2 h limit. The tooltip also shows the share of tickets answered within the limit that day. An occasional ticket left for days would flatten every other line, so the axis stops at 4x the limit: a p90 beyond it is drawn at the top edge as a triangle, and the tooltip keeps its true value.
+- **Breaches by rule:** each day's breaches stacked by rule (initial response, requester wait, no update, resolution age). A ticket can breach several rules, so a bar can be taller than that day's breached count. Days from before the history file recorded rules are left blank, not zero, and a note under the chart gives the first recorded date.
+- **Agent activity:** public replies plus internal notes per agent per day, stacked, with a checkbox per agent. Leadership accounts listed in `_common.SLA_AGENT_ACTIVITY_EXCLUDE` are dropped before the data reaches the page.
 
-A link at the bottom opens that repo's full `sla_dashboard.html` from disk. If the repo isn't checked out as a sibling folder or hasn't run yet, the page says so.
+The numbers come from the separate `sla-report-slack` repo's `data/sla_history.json`, which that repo's GitHub Actions job appends to on weekdays, so they are only as fresh as this Mac's last `git pull` of it. The page labels them "Trend history as of" the newest snapshot's date. If the file is missing or unreadable, the page says why instead of drawing empty charts. A day missing a field (for example response times on early snapshots) is a gap in the line, never a zero, because 0 h is a real median.
 
-**Your activity** (named by `SLA_AGENT_NAME`) charts one person's replies (public + internal, stacked) and solved tickets per day, plus running totals. Only these numbers are personal, because only they are tracked per agent per day in the history file; the team numbers stay team-wide. A day with no per-agent data renders as a gray hairline, explained by a legend, so "zero replies" and "unknown" look different. The charts are server-rendered inline SVG (no CDN, no client JS) with hover tooltips. A **7d / 14d / 30d / 90d / All** pill row (`?range=`) limits just the personal charts, and the shared scope line says so when a narrower range is chosen.
+Charts need the network: Chart.js, hammer.js and the zoom plugin load from cdnjs (pinned versions), and offline the charts simply don't draw. Colors are read from the active theme's CSS variables, and the charts rebuild when the theme changes.
 
-Two buttons refresh the data, deliberately different:
-
-- **Check for newer data** (blue) runs `git pull --ff-only` in `sla-report-slack` (`_common.pull_sla_report_data`) and needs no credentials. It shows only data already committed elsewhere. `--ff-only` makes a diverged clone fail loudly rather than create a merge commit in a repo this tool treats as read-only. An earlier version ran that repo's scan script directly, but its dry-run mode skips writing snapshots and the live mode sends a real email, and it needed a second copy of Zendesk/Gmail credentials.
-- **Run full refresh** (gold) triggers that repo's `sla-report.yml` workflow through the GitHub API (`_common.trigger_sla_report_workflow`), polls until the run finishes (up to `SLA_WORKFLOW_TRIGGER_TIMEOUT_SECONDS`, 4 minutes), then pulls. That workflow always runs with `DRY_RUN: "false"`, so this **does** run a real Zendesk scan and **does** send that repo's daily email; the page says so. It needs `SLA_REPORT_GITHUB_TOKEN`; the Zendesk/Gmail secrets stay in that repo's GitHub Secrets. A failed run links to its Actions page.
+The thresholds quoted at the top of the page (initial response 2 h, requester wait 4 h, no update 8 h, resolution age 40 h, all business hours) are also applied to the live queue. Each `/sla` load runs a scan of non-solved tickets (`_common.fetch_sla_tickets`, cached 2 minutes and bounded by `SLA_TICKET_SCAN_PAGES`) whose only visible results are the **SLA** nav badge's breached count and an on-page note if the scan failed or hit its cap. The page lists no per-ticket rows. Live elapsed hours are computed here from ticket comments, so they can differ by a few minutes from what `sla-report-slack` records for the same ticket.
 
 ### My tasks (`/tasks`)
 
@@ -141,9 +175,9 @@ All of these share one row renderer (`_render_readonly_ticket_row`), show no dra
 - **IT-Security** (`/security`): that group's `IT_SECURITY_COLUMN_LIMIT` most recent tickets in any status, a recent-activity snapshot rather than a first-reply queue. Claiming from here changes only Zendesk; the page's cache refreshes on its own.
 - **Blocked/Standup** (`/flagged`): every non-solved/closed IT-Operations ticket tagged `block` or `standup`, in two side-by-side panels (a ticket with both tags appears in both). It is separate from the main queue on purpose, because that queue shows only tickets still needing a first reply. Zendesk's API has no "any ticket with this tag" filter, so `_common.fetch_flagged_tickets` pages through the group sorted by `updated_at` and checks tags in Python, bounded by `FLAGGED_TICKET_SCAN_PAGES` (default 10) and Zendesk's hard 1000-result `/search.json` ceiling (`ZENDESK_SEARCH_RESULT_CAP`; a page past it returns a 422). If a page fails mid-scan, results already found are kept, and a note says the scan stopped early.
 - **Recently Solved** (`/solved`): your last `RECENTLY_SOLVED_LIMIT` (40) solved tickets in the IT-Operations group, with a "solved *N*h ago" time. Solved tickets assigned to you in other groups don't appear, because the scan is group-scoped. The same "stopped early" note applies (`SOLVED_TICKET_SCAN_PAGES`, default 10).
-- **Overview** (`/overview`): the top few items from Tasks, Discussion and Security in one place.
+- **Overview** (`/overview`): who holds which open IT-Operations tickets. One card per person (you first, then Jesstin, Nekoashi and Ryan) and an Unassigned card, each listing that person's new/open/pending/hold tickets oldest first, with age, an SLA-not-met or due-soon chip naming the rule, and Claim on tickets that aren't yours. Tickets held by anyone else are only counted in a note. It reuses the `/sla` page's cached scan (`_common.fetch_sla_tickets`, personal tasks excluded), so it adds no Zendesk calls of its own. `OVERVIEW_PEOPLE` sets the names (comma-separated, exact Zendesk display names, first = you).
 
-**Nav badges.** The SLA breach count, open personal tasks, and a Zendesk OAuth warning come from cheap local files, so they are always current. The Blocked/Standup and IT-Security counts read those pages' in-process caches (`_common.cached_flagged_ticket_count`/`cached_security_ticket_count`) and never call Zendesk, so they are "warm from your last visit" and disappear when the 2-minute cache goes stale. Badges are neutral gray except the warning ones.
+**Nav badges.** Open personal tasks and the Zendesk OAuth warning come from cheap local files, so they are always current. The SLA, Blocked/Standup and IT-Security counts read those pages' in-process caches (`_common.cached_sla_breach_count`/`cached_flagged_ticket_count`/`cached_security_ticket_count`) and never call Zendesk, so they are "warm from your last visit" and disappear when the 2-minute cache goes stale. Badges are neutral gray except the warning ones.
 
 ### Standup (`/standup`)
 
@@ -151,7 +185,7 @@ Tracker for the Operations Standup notes. Everything except the Zendesk tickets 
 
 - **Overview** (`/standup`): what changed since an earlier standup (`?since=` picks any of the last 8), your open action items (oldest first), the active topics you own, active work grouped by what it's waiting on, Zendesk tickets, your recently resolved items, and quiet topics needing a decision.
 - **Workday recap** (`/standup/yesterday`): your ticket activity for the previous workday (public replies, internal notes, tickets you solved), so you don't recount it for standup. `?date=YYYY-MM-DD` and previous/next links choose another workday. The data comes from a scan of the IT-Operations group, cached per day, and falls back to this tool's local reply history if Zendesk is unreachable. A **Copy as text** button copies the list.
-- **By person** (`/standup/people?person=&q=`): one person's action items, as the notes attribute them. Open items come first (oldest first, with how long each has been open), then done and dropped ones, newest first. Each row shows the standup it came from (linked to those notes) and its topic, and an owner the notes only implied is shown with the dotted underline. A picker lists every owner in the notes (not the Group/Unassigned buckets) and opens on `STANDUP_DEFAULT_PERSON` (default `Ryan`). It is read-only, with no decision buttons on anyone else's items.
+- **By person** (`/standup/people?person=&q=`): one person's action items, as the notes attribute them. Open items come first (oldest first, with how long each has been open), then done and dropped ones, newest first. Each row shows the standup it came from (linked to those notes) and its topic, and an owner the notes only implied is shown with the dotted underline. A picker lists only the people in `STANDUP_PEOPLE` (not the Group/Unassigned buckets) and opens on `STANDUP_DEFAULT_PERSON` (default `Ryan`). It is read-only, with no decision buttons on anyone else's items.
 - **Topic history** (`/standup/topic/<key>`), **Workstreams** (`/standup/workstreams?q=&owner=`), **Meetings** (`/standup/meetings[/<date>]`), **Action items** (`/standup/actions?show=open|resolved|all&owner=&q=`), and **Closed** (`/standup/closed`).
 
 Owners with a dotted underline were inferred, and a "check" tag marks a guessed name or detail. The nav badge counts your open standup action items.
@@ -175,7 +209,7 @@ The reasoning behind each decision is in [`docs/DESIGN.md`](docs/DESIGN.md); thi
 - **Localhost only, no login.** The server binds to `127.0.0.1`; there is deliberately no auth layer beyond being logged into this Mac.
 - **Credential-bearing files are tightened.** `AUTH_STATE_FILE`, `OAUTH_PENDING_FILE` and the shared token file are `chmod`'d to `0600` after writes (`_harden_file_permissions`), best-effort.
 - **Private data stays out of this public repo.** `/standup` reads `meetingnotestool` data from that checkout at request time (`_common.standup_snapshot`, mtime-cached), never copying or caching it. `scripts/tests/conftest.py` points `STANDUP_DATA_FILE` and `STANDUP_DECISIONS_FILE` at temp paths, so tests can't read real notes or write real decisions.
-- **A read-only dependency stays read-only.** This tool never commits to `sla-report-slack`; its only interaction is `git pull --ff-only`, so a diverged clone fails loudly rather than creating a merge commit.
+- **A read-only dependency stays read-only.** This tool only reads `sla-report-slack`'s `sla_history.json`. It never pulls, writes or commits there, so it can't create a merge commit or send that repo's email.
 
 **Data, caching and concurrency**
 
@@ -205,10 +239,11 @@ The reasoning behind each decision is in [`docs/DESIGN.md`](docs/DESIGN.md); thi
 
 **SLA page**
 
-- **Read another tool's numbers; don't recompute them.** Classification lives in `sla-report-slack`; this page parses its `sla_history.json` and says on the page how fresh it is.
-- **Personalize only what's tracked per person.** Queue health and violations stay team-wide; a day without per-agent data shows a gray hairline (with a legend under the chart), not a zero bar.
-- **Plain inline SVG, no second charting library**, consistent with every page being one self-contained response. Range pills are plain `?range=` links, not client-side redraws, and appear only on the personal charts, where a range is meaningful.
-- **Costs are stated beside the control.** "Check for newer data" and "Run full refresh" are two separate buttons because they cost different things (a git pull, versus a real Zendesk scan plus an email).
+- **Read another tool's numbers; don't recompute them.** Daily history comes from `sla-report-slack`; this page reshapes `sla_history.json` (`_common.sla_chart_data`) and says how fresh it is. Only the nav badge's live count is computed here.
+- **Missing is not zero.** A field absent from a day's snapshot becomes `null`, drawn as a gap, because 0 h is a real median and 0 breaches is a real day. Rule counts are blank on days from before the history recorded them.
+- **Outliers are clamped visibly, not hidden.** Response-time values beyond 4x the limit sit at the top of the axis as triangles with the true value in the tooltip, so one bad day doesn't flatten the rest.
+- **Charts match the sibling dashboard.** Chart.js (4.4.1) with the zoom plugin is the one external script dependency in the tool, a deliberate exception to the one-self-contained-response style, so these charts behave like `sla_dashboard.html`'s. Theme colors are read from CSS variables at build time.
+- **Keep only what's asked for.** An earlier KPI strip, rule cards and awaiting-first-response list were removed on request. The live scan stays, because it feeds the nav badge.
 
 **UI**
 
@@ -217,7 +252,7 @@ The reasoning behind each decision is in [`docs/DESIGN.md`](docs/DESIGN.md); thi
 - **Avatars only beside names the tool trusts** (`_avatar_html`, `_requester_avatar_prefix`), never beside an unconfirmed guess.
 - **The toast and the auth banner share CSS but not behavior.** The toast (`data-toast`) floats and auto-dismisses; the auth warning stays docked, since a standing condition shouldn't vanish on a timer.
 - **The fade-on-submit is cosmetic**, not an optimistic update. If a post fails, the card reappears.
-- **A header is a glance, not a dashboard.** KPI tiles earn their size on `/sla`; the main page uses two small stat chips.
+- **A header is a glance, not a dashboard.** The main page uses two small stat chips.
 - **Use the width available.** Compact rows go in `.mini-ticket-grid` and side-by-side panels in `.two-panel`; short pages like `/reconnect` are capped and centered instead of padded.
 - **A basic accessibility pass, not a full audit.** The toast is a live region, the queue sits in `<main>`, and flag text meets WCAG AA contrast in light and dark. There has been no full screen-reader or keyboard-only pass.
 - **Two sections answering the same question should be one.** Recently worked on replaced the old "Last N replies" section. Its history widened to 30 and subjects wrap rather than truncating.
@@ -272,9 +307,9 @@ python3 -m pytest scripts/tests/ -v
 
 The suite runs in seconds with no real Zendesk credentials, no network and no sibling `zendesk-mcp-server` checkout. `scripts/tests/conftest.py` puts a stand-in (`scripts/tests/stub_pkg/`) ahead of the real `zendesk_mcp_server` on `sys.path` and repoints every `_common.py` file path at a fresh temp directory per test, so no test touches the live `pending_drafts.json` or `personal_tasks.json`. Fixtures are all made up.
 
-**Covered:** the personal-task lifecycle and its shared validation; the atomic-write-under-flock guarantee for both stores (with real concurrent writer threads); the nav badge caches and their locks; form-body parsing edge cases; the standup pages and the workday recap; the measured-progress counting, history and `/__progress` wiring (including a real HTTP test); the seasonal-theme markup.
+**Covered:** the personal-task lifecycle and its shared validation; the atomic-write-under-flock guarantee for both stores (with real concurrent writer threads); the nav badge caches and their locks; form-body parsing edge cases; the standup pages and the workday recap; the measured-progress counting, history and `/__progress` wiring (including a real HTTP test); the seasonal-theme markup; the comment cache and stale-while-revalidate behavior, including that click-time checks stay live; the `/sla` chart series (gaps versus zeros) and markup; the `/overview` grouping by assignee and its page.
 
-**Not covered:** anything JS-driven in a real browser (the loading bar's drawing and the detail card, theme switching, the category auto-fill listener) and full end-to-end page rendering. Those are checked manually with Playwright during development. Promote, complete and quick-solve, which need a live-ish client, are not covered yet either.
+**Not covered:** anything JS-driven in a real browser (the loading bar's drawing and the detail card, the `/sla` charts' drawing, theme switching, the category auto-fill listener) and full end-to-end page rendering. Those are checked manually with Playwright during development. Promote, complete and quick-solve, which need a live-ish client, are not covered yet either.
 
 ## Troubleshooting
 
