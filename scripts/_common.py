@@ -12,6 +12,7 @@ import fcntl
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -2699,6 +2700,7 @@ SLA_DUE_SOON_PCT = 0.75  # flag when 75% of a threshold has elapsed
 # Rule keys exactly as the sibling sla-report-slack history stores them in each
 # day's "rules" dict; the /sla page's "Breaches by rule" chart plots these.
 SLA_RULE_KEYS = ("initial_response", "requester_wait", "no_update", "resolution_age")
+SLA_NOTE_MAX_CHARS = 300  # longest per-day "note" the /sla charts will show
 
 # Non-terminal statuses worth evaluating at all -- solved/closed tickets
 # are excluded up front (rather than fetched, evaluated, and short-
@@ -3011,6 +3013,57 @@ def cached_sla_breach_count() -> int:
         return sum(1 for item in cached["items"] if item.get("sla_status") == "breached")
 
 
+# People shown, in order, as cards on /overview. The first name is the person
+# running this tool ("you"): a ticket assigned to this tool's own Zendesk
+# account always lands on that card, even if its display name didn't resolve.
+# Names must match the Zendesk display names exactly (case-insensitive).
+OVERVIEW_PEOPLE = [
+    name.strip()
+    for name in os.getenv("OVERVIEW_PEOPLE", "Catherine Vee,Jesstin Rojas,Nekoashi Wolf,Ryan Bergsma").split(",")
+    if name.strip()
+]
+
+
+def group_tickets_by_person(items: list, people: list | None = None) -> dict:
+    """Groups fetch_sla_tickets' evaluated tickets by assignee for /overview.
+
+    Returns {"people": [{"name", "is_me", "items", "breached", "due_soon"}...]
+    (one per name in `people`, in order, empty list when they hold nothing),
+    "unassigned": [...], "others": int}. A ticket assigned to somebody not in
+    `people` is only counted in "others" so the page can say how many it left
+    out. Each list is oldest-created first; a ticket with no created_at sorts
+    last rather than first."""
+    names = list(OVERVIEW_PEOPLE if people is None else people)
+    cards = [{"name": n, "is_me": i == 0, "items": []} for i, n in enumerate(names)]
+    by_name = {}
+    for card in cards:
+        by_name.setdefault(card["name"].casefold(), card)
+    unassigned, others = [], 0
+    for item in items:
+        card = None
+        if item.get("already_ours") and cards:
+            card = cards[0]
+        elif item.get("assignee_name"):
+            card = by_name.get(str(item["assignee_name"]).strip().casefold())
+        if card is not None:
+            card["items"].append(item)
+        elif not item.get("assignee_id"):
+            unassigned.append(item)
+        else:
+            others += 1
+
+    def _oldest_first(item):
+        created = item.get("created_at") or ""
+        return (created == "", created, item.get("ticket_id") or 0)
+
+    for card in cards:
+        card["items"].sort(key=_oldest_first)
+        card["breached"] = sum(1 for i in card["items"] if i.get("sla_status") == "breached")
+        card["due_soon"] = sum(1 for i in card["items"] if i.get("sla_status") == "due_soon")
+    unassigned.sort(key=_oldest_first)
+    return {"people": cards, "unassigned": unassigned, "others": others}
+
+
 # Read-only look at the sibling sla-report-slack project's own daily-
 # snapshot history file -- NEVER written to from here. That file is
 # exclusively owned by that project's own GitHub Actions job, which
@@ -3071,6 +3124,13 @@ def sla_history_snapshot() -> dict:
 # Whose action items /standup/people opens on (any owner name in the notes
 # can be picked from the page; this is only the default).
 STANDUP_DEFAULT_PERSON = os.getenv("STANDUP_DEFAULT_PERSON", "Ryan").strip() or "Ryan"
+# The only people the /standup owner filters and the By person picker offer, in
+# this order, spelled as the standup notes spell them (first names; matching is
+# case-insensitive). Anyone else in the notes still appears on the pages, just
+# not as a filter choice. Comma-separated; override in .env.
+STANDUP_PEOPLE = [
+    n.strip() for n in os.getenv("STANDUP_PEOPLE", "Catherine,Jesstin,Nekoashi,Ryan").split(",") if n.strip()
+]
 STANDUP_DATA_FILE = Path(os.getenv(
     "STANDUP_DATA_FILE",
     str(Path.home() / "Desktop" / "git" / "meetingnotestool" / "dist" / "standup_data.json"),
@@ -3115,11 +3175,14 @@ def standup_snapshot() -> dict:
     return result
 
 
-# The one file this tool writes in meetingnotestool: your own calls on
-# standup action items and quiet topics. IDs, a decision and a timestamp
-# only -- no free text -- so nothing from the notes is copied into it.
-# meetingnotestool's build.py applies it permanently on its next build;
+# What this tool writes in meetingnotestool: your own calls on standup
+# action items and quiet topics, in decisions.json. IDs, a decision and a
+# timestamp only -- no free text -- so nothing from the notes is copied into
+# it. meetingnotestool's build.py applies it permanently on its next build;
 # apply_standup_decisions() below shows it on /standup immediately.
+# Beside it this tool also keeps decisions.log.jsonl (an append-only history
+# of every change, same IDs-only rule, which bulk Undo reads) and
+# decisions_backups/ (daily and pre-bulk copies of decisions.json).
 STANDUP_DECISIONS_FILE = Path(os.getenv(
     "STANDUP_DECISIONS_FILE",
     str(Path.home() / "Desktop" / "git" / "meetingnotestool" / "decisions.json"),
@@ -3152,13 +3215,109 @@ def _standup_known_ids(view: dict) -> tuple:
     return actions, topics
 
 
+STANDUP_BATCH_DECISIONS = {"done", "dropped"}
+STANDUP_BATCH_MAX_ITEMS = 1000
+STANDUP_BACKUPS_KEEP = 30
+_STANDUP_BATCH_ID_RE = re.compile(r"^\d{8}T\d{6}-[0-9a-f]{6}$")
+_NO_EXPECTATION = object()
+
+
+def standup_decisions_log_file() -> Path:
+    """Append-only history of every decision this tool writes, beside decisions.json."""
+    return STANDUP_DECISIONS_FILE.with_name("decisions.log.jsonl")
+
+
+def standup_decisions_backup_dir() -> Path:
+    return STANDUP_DECISIONS_FILE.parent / "decisions_backups"
+
+
+def _backup_standup_decisions(batch_id: str | None) -> None:
+    """Copies decisions.json aside before a write: one snapshot per day
+    (the state at the first write of that day) and, for a bulk change, one
+    more taken just before it. Keeps the newest STANDUP_BACKUPS_KEEP of
+    each kind. Best effort -- a failed backup never blocks a decision, the
+    log still records it. Called with the decisions lock held."""
+    if not STANDUP_DECISIONS_FILE.exists():
+        return
+    try:
+        folder = standup_decisions_backup_dir()
+        folder.mkdir(exist_ok=True)
+        today = datetime.now().strftime("%Y-%m-%d")
+        daily = folder / f"decisions-{today}.json"
+        if not daily.exists():
+            shutil.copy2(STANDUP_DECISIONS_FILE, daily)
+        if batch_id:
+            shutil.copy2(STANDUP_DECISIONS_FILE, folder / f"decisions-{today}-before-{batch_id}.json")
+        for pattern in ("decisions-????-??-??.json", "decisions-*-before-*.json"):
+            for old in sorted(folder.glob(pattern))[:-STANDUP_BACKUPS_KEEP]:
+                old.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _apply_standup_changes(changes: list, source: str, batch_id: str | None = None, skip_noops: bool = False,
+                           undo_of: str | None = None) -> list:
+    """The one place decisions.json is written. `changes` are dicts with
+    kind ("action"/"topic"), id, to (a decision, or "clear" to remove) and
+    optionally expect (the decision the item must currently have, else it is
+    left alone -- how a batch undo avoids overwriting a later call).
+
+    Under the decisions lock: back up, append one log line per real change
+    (IDs, old and new decision, time -- no text), then atomically write
+    decisions.json. The log goes first and is required: if it can't be
+    written nothing changes. Returns one dict per change: kind, id, from,
+    to, changed (False for a skipped no-op or a failed expectation) and
+    skipped (a failed expectation). Raises OSError when the log or
+    decisions.json can't be written."""
+    results = []
+    with open(STANDUP_DECISIONS_LOCK_FILE, "w") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        data = load_standup_decisions()
+        now = datetime.now().astimezone().isoformat(timespec="seconds")
+        pending = []
+        for ch in changes:
+            section = "actions" if ch["kind"] == "action" else "topics"
+            field = "outcome" if ch["kind"] == "action" else "decision"
+            current = (data[section].get(ch["id"]) or {}).get(field)
+            new = None if ch["to"] == "clear" else ch["to"]
+            entry = {"kind": ch["kind"], "id": ch["id"], "from": current, "to": new, "changed": True, "skipped": False}
+            expect = ch.get("expect", _NO_EXPECTATION)
+            if expect is not _NO_EXPECTATION and current != expect:
+                entry.update(changed=False, skipped=True)
+            elif skip_noops and current == new:
+                entry["changed"] = False
+            results.append(entry)
+            if entry["changed"]:
+                pending.append((section, field, entry))
+        if not pending:
+            return results
+        _backup_standup_decisions(batch_id)
+        lines = "".join(
+            json.dumps({"at": now, "source": source, "batch": batch_id, "undo_of": undo_of, "kind": e["kind"],
+                        "id": e["id"], "from": e["from"], "to": e["to"]}, ensure_ascii=False) + "\n"
+            for _, _, e in pending
+        )
+        with open(standup_decisions_log_file(), "a") as log:
+            log.write(lines)
+        for section, field, e in pending:
+            if e["to"] is None:
+                data[section].pop(e["id"], None)
+            else:
+                data[section][e["id"]] = {field: e["to"], "at": now}
+        for section in ("actions", "topics"):
+            data[section] = dict(sorted(data[section].items()))
+        _atomic_write_json(STANDUP_DECISIONS_FILE, data)
+    return results
+
+
 def record_standup_decision(kind: str, item_id: str, decision: str) -> tuple:
     """Sets (or with decision="clear", removes) your decision on one standup
     action item or quiet topic in decisions.json. Returns (ok, message,
     previous_decision_or_None) -- the previous value is what an Undo puts
     back. Refuses unknown kinds/decisions, IDs the current standup view
     doesn't contain, and a missing meetingnotestool checkout (it never
-    creates that project's folder)."""
+    creates that project's folder). Every write is logged and backed up
+    (see _apply_standup_changes)."""
     allowed = {"action": STANDUP_ACTION_DECISIONS, "topic": STANDUP_TOPIC_DECISIONS}.get(kind)
     if allowed is None or (decision not in allowed and decision != "clear"):
         return False, "That standup decision isn't one this page knows how to record.", None
@@ -3170,19 +3329,173 @@ def record_standup_decision(kind: str, item_id: str, decision: str) -> tuple:
         return False, "That standup item isn't in the current view (it may have changed since the page loaded). Nothing was recorded.", None
     if not STANDUP_DECISIONS_FILE.parent.is_dir():
         return False, f"No meetingnotestool folder at {STANDUP_DECISIONS_FILE.parent}, so nothing was recorded.", None
-    section = "actions" if kind == "action" else "topics"
-    field = "outcome" if kind == "action" else "decision"
-    with open(STANDUP_DECISIONS_LOCK_FILE, "w") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        data = load_standup_decisions()
-        previous = (data[section].get(item_id) or {}).get(field)
-        if decision == "clear":
-            data[section].pop(item_id, None)
-        else:
-            data[section][item_id] = {field: decision, "at": datetime.now().astimezone().isoformat(timespec="seconds")}
-        data[section] = dict(sorted(data[section].items()))
-        _atomic_write_json(STANDUP_DECISIONS_FILE, data)
-    return True, "", previous
+    try:
+        results = _apply_standup_changes([{"kind": kind, "id": item_id, "to": decision}], "single")
+    except OSError as exc:
+        return False, f"Could not save the decision ({exc}). Nothing was recorded.", None
+    return True, "", results[0]["from"]
+
+
+# --- bulk resolve --------------------------------------------------------------
+
+# (key, label, min days open, max days open or None). "60+" means more than 60.
+STANDUP_AGE_BUCKETS = (
+    ("week", "This week", 0, 7),
+    ("month", "8–30 days", 8, 30),
+    ("quarter", "31–60 days", 31, 60),
+    ("old", "60+ days", 61, None),
+)
+STANDUP_AGE_KEYS = tuple(b[0] for b in STANDUP_AGE_BUCKETS)
+
+
+def standup_action_age_days(action: dict, today=None):
+    """Whole days since the standup that raised the item; None if undated."""
+    today = today or datetime.now().date()
+    try:
+        return max((today - datetime.strptime(action.get("date") or "", "%Y-%m-%d").date()).days, 0)
+    except ValueError:
+        return None
+
+
+def standup_age_bucket(days) -> str | None:
+    if days is None:
+        return None
+    for key, _label, lo, hi in STANDUP_AGE_BUCKETS:
+        if days >= lo and (hi is None or days <= hi):
+            return key
+    return None
+
+
+def standup_age_counts(actions: list, today=None) -> dict:
+    """{bucket key: how many of these actions fall in it}."""
+    counts = {k: 0 for k in STANDUP_AGE_KEYS}
+    for a in actions:
+        key = standup_age_bucket(standup_action_age_days(a, today))
+        if key:
+            counts[key] += 1
+    return counts
+
+
+def standup_open_actions(view: dict) -> list:
+    """Every unresolved action item in the (decision-applied) view."""
+    return [a for a in (view.get("actions") or {}).values() if not a.get("resolution")]
+
+
+def standup_bulk_candidates(view: dict, owner: str = "", age: str = "", q: str = "", topic_key: str = "",
+                            closed_topics: bool = False, today=None) -> list:
+    """The open action items a bulk resolve would cover, oldest first within
+    each owner: filtered by exact owner name, age bucket, a text search over
+    the task and its topic, one topic, and/or "sits under a done or dropped
+    topic". An unknown age key matches nothing, so a hand-edited link never
+    widens the set."""
+    if age and age not in STANDUP_AGE_KEYS:
+        return []
+    topics = view.get("topics") or {}
+    out = []
+    for a in standup_open_actions(view):
+        if owner and a.get("owner") != owner:
+            continue
+        if age and standup_age_bucket(standup_action_age_days(a, today)) != age:
+            continue
+        if q and q.lower() not in ((a.get("task") or "") + " " + (a.get("topic") or "")).lower():
+            continue
+        if topic_key and a.get("topic_key") != topic_key:
+            continue
+        if closed_topics and (topics.get(a.get("topic_key")) or {}).get("status") not in ("done", "dropped"):
+            continue
+        out.append(a)
+    out.sort(key=lambda a: (a.get("owner") or "~", a.get("date") or "", a.get("id") or ""))
+    return out
+
+
+def record_standup_batch(ids: list, decision: str) -> dict:
+    """Marks many open action items done or dropped in one logged write
+    (one batch id, so one Undo reverses all of it). Unlike a single click,
+    this is allowed on anyone's items -- the confirmation page lists every
+    one first. IDs that aren't open action items in the current view are
+    skipped, not written. Returns {ok, message, batch, applied, skipped}."""
+    result = {"ok": False, "message": "", "batch": None, "applied": 0, "skipped": 0}
+    if decision not in STANDUP_BATCH_DECISIONS:
+        result["message"] = "Bulk changes can only mark items done or dropped."
+        return result
+    ids = list(dict.fromkeys(i for i in ids if isinstance(i, str) and i))
+    if not ids or len(ids) > STANDUP_BATCH_MAX_ITEMS:
+        result["message"] = "Nothing was selected." if not ids else f"Too many items at once (limit {STANDUP_BATCH_MAX_ITEMS})."
+        return result
+    view = standup_view()["view"]
+    if not view:
+        result["message"] = "Standup data isn't available, so nothing was recorded."
+        return result
+    if not STANDUP_DECISIONS_FILE.parent.is_dir():
+        result["message"] = f"No meetingnotestool folder at {STANDUP_DECISIONS_FILE.parent}, so nothing was recorded."
+        return result
+    open_ids = {a["id"] for a in standup_open_actions(view) if a.get("id")}
+    eligible = [i for i in ids if i in open_ids]
+    result["skipped"] = len(ids) - len(eligible)
+    if not eligible:
+        result["message"] = "None of the selected items are open any more, so nothing was recorded."
+        return result
+    batch_id = f"{datetime.now():%Y%m%dT%H%M%S}-{uuid.uuid4().hex[:6]}"
+    try:
+        done = _apply_standup_changes([{"kind": "action", "id": i, "to": decision} for i in eligible],
+                                      "batch", batch_id=batch_id, skip_noops=True)
+    except OSError as exc:
+        result["message"] = f"Could not save the decisions ({exc}). Nothing was recorded."
+        return result
+    result.update(ok=True, batch=batch_id, applied=sum(1 for d in done if d["changed"]))
+    return result
+
+
+def undo_standup_batch(batch_id: str) -> dict:
+    """Reverses one bulk change using the log: each item goes back to what it
+    was before, unless it has been changed again since (those are left
+    alone and counted). Returns {ok, message, restored, skipped}."""
+    result = {"ok": False, "message": "", "restored": 0, "skipped": 0}
+    if not _STANDUP_BATCH_ID_RE.match(batch_id or ""):
+        result["message"] = "That isn't a bulk change this page knows about."
+        return result
+    entries = []
+    try:
+        with open(standup_decisions_log_file()) as log:
+            for line in log:
+                try:
+                    e = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(e, dict) and e.get("batch") == batch_id and e.get("source") == "batch":
+                    entries.append(e)
+    except OSError:
+        pass
+    if not entries:
+        result["message"] = "That bulk change isn't in the decision log, so it can't be undone from here."
+        return result
+    changes = [{"kind": e["kind"], "id": e["id"], "to": e.get("from") or "clear", "expect": e.get("to")} for e in entries]
+    try:
+        done = _apply_standup_changes(changes, "undo", undo_of=batch_id)
+    except OSError as exc:
+        result["message"] = f"Could not undo ({exc}). Nothing was changed."
+        return result
+    result.update(ok=True, restored=sum(1 for d in done if d["changed"]), skipped=sum(1 for d in done if d["skipped"]))
+    return result
+
+
+def standup_attention(view: dict, today=None) -> dict:
+    """What the Needs attention page shows, from the decision-applied view:
+    open items under done/dropped topics; quiet topics you haven't decided;
+    open items with no real owner (Unassigned/Group/blank); open items the
+    notes flag with a "check"; and how many open items are over 30 days old,
+    per age bucket."""
+    topics = view.get("topics") or {}
+    open_actions = standup_open_actions(view)
+    by_age = lambda a: (a.get("date") or "", a.get("id") or "")
+    return {
+        "closed_topic_items": sorted((a for a in open_actions
+                                      if (topics.get(a.get("topic_key")) or {}).get("status") in ("done", "dropped")), key=by_age),
+        "quiet_topics": [t for k in view.get("quiet_topics") or [] if (t := topics.get(k)) and not t.get("decision")],
+        "no_owner": sorted((a for a in open_actions if (a.get("owner") or "Unassigned") in ("Unassigned", "Group")), key=by_age),
+        "flagged": sorted((a for a in open_actions if a.get("check")), key=by_age),
+        "stale_counts": {k: v for k, v in standup_age_counts(open_actions, today).items() if k in ("quarter", "old")},
+    }
 
 
 def apply_standup_decisions(view: dict, decisions: dict) -> dict:
@@ -3361,7 +3674,19 @@ def sla_chart_data(history: dict) -> dict:
         for rule_key in SLA_RULE_KEYS
     }
 
+    # Optional hand-written "note" on a day's snapshot (for example why a stretch
+    # looks different). Only non-empty strings count, trimmed and capped so one
+    # odd value can't swamp the page; consecutive days with the same text are
+    # joined into one band client-side.
+    def _note(e):
+        text = e.get("note")
+        if not isinstance(text, str):
+            return None
+        text = text.strip()
+        return text[:SLA_NOTE_MAX_CHARS] if text else None
+
     return {
+        "notes": [_note(e) for e in entries],
         "resp_avg": _series("avg_resp_hrs"),
         "resp_med": _series("med_resp_hrs"),
         "resp_p90": _series("resp_p90_hrs"),

@@ -66,6 +66,8 @@ def isolated_output_dir(tmp_path, monkeypatch):
     # point it at a nonexistent tmp path so no test ever reads real
     # standup notes (and the Standup nav badge starts cold like the rest).
     monkeypatch.setattr(_common, "STANDUP_DATA_FILE", tmp_path / "standup_data.json")
+    # The made-up owners the standup fixtures use, not the real filter list.
+    monkeypatch.setattr(_common, "STANDUP_PEOPLE", ["Alex", "Sam"])
     monkeypatch.setattr(_common, "_standup_cache", {})
     monkeypatch.setattr(_common, "STANDUP_DECISIONS_FILE", tmp_path / "decisions.json")
     monkeypatch.setattr(_common, "STANDUP_DECISIONS_LOCK_FILE", tmp_path / "standup_decisions.json.lock")

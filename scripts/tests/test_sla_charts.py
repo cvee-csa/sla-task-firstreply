@@ -91,3 +91,42 @@ def test_js_has_no_stray_python_escapes():
 def test_page_renders_with_empty_history():
     out = review_server._sla_charts_html({"entries": [], "error": "none yet", "as_of": None})
     assert "none yet" in out and "sla-resp-chart" not in out
+
+
+# --- notes -------------------------------------------------------------------
+
+def test_notes_series_keeps_only_clean_strings():
+    data = _common.sla_chart_data(_history([
+        _entry("2026-01-01"),
+        _entry("2026-01-02", note="  Out sick, working remotely  "),
+        _entry("2026-01-03", note="   "),
+        _entry("2026-01-04", note=["not", "text"]),
+        _entry("2026-01-05", note="x" * 1000),
+    ]))
+    assert data["notes"][:4] == [None, "Out sick, working remotely", None, None]
+    assert data["notes"][4] == "x" * _common.SLA_NOTE_MAX_CHARS
+    assert len(data["notes"]) == 5
+
+
+def test_notes_ride_in_the_embedded_json_and_cannot_close_the_script():
+    html = review_server._sla_charts_html(_history([_entry("2026-01-01", note="a </script> note")]))
+    m = re.search(r'<script type="application/json" id="sla-chart-data">(.*?)</script>', html, re.S)
+    assert json.loads(m.group(1))["notes"] == ["a </script> note"]
+    assert "a </script> note" not in m.group(1)
+
+
+def test_notes_markup_plugin_and_tooltip_wiring():
+    html = review_server._sla_charts_html(_history([_entry("2026-01-01")]))
+    assert 'id="sla-notes"' in html
+    assert "id: 'slaNotes'" in html and "buildNoteBands" in html and "renderNotesList" in html
+    # every chart registers the plugin and passes it the bands
+    assert html.count("plugins: [notesPlugin]") == 4
+    assert html.count("slaNotes: noteOpts") == 4
+    assert html.count("noteLine(") >= 5
+    # the note text is put in the page with textContent, never innerHTML
+    assert "document.createTextNode(b.text)" in html
+
+
+def test_page_hint_mentions_the_note_field():
+    page = review_server._render_sla_page({}, _history([_entry("2026-01-01")])).decode()
+    assert "&quot;note&quot; field" in page
