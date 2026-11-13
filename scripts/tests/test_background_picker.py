@@ -60,3 +60,35 @@ def test_glass_panels_use_theme_tokens_and_keep_the_columns_accent_edge():
     assert "border-left" not in block and "border: " not in block         # the accent's left edge is not overwritten
     for sel in (".security-panel", ".ticket", ".filter-box"):
         assert sel in block
+
+
+def _scripts():
+    import re
+    return re.findall(r"<script>(.*?)</script>", _page_html(), re.S)
+
+
+def test_every_inline_script_is_valid_javascript(tmp_path):
+    """A stray quote in one inline script silently disables the whole picker
+    (it happened once), so syntax-check them all when node is available."""
+    import shutil
+    import subprocess
+    node = shutil.which("node")
+    if not node:
+        import pytest
+        pytest.skip("node is not installed")
+    for i, src in enumerate(_scripts()):
+        f = tmp_path / f"s{i}.js"
+        f.write_text(src)
+        result = subprocess.run([node, "--check", str(f)], capture_output=True, text=True)
+        assert result.returncode == 0, f"script {i}: {result.stderr[:300]}"
+
+
+def test_a_toast_confirms_the_upload_and_says_whether_re_uploading_is_needed():
+    out = _page_html()
+    assert 'id="bg-toast"' in out and 'role="status"' in out and 'id="bg-toast-close"' in out
+    script = out.split("Background-image picker")[1].split("</script>")[0]
+    # read back after saving, so the message reflects what was really stored
+    assert "localStorage.getItem('csa-bg-image') === dataUrl" in script
+    assert "you will not need to upload it again after closing the page" in script
+    assert "You will need to upload it again if the page is closed or reloaded" in script
+    assert "Background image removed" in script

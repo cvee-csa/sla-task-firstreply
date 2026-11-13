@@ -736,6 +736,19 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
   if (!file || !veil || !removeBtn) { return; }
   var MAX_EDGE = 1920;
   function say(text) { if (status) { status.textContent = text; } }
+  var toastEl = document.getElementById('bg-toast');
+  var toastText = document.getElementById('bg-toast-text');
+  var toastTimer = null;
+  function toast(text, warn) {
+    if (!toastEl || !toastText) { return; }
+    toastText.textContent = text;
+    toastEl.classList.toggle('bg-toast-warn', !!warn);
+    toastEl.hidden = false;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function() { toastEl.hidden = true; }, warn ? 14000 : 10000);
+  }
+  var toastClose = document.getElementById('bg-toast-close');
+  if (toastClose) { toastClose.addEventListener('click', function() { toastEl.hidden = true; }); }
   function has() { return root.classList.contains('has-bg-image'); }
   function sync() {
     removeBtn.disabled = !has();
@@ -765,12 +778,18 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
       URL.revokeObjectURL(url);
       var dataUrl = canvas.toDataURL('image/jpeg', 0.82);
       var v = parseInt(veil.value, 10); if (isNaN(v)) { v = 60; }
+      var saved = false;
       try {
         localStorage.setItem('csa-bg-image', dataUrl);
         localStorage.setItem('csa-bg-veil', String(v));
-        say('Background set. It is remembered in this browser.');
-      } catch (e) {
-        say('Background set for this page only: the image is too large for this browser to remember. Try a smaller one.');
+        saved = localStorage.getItem('csa-bg-image') === dataUrl;       // read it back: only a stored image survives closing the page
+      } catch (e) {}
+      if (saved) {
+        say('Background saved in this browser.');
+        toast('Background image set. It is saved in this browser, so you will not need to upload it again after closing the page. Clearing the site data for this browser, or using a private window, will remove it.', false);
+      } else {
+        say('Background set for this page only.');
+        toast('Background image set, but it could not be saved in this browser (the image may be too large, or storage is unavailable). You will need to upload it again if the page is closed or reloaded.', true);
       }
       apply(dataUrl, v);
     };
@@ -787,6 +806,7 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
     root.style.removeProperty('--csa-bg-image');
     root.style.removeProperty('--csa-bg-veil');
     say('Background removed.');
+    toast('Background image removed. The theme background is back.', false);
     sync();
   });
   sync();
@@ -2087,6 +2107,17 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
   .bg-picker-veil input {{ flex: 1; min-width: 0; }}
   .bg-picker-remove:disabled {{ opacity: 0.5; cursor: default; }}
   .bg-picker-panel .meta {{ margin: 0; }}
+  /* Confirmation after choosing or removing a background image. */
+  .bg-toast {{
+    position: fixed; right: 1.25rem; bottom: 1.25rem; z-index: 50; max-width: min(26rem, calc(100vw - 2.5rem));
+    display: flex; align-items: flex-start; gap: 0.75rem; padding: 0.8rem 0.9rem;
+    background: var(--card-bg); color: var(--text); border: 1px solid var(--card-border);
+    border-left: 4px solid var(--accent); border-radius: 12px; font-size: 0.85rem; line-height: 1.4;
+    box-shadow: 0 10px 34px var(--glass-shadow, rgba(0,0,0,0.2));
+  }}
+  .bg-toast[hidden] {{ display: none; }}
+  .bg-toast-warn {{ border-left-color: var(--flag-alert-color-urgent, #b3261e); }}
+  .bg-toast-close {{ background: transparent; border: none; box-shadow: none; color: var(--muted); font-size: 1.1rem; line-height: 1; padding: 0 0.2rem; cursor: pointer; }}
   .brand-controls-row {{
     display: flex; align-items: center; justify-content: flex-end;
     flex-wrap: wrap; gap: 0.5rem 0.75rem; margin-top: 0.35rem;
@@ -2746,6 +2777,10 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
   </div>
 </div>
 {banner_html}
+<div id="bg-toast" class="bg-toast" role="status" aria-live="polite" hidden>
+  <span id="bg-toast-text"></span>
+  <button type="button" id="bg-toast-close" class="bg-toast-close" aria-label="Dismiss">&times;</button>
+</div>
 <main>
 {body}
 </main>
