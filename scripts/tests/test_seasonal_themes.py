@@ -42,8 +42,8 @@ def test_scripts_know_the_new_modes():
 
 def test_seasonal_themes_force_dark_color_scheme():
     out = _page()
-    assert "colorScheme = (t === 'dark' || t === 'halloween' || t === 'christmas') ? 'dark'" in out
-    assert "colorScheme = (mode === 'dark' || mode === 'halloween' || mode === 'christmas') ? 'dark'" in out
+    assert "colorScheme = (t === 'dark' || t === 'halloween' || t === 'christmas' || t === 'galaxy') ? 'dark'" in out
+    assert "colorScheme = (mode === 'dark' || mode === 'halloween' || mode === 'christmas' || mode === 'galaxy') ? 'dark'" in out
 
 
 def test_header_glyphs_present_and_hidden_by_default():

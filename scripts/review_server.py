@@ -71,6 +71,7 @@ LOGO_DATA_URI = _load_logo_data_uri()
 # same spirit rather than looking like an oversight. Loaded the same
 # graceful-degradation way as LOGO_DATA_URI above: a missing file just means
 # this second <img> never renders, not a broken page.
+GALAXY_BG_PATH = Path(__file__).resolve().parent / "assets" / "galaxy-bg.jpg"
 LOGO_B68FBF_PATH = Path(__file__).resolve().parent / "assets" / "b68fbf-logo.png"
 
 
@@ -294,6 +295,7 @@ _ICONS = {
     # color, not a concept, so it renders as an actual color swatch (see
     # .theme-swatch) instead of a line-icon standing in for one.
     "sun": '<circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>',
+    "galaxy": '<path d="M12 12.4c-.5-.9.2-1.9 1.2-1.9 1.4 0 2.2 1.6 1.5 2.9-1 1.9-3.6 2.3-5.4 1-2.3-1.6-2.5-5-.5-7 2.6-2.6 7-2 9 1.1"></path><path d="M12 12.4c.5.9-.2 1.9-1.2 1.9-1.4 0-2.2-1.6-1.5-2.9"></path><path d="M16.2 17.9c-3.3 2.6-8.3 1.8-10.8-1.7"></path><path d="M3.4 8.3C4.6 5.2 7.4 3.1 10.6 2.7"></path>',
     "moon": '<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>',
     "monitor": '<rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line>',
     # Seasonal-theme glyphs (Halloween / Christmas): the toggle buttons and
@@ -533,7 +535,7 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
     # manual override for the two explicit non-system modes anyway.
     theme_color_meta_html = '<meta name="theme-color" id="theme-color-meta" content="#1a56c4">'
     # Applies a manually-forced theme (if one was ever picked via the Auto /
-    # Light / Dark control below) to <html> as early as possible -- before
+    # Dark / Galaxy / ... control below) to <html> as early as possible -- before
     # the stylesheet paints anything -- so a forced choice never flashes the
     # OS-default theme first. Reads localStorage directly rather than
     # anything server-side: the preference is a per-browser UI setting, not
@@ -543,9 +545,9 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
 (function() {
   try {
     var t = localStorage.getItem('csa-theme');
-    if (t === 'light' || t === 'dark' || t === 'b68fbf' || t === 'halloween' || t === 'christmas') {
+    if (t === 'dark' || t === 'b68fbf' || t === 'halloween' || t === 'christmas' || t === 'galaxy') {
       document.documentElement.classList.add('theme-' + t);
-      document.documentElement.style.colorScheme = (t === 'dark' || t === 'halloween' || t === 'christmas') ? 'dark' : 'light';
+      document.documentElement.style.colorScheme = (t === 'dark' || t === 'halloween' || t === 'christmas' || t === 'galaxy') ? 'dark' : 'light';
     }
     var favicon = document.getElementById('favicon');
     if (favicon) {
@@ -555,7 +557,7 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
     var themeColorMeta = document.getElementById('theme-color-meta');
     if (themeColorMeta) {
       var isDark = t === 'dark' || (!t && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
-      themeColorMeta.content = t === 'b68fbf' ? '#865392' : t === 'halloween' ? '#ff8a3d' : t === 'christmas' ? '#4fd17f' : (isDark ? '#6fa3ef' : '#1a56c4');
+      themeColorMeta.content = t === 'b68fbf' ? '#865392' : t === 'halloween' ? '#ff8a3d' : t === 'christmas' ? '#4fd17f' : t === 'galaxy' ? '#f09a7a' : (isDark ? '#6fa3ef' : '#1a56c4');
     }
   } catch (e) {}
 })();
@@ -692,10 +694,10 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
 <script>
 (function() {
   function applyTheme(mode) {
-    document.documentElement.classList.remove('theme-light', 'theme-dark', 'theme-b68fbf', 'theme-halloween', 'theme-christmas');
-    if (mode === 'light' || mode === 'dark' || mode === 'b68fbf' || mode === 'halloween' || mode === 'christmas') {
+    document.documentElement.classList.remove('theme-dark', 'theme-b68fbf', 'theme-halloween', 'theme-christmas', 'theme-galaxy');
+    if (mode === 'dark' || mode === 'b68fbf' || mode === 'halloween' || mode === 'christmas' || mode === 'galaxy') {
       document.documentElement.classList.add('theme-' + mode);
-      document.documentElement.style.colorScheme = (mode === 'dark' || mode === 'halloween' || mode === 'christmas') ? 'dark' : 'light';
+      document.documentElement.style.colorScheme = (mode === 'dark' || mode === 'halloween' || mode === 'christmas' || mode === 'galaxy') ? 'dark' : 'light';
     } else {
       document.documentElement.style.colorScheme = '';
     }
@@ -710,7 +712,7 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
     var themeColorMeta = document.getElementById('theme-color-meta');
     if (themeColorMeta) {
       var isDark = mode === 'dark' || (mode === 'system' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
-      themeColorMeta.content = mode === 'b68fbf' ? '#865392' : mode === 'halloween' ? '#ff8a3d' : mode === 'christmas' ? '#4fd17f' : (isDark ? '#6fa3ef' : '#1a56c4');
+      themeColorMeta.content = mode === 'b68fbf' ? '#865392' : mode === 'halloween' ? '#ff8a3d' : mode === 'christmas' ? '#4fd17f' : mode === 'galaxy' ? '#f09a7a' : (isDark ? '#6fa3ef' : '#1a56c4');
     }
   }
   window.setTheme = function(mode) {
@@ -722,7 +724,7 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
   };
   var stored = null;
   try { stored = localStorage.getItem('csa-theme'); } catch (e) {}
-  applyTheme(['light', 'dark', 'b68fbf', 'halloween', 'christmas'].indexOf(stored) >= 0 ? stored : 'system');
+  applyTheme(['dark', 'b68fbf', 'halloween', 'christmas', 'galaxy'].indexOf(stored) >= 0 ? stored : 'system');
 })();
 </script>
 <script>
@@ -1401,53 +1403,11 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
     --sla-ok-bg: rgba(34,197,94,0.14);
     --sla-ok-border: rgba(34,197,94,0.4);
   }}
-  html.theme-light {{
-    --bg: #ffffff;
-    --bg-translucent: rgba(255,255,255,0.82);
-    --glass-border: rgba(15,23,42,0.08);
-    --glass-shine: rgba(255,255,255,0.55);
-    --glass-shadow: rgba(15,23,42,0.10);
-    --glass-chip-bg: rgba(255,255,255,0.5);
-    --text: #1a1a1a;
-    --muted: #666666;
-    --muted-2: #9a9a9a;
-    --divider: #e5e5e5;
-    --card-bg: #ffffff;
-    --card-border: #e2e2e5;
-    --card-shadow: 0 1px 3px rgba(0,0,0,0.08), 0 1px 2px rgba(0,0,0,0.04);
-    --input-bg: #ffffff;
-    --input-border: #cccccc;
-    --excerpt-bg: #f7f7f7;
-    --excerpt-border: #cccccc;
-    --link: #1a56c4;
-    --accent: #1a56c4;
-    --focus-ring: rgba(26,86,196,0.35);
-    --btn-approve: #0e7490;       --btn-approve-hover: #0b5c72;
-    --btn-internal: #6d4aa8;      --btn-internal-hover: #59397f;
-    --btn-remove: #64748b;        --btn-remove-hover: #52606d;
-    --btn-reject: #c2622a;        --btn-reject-hover: #a34f1f;
-    --btn-refresh: #1a56c4;       --btn-refresh-hover: #15408f;
-    --btn-claim: #7d5a0a;         --btn-claim-hover: #664a08;
-    --banner-bg: #eaf3fb;
-    --banner-border: #a9cdf0;
-    --warning-bg: #fdf3e8;
-    --warning-border: #eac48a;
-    --flag-color: #b45309;
-    --flag-alert-color: #9a3412;
-    --flag-alert-color-urgent: #b91c1c;
-    --badge-bg: #666666;
-    --overview-accent-tasks: #0e7490;
-    --overview-accent-discussion: #6d4aa8;
-    --overview-accent-security: #8a6d1a;
-    --sla-ok-color: #1a6e2e;
-    --sla-ok-bg: #e6f5ec;
-    --sla-ok-border: #90d0a0;
-  }}
   /* "B68FBF" theme: a fourth manual option alongside Auto/Light/Dark, built
      entirely from the literal hex color B68FBF and shades/tints of it
      (H=288.75 deg in HSL), rather than the CSA-blue accent used everywhere
      else in this file. Same variable set, same override mechanism as
-     html.theme-dark/html.theme-light above -- just a different source
+     html.theme-dark above -- just a different source
      palette. Backgrounds/text/borders/links/focus-ring are all derived from
      B68FBF itself (H=288.75). The six buttons use a complementary two-hue
      pair instead of pure single-hue monochrome: three (Remove, Approve,
@@ -1607,12 +1567,73 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
     --sla-ok-bg: rgba(34,197,94,0.14);
     --sla-ok-border: rgba(34,197,94,0.4);
   }}
+  /* "Galaxy" theme: replaces the old forced-Light option. Palette sampled from
+     the bundled galaxy photo (assets/galaxy-bg.jpg, served at /assets/galaxy-bg.jpg;
+     NGC 7253 / Arp 278, credit in the README): blue-black space, the coral star-forming
+     lanes as the accent, and the blue diffraction spikes, cyan stars and orange stars
+     as the button hues. Dark scheme, so alert/SLA tokens follow html.theme-dark. */
+  html.theme-galaxy {{
+    --bg: #090b10;
+    --bg-translucent: rgba(9,11,16,0.74);
+    --glass-border: rgba(170,200,235,0.18);
+    --glass-shine: rgba(220,235,255,0.10);
+    --glass-shadow: rgba(0,0,0,0.55);
+    --glass-chip-bg: rgba(255,255,255,0.06);
+    --text: #eaeef3;
+    --muted: #a9b4c0;
+    --muted-2: #7f8b98;
+    --divider: rgba(170,200,235,0.12);
+    --card-bg: #11151c;
+    --card-border: rgba(170,200,235,0.13);
+    --card-shadow: 0 1px 3px rgba(0,0,0,0.55), 0 1px 2px rgba(0,0,0,0.4);
+    --input-bg: #171c24;
+    --input-border: rgba(170,200,235,0.24);
+    --excerpt-bg: #141922;
+    --excerpt-border: rgba(170,200,235,0.18);
+    --link: #8cc4f2;
+    --accent: #f09a7a;
+    --on-accent: #1f0d07;
+    --focus-ring: rgba(240,154,122,0.45);
+    --btn-approve: #1d7f88;     --btn-approve-hover: #17666e;  /* cyan stars */
+    --btn-internal: #6a62b0;    --btn-internal-hover: #554e92; /* blue-violet haze */
+    --btn-remove: #5d6b7a;      --btn-remove-hover: #4a5663;   /* slate space */
+    --btn-reject: #c04e3d;      --btn-reject-hover: #a03e30;   /* coral lanes */
+    --btn-refresh: #2f72b8;     --btn-refresh-hover: #255b94;  /* blue spikes */
+    --btn-claim: #a8601f;       --btn-claim-hover: #8a4e18;    /* orange stars */
+    --banner-bg: rgba(240,154,122,0.12);
+    --banner-border: rgba(240,154,122,0.38);
+    --warning-bg: rgba(201,106,52,0.14);
+    --warning-border: rgba(201,106,52,0.4);
+    --flag-color: #dba15a;
+    --flag-alert-color: #e28a5e;
+    --flag-alert-color-urgent: #e2604a;
+    --badge-bg: #3b4553;
+    --overview-accent-tasks: #6fb6f0;
+    --overview-accent-discussion: #b0a4f0;
+    --overview-accent-security: #f0bf5a;
+    --sla-ok-color: #4ade80;
+    --sla-ok-bg: rgba(34,197,94,0.14);
+    --sla-ok-border: rgba(34,197,94,0.4);
+  }}
+  /* The galaxy photo is the page background unless the user picked their own
+     image (html.has-bg-image wins, see below). A flat veil keeps text legible
+     over the bright core. */
+  html.theme-galaxy:not(.has-bg-image) {{
+    background-color: var(--bg);
+    background-image: linear-gradient(rgba(5,7,12,0.38), rgba(5,7,12,0.38)), url(/assets/galaxy-bg.jpg);
+    background-size: cover; background-position: center; background-attachment: fixed;
+  }}
+  html.theme-galaxy body {{ background: transparent; }}
+  /* CC BY 4.0 credit for the photo: shown only while the photo is the background. */
+  .galaxy-credit {{ display: none; margin: 0.5rem 0 0; font-size: 0.68rem; line-height: 1.35; color: var(--muted); text-align: center; }}
+  .galaxy-credit a {{ color: var(--link); }}
+  html.theme-galaxy:not(.has-bg-image) .galaxy-credit {{ display: block; }}
   /* Filled-accent "active" pills use the seasonal themes' dark --on-accent
      text instead of white (bright accents on dark backgrounds). */
-  html.theme-halloween .sla-range-btn.active, html.theme-christmas .sla-range-btn.active,
-  html.theme-halloween .theme-toggle button.active, html.theme-christmas .theme-toggle button.active,
-  html.theme-halloween .top-nav-link.active, html.theme-christmas .top-nav-link.active,
-  html.theme-halloween .top-nav-link.active:hover, html.theme-christmas .top-nav-link.active:hover {{ color: var(--on-accent); }}
+  html.theme-halloween .sla-range-btn.active, html.theme-christmas .sla-range-btn.active, html.theme-galaxy .sla-range-btn.active,
+  html.theme-halloween .theme-toggle button.active, html.theme-christmas .theme-toggle button.active, html.theme-galaxy .theme-toggle button.active,
+  html.theme-halloween .top-nav-link.active, html.theme-christmas .top-nav-link.active, html.theme-galaxy .top-nav-link.active,
+  html.theme-halloween .top-nav-link.active:hover, html.theme-christmas .top-nav-link.active:hover, html.theme-galaxy .top-nav-link.active:hover {{ color: var(--on-accent); }}
   html {{ background: var(--bg); }}
   body {{ font-family: -apple-system, system-ui, sans-serif; max-width: 1180px; margin: 2rem auto; padding: 0 1rem; color: var(--text); background: var(--bg); }}
   /* Wider content column for the card-grid pages (/security, /flagged,
@@ -2057,41 +2078,41 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
   /* Liquid glass: while a background image is set, cards, columns, filter
      boxes and inputs turn into translucent, blurred panels with a specular
      top edge, larger radii and a soft shadow, so the image reads through
-     them. Every color comes from the active theme's own tokens (so all six
-     themes work), and the whole block needs backdrop-filter; without it the
+     them (also always on in the Galaxy theme). Every color comes from the
+     active theme's own tokens (so every theme works), and the whole block needs backdrop-filter; without it the
      panels stay the solid theme cards and only the veiled image changes. */
   @supports (backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px)) {{
-    html.has-bg-image {{
+    :is(html.has-bg-image, html.theme-galaxy) {{
       --lg-card: color-mix(in srgb, var(--card-bg) 46%, transparent);
       --lg-input: color-mix(in srgb, var(--input-bg) 50%, transparent);
       --lg-sheen: linear-gradient(135deg, var(--glass-shine) 0%, transparent 42%);
       --lg-blur: blur(22px) saturate(180%) brightness(1.04);
     }}
-    html.has-bg-image :is(.security-panel, .ticket, .sla-chart-wrap, .sla-drilldown, .bg-picker-panel) {{
+    :is(html.has-bg-image, html.theme-galaxy) :is(.security-panel, .ticket, .sla-chart-wrap, .sla-drilldown, .bg-picker-panel) {{
       background: var(--lg-sheen), var(--lg-card);
       -webkit-backdrop-filter: var(--lg-blur); backdrop-filter: var(--lg-blur);
       border-top-color: var(--glass-border); border-right-color: var(--glass-border); border-bottom-color: var(--glass-border);
       border-radius: 22px;
       box-shadow: inset 0 1px 0 var(--glass-shine), inset 1px 0 0 var(--glass-shine), 0 10px 36px var(--glass-shadow);
     }}
-    html.has-bg-image :is(.filter-box, .stat-chip, .sla-range-btn, .bg-picker summary, .bg-picker-file) {{
+    :is(html.has-bg-image, html.theme-galaxy) :is(.filter-box, .stat-chip, .sla-range-btn, .bg-picker summary, .bg-picker-file) {{
       background: var(--lg-sheen), var(--lg-input);
       -webkit-backdrop-filter: blur(12px) saturate(160%); backdrop-filter: blur(12px) saturate(160%);
       border-color: var(--glass-border);
       box-shadow: inset 0 1px 0 var(--glass-shine);
     }}
-    html.has-bg-image :is(input[type=search], input[type=text], input[type=number], select, textarea) {{
+    :is(html.has-bg-image, html.theme-galaxy) :is(input[type=search], input[type=text], input[type=number], select, textarea) {{
       background: var(--lg-input);
       -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
       border-color: var(--glass-border);
     }}
-    html.has-bg-image .sla-range-btn.active {{ background: var(--accent); }}
-    html.has-bg-image .mini-ticket {{ border-bottom-color: var(--glass-border); }}
-    html.has-bg-image .mini-ticket:hover {{ background: var(--glass-chip-bg); }}
+    :is(html.has-bg-image, html.theme-galaxy) .sla-range-btn.active {{ background: var(--accent); }}
+    :is(html.has-bg-image, html.theme-galaxy) .mini-ticket {{ border-bottom-color: var(--glass-border); }}
+    :is(html.has-bg-image, html.theme-galaxy) .mini-ticket:hover {{ background: var(--glass-chip-bg); }}
     /* Loose text sits straight on the image: a soft halo in the theme's own
        background color keeps it readable, and is switched off inside panels. */
-    html.has-bg-image :is(h2, p.meta, .sla-history-note) {{ text-shadow: 0 0 10px var(--bg), 0 0 3px var(--bg); }}
-    html.has-bg-image :is(.security-panel, .ticket, .sla-chart-wrap, .sla-drilldown, .bg-picker-panel) :is(h2, h3, p.meta, .sla-history-note) {{ text-shadow: none; }}
+    :is(html.has-bg-image, html.theme-galaxy) :is(h2, p.meta, .sla-history-note) {{ text-shadow: 0 0 10px var(--bg), 0 0 3px var(--bg); }}
+    :is(html.has-bg-image, html.theme-galaxy) :is(.security-panel, .ticket, .sla-chart-wrap, .sla-drilldown, .bg-picker-panel) :is(h2, h3, p.meta, .sla-history-note) {{ text-shadow: none; }}
   }}
   .bg-picker {{ font-size: 0.78rem; color: var(--muted); }}
   .brand-footer .bg-picker {{ margin-top: 0.6rem; }}
@@ -2744,7 +2765,7 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
   <div class="brand-controls-row">
     <div class="theme-toggle" role="group" aria-label="Theme">
       <button type="button" data-theme="system" title="Auto (match system)" onclick="setTheme('system')">{_icon("monitor", "icon-sm")}</button>
-      <button type="button" data-theme="light" title="Light" onclick="setTheme('light')">{_icon("sun", "icon-sm")}</button>
+      <button type="button" data-theme="galaxy" title="Galaxy" onclick="setTheme('galaxy')">{_icon("galaxy", "icon-sm")}</button>
       <button type="button" data-theme="dark" title="Dark" onclick="setTheme('dark')">{_icon("moon", "icon-sm")}</button>
       <button type="button" data-theme="b68fbf" title="B68FBF" onclick="setTheme('b68fbf')"><span class="theme-swatch"></span></button>
       <button type="button" data-theme="halloween" title="Halloween" onclick="setTheme('halloween')">{_icon("pumpkin", "icon-sm")}</button>
@@ -2774,6 +2795,7 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
         <p class="meta" id="bg-status" role="status">Stays in this browser only.</p>
       </div>
     </details>
+    <p class="galaxy-credit">Background: International Gemini Observatory / NOIRLab / NSF / AURA, <a href="https://noirlab.edu/public/images/noirlab2621a/" target="_blank" rel="noopener">CC BY 4.0</a></p>
   </div>
 </div>
 {banner_html}
@@ -5522,6 +5544,21 @@ class Handler(BaseHTTPRequestHandler):
         # anything else in this handler, including the cache reset below.
         if self.path == "/healthz":
             self._write_body(b"ok", "text/plain; charset=utf-8", 200)
+            return
+        # Galaxy theme background: one fixed file under assets/, so there is no
+        # user-controlled path to resolve (nothing to traverse).
+        if self.path.split("?", 1)[0] == "/assets/galaxy-bg.jpg":
+            try:
+                data = GALAXY_BG_PATH.read_bytes()
+            except OSError:
+                self._write_body(b"not found", "text/plain; charset=utf-8", 404)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Cache-Control", "public, max-age=86400")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
             return
         # /__progress?id=<16 hex>: how far along the page load identified by
         # that id is (Zendesk API calls done vs. the previous load's count),

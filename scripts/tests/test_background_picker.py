@@ -44,17 +44,17 @@ def _css():
 
 def test_glass_styling_only_applies_with_an_image_and_backdrop_filter_support():
     css = _css()
-    block = css.split("Liquid glass:")[1].split("html.has-bg-image .sla-range-btn.active")[0]
+    block = css.split("Liquid glass:")[1].split(":is(html.has-bg-image, html.theme-galaxy) .sla-range-btn.active")[0]
     assert "@supports (backdrop-filter: blur(1px))" in block
-    assert block.count("html.has-bg-image") >= 4 and "backdrop-filter: var(--lg-blur)" in block
-    # every glass rule hangs off the has-bg-image class, so without an image nothing changes
+    assert block.count(":is(html.has-bg-image, html.theme-galaxy)") >= 4 and "backdrop-filter: var(--lg-blur)" in block
+    # every glass rule hangs off the has-bg-image class (or the Galaxy theme), so otherwise nothing changes
     selectors = [r.rsplit("}", 1)[-1].strip() for r in block.split("{")[:-1]]
     for sel in selectors[1:]:
-        assert sel.startswith("html.has-bg-image"), sel
+        assert sel.startswith(":is(html.has-bg-image, html.theme-galaxy)"), sel
 
 
 def test_glass_panels_use_theme_tokens_and_keep_the_columns_accent_edge():
-    block = _css().split("Liquid glass:")[1].split("html.has-bg-image .sla-range-btn.active")[0]
+    block = _css().split("Liquid glass:")[1].split(":is(html.has-bg-image, html.theme-galaxy) .sla-range-btn.active")[0]
     for token in ("var(--card-bg)", "var(--input-bg)", "var(--glass-shine)", "var(--glass-border)", "var(--glass-shadow)"):
         assert token in block
     assert "border-left" not in block and "border: " not in block         # the accent's left edge is not overwritten
