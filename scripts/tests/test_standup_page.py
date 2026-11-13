@@ -145,27 +145,16 @@ def test_nav_shows_standup_badge_from_open_action_items():
 def test_overview_renders_sections_and_escapes_note_text():
     _write()
     page = _page(review_server._render_standup_page)
-    assert "Since the Jan 14 standup" in page
-    assert "Your open action items, oldest first (1)" in page
-    assert "Newly blocked (1)" in page and "(was active)" in page
+    assert "Open action items, oldest first (1)" in page and "Blocked or recently updated topics (1)" in page
     assert "&lt;b&gt;patch&lt;/b&gt;" in page and "<b>patch</b>" not in page
     assert "Waiting on Vendor" in page
     assert 'title="Name was a guess"' in page
     assert 'href="/standup/topic/' in page
 
 
-def test_overview_since_picker_switches_the_comparison():
-    _write()
-    page = _page(review_server._render_standup_page, since="2026-01-13")
-    assert "Since the Jan 13 standup" in page and "Action items resolved (1)" in page
-    assert 'href="/standup?since=2026-01-13"' in page
-    unknown = _page(review_server._render_standup_page, since="1999-01-01")
-    assert "Since the Jan 14 standup" in unknown
-
-
 def test_error_page_replaces_sections_when_data_is_missing():
     page = review_server._render_standup_page(_common.standup_snapshot()).decode()
-    assert "No standup data found" in page and "Your open action items" not in page
+    assert "No standup data found" in page and "Open action items" not in page
 
 
 def test_inferred_owner_is_marked_on_team_rows_but_your_rows_show_no_owner():
@@ -213,18 +202,21 @@ def test_topic_page_for_an_unknown_topic_says_so():
     assert "in the standup data" in _page(review_server._render_standup_topic_page, "Nope|Nope")
 
 
-def test_workstreams_page_lists_only_live_topics_and_filters():
+def test_topics_page_lists_only_live_topics_by_default_and_filters():
     _write()
-    page = _page(review_server._render_standup_workstreams_page)
+    page = _page(review_server._render_standup_topics_page)
     assert "Widget rollout" in page and "Old widget" not in page and "Certificates" not in page
-    assert "Widget rollout" not in _page(review_server._render_standup_workstreams_page, q="nothing matches")
-    assert "Widget rollout" not in _page(review_server._render_standup_workstreams_page, owner="Sam")
+    assert "Widget rollout" not in _page(review_server._render_standup_topics_page, q="nothing matches")
+    assert "Widget rollout" not in _page(review_server._render_standup_topics_page, owner="Sam")
+    assert 'value="live" selected' in page
 
 
-def test_closed_page_lists_done_and_dropped_topics():
+def test_topics_page_closed_view_lists_done_and_dropped_topics():
     _write()
-    page = _page(review_server._render_standup_closed_page)
-    assert "Closed topics (1)" in page and "Certificates" in page
+    page = _page(review_server._render_standup_topics_page, status="closed")
+    assert "Closed topics (1)" in page and "Certificates" in page and "Widget rollout" not in page
+    assert 'value="closed" selected' in page
+    assert 'value="live" selected' in _page(review_server._render_standup_topics_page, status="bogus")
 
 
 def test_actions_page_filters_by_state_owner_and_text():
@@ -318,13 +310,41 @@ def test_apply_is_idempotent():
     assert _common.apply_standup_decisions(once, decisions) == once
 
 
-def test_overview_offers_the_right_buttons_and_carries_return_to():
+def test_overview_offers_item_buttons_and_carries_return_to():
     _write()
-    page = _page(review_server._render_standup_page, since="2026-01-13")
+    page = _page(review_server._render_standup_page)
     assert 'action="/standup/decide"' in page
-    assert 'value="done"' in page and 'value="dropped"' in page and 'value="keep"' in page and 'value="open"' in page
-    assert 'name="return_to" value="/standup?since=2026-01-13"' in page
-    assert "Possibly stuck (1)" in page and "No progress since it paused." in page
+    assert 'value="done"' in page and 'value="dropped"' in page and 'value="open"' in page
+    assert 'name="return_to" value="/standup"' in page
+
+
+def test_quiet_topic_decisions_live_on_needs_attention_not_the_overview():
+    _write()
+    overview = _page(review_server._render_standup_page)
+    assert 'value="keep"' not in overview and "Possibly stuck" not in overview and "Needs a decision" not in overview
+    attention = _page(review_server._render_standup_attention_page)
+    assert 'value="keep"' in attention and 'name="return_to" value="/standup/attention"' in attention
+    assert "Possibly stuck (1)" in attention and "No progress since it paused." in attention
+
+
+def test_decided_quiet_topics_stay_reachable_for_undo_on_needs_attention():
+    _write()
+    assert _common.record_standup_decision("topic", "Widgets|Old widget", "keep")[0]
+    attention = _page(review_server._render_standup_attention_page)
+    assert "Decided by you (1)" in attention and "Keeping watch" in attention and 'value="clear"' in attention
+    assert "Quiet topics awaiting a decision (0)" in attention
+
+
+def test_overview_is_one_yours_section_plus_collapsed_extras():
+    _write()
+    body = _page(review_server._render_standup_page).split("</style>")[-1]
+    assert 'id="standup-yours"' in body and "Yours" in body
+    for gone in ("Since the", "Compare with", "standup-summary", "Your topics", "Needs a decision", "Waiting on others (0)"):
+        assert gone not in body
+    assert body.count('class="security-panel overview-section standup-fold"') == 3
+    assert "Zendesk tickets (0)" in body and "Recently resolved for you (1)" in body and "Waiting on others, whole team (1)" in body
+    assert 'data-storage-key="csa-standup-fold-tickets">' in body                  # collapsed by default (no open attribute)
+    assert 'href="/standup/yesterday">Workday recap</a>' in body
 
 
 def test_undo_path_survives_the_double_decoding_of_the_undo_query_param():

@@ -3121,10 +3121,7 @@ def sla_history_snapshot() -> dict:
 # at request time from that other checkout -- so none of it can end up
 # in this repo's git history. Overridable via env var for a clone that
 # doesn't sit at the default sibling path.
-# Whose action items /standup/people opens on (any owner name in the notes
-# can be picked from the page; this is only the default).
-STANDUP_DEFAULT_PERSON = os.getenv("STANDUP_DEFAULT_PERSON", "Ryan").strip() or "Ryan"
-# The only people the /standup owner filters and the By person picker offer, in
+# The only people the /standup owner filters offer, in
 # this order, spelled as the standup notes spell them (first names; matching is
 # case-insensitive). Anyone else in the notes still appears on the pages, just
 # not as a filter choice. Comma-separated; override in .env.

@@ -1,5 +1,5 @@
-"""Only _common.STANDUP_PEOPLE are offered as standup owner filters and in the
-By person picker. Fixtures are made up (see test_standup_page.py)."""
+"""Only _common.STANDUP_PEOPLE are offered as standup owner filters.
+Fixtures are made up (see test_standup_page.py)."""
 import _common
 import review_server
 from test_standup_page import _action, _page, _view, _write
@@ -39,8 +39,7 @@ def test_a_configured_person_missing_from_the_notes_is_still_offered(monkeypatch
 
 def test_filter_pages_do_not_offer_other_owners(monkeypatch):
     _setup(monkeypatch, ["Alex", "Sam"])
-    for render in (review_server._render_standup_workstreams_page, review_server._render_standup_closed_page,
-                   review_server._render_standup_actions_page):
+    for render in (review_server._render_standup_topics_page, review_server._render_standup_actions_page):
         out = _page(render)
         assert _options(out, "owner") == ["", "Alex", "Sam", "Group"]
         assert "Casey" not in _options(out, "owner")
@@ -60,10 +59,9 @@ def test_owner_param_outside_the_choices_is_ignored(monkeypatch):
     assert "Chase the vendor" in mine and "Outsider task" not in mine
 
 
-def test_by_person_picker_offers_only_the_configured_people(monkeypatch):
+def test_owner_filter_for_one_person_never_offers_outsiders(monkeypatch):
     _setup(monkeypatch, ["Sam", "Alex"])
-    out = _page(review_server._render_standup_people_page)
-    assert _options(out, "person") == ["Sam", "Alex"]
-    hostile = _page(review_server._render_standup_people_page, person="Casey")
-    assert "Casey" not in _options(hostile, "person") and "Outsider task" not in hostile
-
+    out = _page(review_server._render_standup_actions_page, owner="Sam")
+    assert _options(out, "owner") == ["", "Sam", "Alex", "Group"]
+    hostile = _page(review_server._render_standup_actions_page, owner="Casey")
+    assert "Casey" not in _options(hostile, "owner")

@@ -2191,6 +2191,14 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
   .standup-entry-body .mini-ticket-grid {{ margin-top: 0.5rem; }}
   @media (max-width: 560px) {{ .standup-entry {{ grid-template-columns: minmax(0, 1fr); gap: 0.2rem; }} }}
   .standup-note {{ font-size: 0.82rem; color: var(--muted); margin-top: 0.2rem; font-style: italic; }}
+  .standup-age-old {{ color: var(--flag-alert-color); font-weight: 600; }}
+  .standup-party {{ margin: 0.4rem 0; }}
+  .standup-party > summary {{ cursor: pointer; font-weight: 600; font-size: 0.9rem; }}
+  .standup-party[open] > summary {{ margin-bottom: 0.5rem; }}
+  .standup-section-mine {{ grid-column: 1 / -1; }}
+  .standup-fold {{ margin-top: 1rem; }}
+  .standup-fold > summary {{ cursor: pointer; font-weight: 600; }}
+  .standup-fold[open] > summary {{ margin-bottom: 0.8rem; }}
   .standup-bulk-bar {{ display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; align-items: center; margin: 0.4rem 0 1rem; }}
   .standup-bulk-bar .mini-claim-form {{ margin-top: 0; }}
   .standup-bulk-actions {{ display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; margin: 0.6rem 0; }}
@@ -4411,6 +4419,7 @@ _STANDUP_TRIAGE_GROUPS = [
 ]
 _STANDUP_TASK_STATUS_LABELS = {"draft": "draft", "open": "open ticket", "done": "done"}
 _STANDUP_LIVE = ("blocked", "active", "decided")
+_STANDUP_YOURS_CAP = 5
 _STANDUP_TICKET_RE = re.compile(r"(\b[Tt]ickets?\s*#?|#)(\d{5,7})\b")
 # Where a /standup form may send you back to: a /standup page, with an
 # optional plain query string. Anything else falls back to /standup, so a
@@ -4419,12 +4428,9 @@ _STANDUP_RETURN_RE = re.compile(r"^/standup(/[A-Za-z0-9_\-./]*)?(\?[A-Za-z0-9_=&
 _STANDUP_SUBNAV = [
     ("/standup", "Overview"),
     ("/standup/attention", "Needs attention"),
-    ("/standup/yesterday", "Workday recap"),
-    ("/standup/workstreams", "Workstreams"),
-    ("/standup/meetings", "Meetings"),
     ("/standup/actions", "Action items"),
-    ("/standup/people", "By person"),
-    ("/standup/closed", "Closed"),
+    ("/standup/topics", "Topics"),
+    ("/standup/meetings", "Meetings"),
 ]
 
 
@@ -4446,6 +4452,12 @@ def _standup_return_path(value: str) -> str:
 def _standup_with_msg(path: str, message: str, undo: str = "") -> str:
     sep = "&" if "?" in path else "?"
     return f"{path}{sep}msg={quote(message)}" + (f"&undo={quote(undo)}" if undo else "")
+
+
+def _standup_path(path: str, **params) -> str:
+    """path plus the non-empty params as a query string."""
+    qs = "&".join(f"{k}={quote(v)}" for k, v in params.items() if v)
+    return path + (f"?{qs}" if qs else "")
 
 
 def _standup_topic_href(key: str) -> str:
@@ -4514,10 +4526,17 @@ def _standup_empty(text: str) -> str:
 
 def _standup_section(title: str, count, body_html: str, key: str) -> str:
     count_html = f" ({count})" if count is not None else ""
-    return f"""<div class="security-panel overview-section standup-section-{key}">
+    return f"""<div class="security-panel overview-section standup-section-{key}" id="standup-{key if key != "mine" else "yours"}">
   <div class="overview-section-head"><h2 class="column-heading">{html.escape(title)}{count_html}</h2></div>
   {body_html}
 </div>"""
+
+
+def _standup_fold(title: str, count, body_html: str, key: str) -> str:
+    """A section that starts collapsed (and remembers being opened)."""
+    count_html = f" ({count})" if count is not None else ""
+    return (f'<details class="security-panel overview-section standup-fold" data-storage-key="csa-standup-fold-{key}">'
+            f'<summary>{html.escape(title)}{count_html}</summary>{body_html}</details>')
 
 
 def _standup_decide_form(kind: str, item_id: str, decision: str, label: str, css: str, icon: str, return_to: str) -> str:
@@ -4628,6 +4647,8 @@ class _StandupCtx:
                 state += f' &middot; {html.escape(r["note"])}'
         else:
             state = _standup_days_open(a.get("date"))
+            if _common.standup_age_bucket(_common.standup_action_age_days(a)) in ("quarter", "old"):
+                state = f'<span class="standup-age-old">{state}</span>'
         owner = f" &middot; {_standup_owner_html(a.get('owner'), a.get('owner_inferred'))}" if show_owner and a.get("owner") else ""
         topic = ""
         if show_topic and a.get("topic_key") and self.topic(a["topic_key"]):
@@ -4899,11 +4920,19 @@ def _render_standup_attention_page(snapshot: dict, banner: str = "", banner_undo
             + _standup_rows_block(ctx, closed_items, "closed"), "attn-closed"))
 
     quiet = att["quiet_topics"]
-    if quiet:
+    decided = [t for k in view.get("quiet_topics") or [] if (t := ctx.topic(k)) and t.get("decision")]
+    if quiet or decided:
+        decided_html = ""
+        if decided:
+            labels = {"done": "Marked done by you", "dropped": "Marked dropped by you", "keep": "Keeping watch"}
+            decided_html = (
+                f'<details class="recently-handled" data-storage-key="csa-standup-quiet-decided"><summary>Decided by you ({len(decided)})</summary>'
+                '<p class="meta">Done and dropped topics move to Topics (Done and dropped) once the tracker rebuilds. A topic raised again at a later standup comes back here.</p>'
+                + _standup_grid([ctx.topic_row(t, controls=True, note=labels.get(t["decision"], "")) for t in decided]) + "</details>")
         sections.append(_standup_section(
             "Quiet topics awaiting a decision", len(quiet),
-            '<p class="meta">Not done and not mentioned lately, sorted by a suggested disposition from the later notes.</p>'
-            + "".join(_standup_quiet_groups(ctx, quiet)), "attn-quiet"))
+            '<p class="meta">Not done and not mentioned lately, sorted by a suggested disposition from the later notes. Your call is saved to the tracker and survives future refreshes.</p>'
+            + "".join(_standup_quiet_groups(ctx, quiet)) + decided_html, "attn-quiet"))
 
     no_owner = att["no_owner"]
     if no_owner:
@@ -5021,8 +5050,8 @@ def _render_standup_yesterday_page(result: dict, day, default_day, today, banner
 
     page = f"""
 <h2>{_topic_icon("standup")}Standup</h2>
-<nav class="standup-subnav" aria-label="Standup pages">{_standup_subnav_html("/standup/yesterday")}</nav>
-<h3>{html.escape(_activity_day_label(day))}{" (previous workday)" if day == default_day else ""}</h3>
+<nav class="standup-subnav" aria-label="Standup pages">{_standup_subnav_html("")}</nav>
+<h3>Workday recap: {html.escape(_activity_day_label(day))}{" (previous workday)" if day == default_day else ""}</h3>
 {date_form}
 {notes_html}
 {body}
@@ -5042,12 +5071,12 @@ def _standup_error_page(snapshot: dict, banner: str = "") -> bytes:
 
 def _render_standup_page(snapshot: dict, banner: str = "", banner_undo_path: str = "",
                          tagged_tickets: list | None = None, tickets_error: str = "", tasks_by_action: dict | None = None,
-                         since: str = "") -> bytes:
-    """/standup: your view of the Operations Standup -- what changed since an
-    earlier standup (the previous one by default; ?since= picks another of
-    the last few), your open action items and topics, what's waiting on
-    others, standup-tagged Zendesk tickets, your resolved items, and the
-    quiet topics needing a decision.
+                         ) -> bytes:
+    """/standup: what is yours -- your five oldest open items, your blocked
+    topics or ones raised again at the latest standup, and who you're waiting
+    on -- and, collapsed, the team-wide waiting list, standup-tagged Zendesk
+    tickets and your resolved items. The lists of what needs a decision live
+    on /standup/attention.
 
     Everything comes from the sibling meetingnotestool project's precomputed
     dist/standup_data.json (see _common.standup_snapshot), which owns all of
@@ -5059,53 +5088,39 @@ def _render_standup_page(snapshot: dict, banner: str = "", banner_undo_path: str
     if not view:
         return _standup_error_page(snapshot, banner)
     standups = view.get("since_standups") or []
-    since = since if since in standups else (standups[0] if standups else "")
-    return_to = "/standup" + (f"?since={since}" if since and standups and since != standups[0] else "")
-    ctx = _StandupCtx(view, return_to, tasks_by_action)
+    since = standups[0] if standups else ""           # the previous standup: what "recently updated" is measured from
+    ctx = _StandupCtx(view, "/standup", tasks_by_action)
+    me_options = view.get("me") in _standup_owner_options(view)
+    my_topic_keys = set(view.get("my_topics") or [])
 
-    # --- since
-    changes = (view.get("since") or {}).get(since) or {}
-    groups = [("Newly blocked", "newly_blocked"), ("Newly done", "newly_done"), ("New topics", "new_topics"), ("Other updates", "other_updates")]
-    since_parts = []
-    counts = []
-    for label, k in groups:
-        refs = [r for r in changes.get(k) or [] if ctx.topic(r.get("key"))]
-        counts.append((label, len(refs)))
-        if refs:
-            since_parts.append(f'<h3 class="standup-group-heading">{label} ({len(refs)})</h3>'
-                               + _standup_grid([ctx.topic_row(ctx.topic(r["key"]), before=r.get("before")) for r in refs]))
-    new_actions = [ctx.action(i) for i in changes.get("new_actions") or [] if ctx.action(i)]
-    resolved = [ctx.action(i) for i in changes.get("resolved_actions") or [] if ctx.action(i)]
-    new_actions.sort(key=lambda a: not ctx.is_mine(a))
-    if new_actions:
-        since_parts.append(f'<h3 class="standup-group-heading">New action items ({len(new_actions)})</h3>'
-                           + _standup_grid([ctx.action_row(a, show_owner=True) for a in new_actions]))
-    if resolved:
-        since_parts.append(f'<h3 class="standup-group-heading">Action items resolved ({len(resolved)})</h3>'
-                           + _standup_grid([ctx.action_row(a, show_owner=True) for a in resolved]))
-    chips = "".join(f'<span class="stat-chip">{n} {label.lower()}</span>' for label, n in counts[:3])
-    chips += f'<span class="stat-chip">{len(new_actions)} new action items</span><span class="stat-chip">{len(resolved)} resolved</span>'
-    picker = "".join(
-        f'<a class="sla-range-btn{" active" if d == since else ""}" href="/standup{"" if i == 0 else "?since=" + d}">{_standup_date(d)}</a>'
-        for i, d in enumerate(standups)
-    )
-    since_body = (f'<div class="standup-since-picker"><span class="meta">Compare with:</span>{picker}</div>'
-                  f'<p class="meta">{chips}</p>' + ("".join(since_parts) or _standup_empty("Nothing changed.")))
+    def _mine_topic(t: dict) -> bool:
+        return bool(t) and (t.get("key") in my_topic_keys or (bool(ctx.me) and ctx.me in (t.get("owners") or [])))
 
     # --- yours
     mine = [ctx.action(i) for i in view.get("my_open_actions") or [] if ctx.action(i)]
     my_topics = [ctx.topic(k) for k in view.get("my_topics") or [] if ctx.topic(k)]
     resolved_mine = [ctx.action(i) for i in view.get("my_resolved_actions") or [] if ctx.action(i)]
+    shown_mine = mine[:_STANDUP_YOURS_CAP]
+    all_mine_href = _standup_path("/standup/actions", owner=ctx.me) if me_options else ""
+    # topics worth a look: blocked, or raised again after the standup being compared with
+    hot_topics = [t for t in my_topics if t.get("status") == "blocked" or (since and (t.get("last_date") or "") > since)]
 
-    # --- waiting on others
-    waiting_parts = []
-    waiting_total = 0
+    # --- waiting on others: the team-wide list, and the part that is yours
+    waiting_all = []
     for g in view.get("waiting_on") or []:
         ts = [ctx.topic(k) for k in g.get("topics") or [] if ctx.topic(k) and ctx.topic(k).get("status") in _STANDUP_LIVE]
         if ts:
-            waiting_total += len(ts)
-            waiting_parts.append(f'<h3 class="standup-group-heading">{html.escape(g.get("on", ""))} ({len(ts)})</h3>'
-                                 + _standup_grid([ctx.topic_row(t) for t in ts]))
+            waiting_all.append((g.get("on", ""), ts))
+    waiting_total = sum(len(ts) for _, ts in waiting_all)
+    waiting_mine = [(on, [t for t in ts if _mine_topic(t)]) for on, ts in waiting_all]
+    waiting_mine = [(on, ts) for on, ts in waiting_mine if ts]
+    waiting_mine_total = sum(len(ts) for _, ts in waiting_mine)
+
+    def _party_blocks(parties: list) -> str:
+        return "".join(
+            f'<details class="standup-party"><summary>{html.escape(on)} ({len(ts)})</summary>{_standup_grid([ctx.topic_row(t) for t in ts])}</details>'
+            for on, ts in parties
+        )
 
     # --- Zendesk tickets
     mentions = view.get("ticket_mentions") or {}
@@ -5137,33 +5152,37 @@ def _render_standup_page(snapshot: dict, banner: str = "", banner_undo_path: str
         + (f'<h3 class="standup-group-heading">Mentioned in the notes ({len(mention_rows)})</h3>{_standup_grid(mention_rows)}' if mention_rows else "")
     )
 
-    # --- needs a decision
-    quiet = [ctx.topic(k) for k in view.get("quiet_topics") or [] if ctx.topic(k)]
-    decided = [t for t in quiet if t.get("decision")]
-    undecided = [t for t in quiet if not t.get("decision")]
-    quiet_parts = _standup_quiet_groups(ctx, undecided)
-    if decided:
-        labels = {"done": "Marked done by you", "dropped": "Marked dropped by you", "keep": "Keeping watch"}
-        rows = [ctx.topic_row(t, controls=True, note=labels.get(t["decision"], "")) for t in decided]
-        quiet_parts.append(
-            f'<details class="recently-handled" data-storage-key="csa-standup-quiet-decided"><summary>Decided by you ({len(decided)})</summary>'
-            '<p class="meta">Done and dropped topics move to Closed once the tracker rebuilds. A topic raised again at a later standup comes back here.</p>'
-            f"{_standup_grid(rows)}</details>"
-        )
-
     me = html.escape(ctx.me or "you")
-    decide_intro = ('<p class="meta">Topics that aren&#39;t done and haven&#39;t come up lately, sorted by a suggested disposition '
-                    'from the later notes. Your call is saved to the tracker and survives future refreshes.</p>')
+    if shown_mine:
+        items_html = _standup_grid([ctx.action_row(a) for a in shown_mine])
+        if len(mine) > len(shown_mine):
+            more = f"Showing the {len(shown_mine)} oldest of {len(mine)}. "
+            items_html += (f'<p class="meta">{more}<a href="{html.escape(all_mine_href)}">Show all {len(mine)}</a></p>' if all_mine_href
+                           else f'<p class="meta">{more}</p>')
+    else:
+        items_html = _standup_empty(f"Nothing open for {me}.")
+    hidden_topics = len(my_topics) - len(hot_topics)
+    topics_more = (f'<p class="meta">{hidden_topics} more active topic{"s" if hidden_topics != 1 else ""} on '
+                   f'<a href="{html.escape(_standup_path("/standup/topics", owner=ctx.me) if me_options else "/standup/topics")}">Topics</a>.</p>') if hidden_topics else ""
+    topics_html = (_standup_grid([ctx.topic_row(t) for t in hot_topics]) if hot_topics
+                   else _standup_empty("No blocked or recently updated topics." if my_topics else "No active topics.")) + topics_more
+    yours_body = (
+        f'<h3 class="standup-group-heading">Open action items, oldest first ({len(mine)})</h3>{items_html}'
+        f'<h3 class="standup-group-heading">Blocked or recently updated topics ({len(hot_topics)})</h3>{topics_html}'
+        + (f'<h3 class="standup-group-heading">Waiting on others ({waiting_mine_total})</h3>{_party_blocks(waiting_mine)}' if waiting_mine else "")
+    )
+    resolved_body = (('<p class="meta">Resolved from later notes, or by you. If the notes got one wrong, mark it still open.</p>'
+                      + _standup_grid([ctx.action_row(a) for a in resolved_mine])) if resolved_mine else _standup_empty("Nothing resolved yet."))
+    waiting_body = (f'<p class="meta">Every active topic waiting on someone, owned by anyone.</p>{_party_blocks(waiting_all)}'
+                    if waiting_all else _standup_empty("Nothing is waiting on anyone."))
     body = f"""
+<p class="meta"><a href="/standup/yesterday">Workday recap</a> lists your Zendesk activity for the previous workday.</p>
 <div class="standup-layout">
-{_standup_section(f"Since the {_standup_date(since)} standup" if since else "Since the last standup", None, since_body, "since")}
-{_standup_section("Your open action items, oldest first", len(mine), _standup_grid([ctx.action_row(a) for a in mine]) if mine else _standup_empty(f"Nothing open for {me}."), "mine")}
-{_standup_section("Your topics", len(my_topics), _standup_grid([ctx.topic_row(t) for t in my_topics]) if my_topics else _standup_empty("No active topics."), "topics")}
-{_standup_section("Waiting on others", waiting_total, "".join(waiting_parts) if waiting_parts else _standup_empty("Nothing is waiting on anyone."), "waiting")}
-{_standup_section("Zendesk tickets", None, tickets_html, "tickets")}
-{_standup_section("Recently resolved for you", len(resolved_mine), ('<p class="meta">Resolved from later notes, or by you. If the notes got one wrong, mark it still open.</p>' + _standup_grid([ctx.action_row(a) for a in resolved_mine])) if resolved_mine else _standup_empty("Nothing resolved yet."), "resolved")}
-{_standup_section("Needs a decision", len(undecided), (decide_intro + "".join(quiet_parts)) if quiet_parts else _standup_empty("No quiet topics."), "decide")}
-</div>"""
+{_standup_section("Yours", None, yours_body, "mine")}
+</div>
+{_standup_fold("Waiting on others, whole team", waiting_total, waiting_body, "waiting")}
+{_standup_fold("Zendesk tickets", len(tagged_tickets) + len(mention_rows), tickets_html, "tickets")}
+{_standup_fold("Recently resolved for you", len(resolved_mine), resolved_body, "resolved")}"""
     return _standup_frame(view, "/standup", body, banner, banner_undo_path)
 
 
@@ -5218,7 +5237,7 @@ def _render_standup_topic_page(snapshot: dict, key: str, banner: str = "", banne
                                        _standup_topic_href(key), "under this finished topic")
     owners = ", ".join(t.get("owners") or [])
     body = f"""
-<p><a href="/standup/workstreams">&larr; all workstreams</a></p>
+<p><a href="/standup/topics">&larr; all topics</a></p>
 <div class="security-panel overview-section">
   <div class="overview-section-head"><h2 class="column-heading">{html.escape(t.get("name", ""))}{_standup_status_html(t.get("status"))}</h2></div>
   <p class="meta">{html.escape(t.get("workstream", ""))}{" &middot; " + html.escape(owners) if owners else ""} &middot; raised at {len(t.get("entries") or [])} standup{"s" if len(t.get("entries") or []) != 1 else ""}, {_standup_date(t.get("first_date"))} to {_standup_date(t.get("last_date"))}</p>
@@ -5228,18 +5247,32 @@ def _render_standup_topic_page(snapshot: dict, key: str, banner: str = "", banne
   <div class="standup-history">{"".join(rows)}</div>
   {('<h3 class="standup-group-heading">Other action items on this topic</h3>' + _standup_grid([ctx.action_row(a, show_owner=True, show_topic=False) for a in leftover])) if leftover else ""}
 </div>"""
-    return _standup_frame(view, "", body, banner, banner_undo_path)
+    return _standup_frame(view, "/standup/topics", body, banner, banner_undo_path)
 
 
-def _render_standup_workstreams_page(snapshot: dict, q: str = "", owner: str = "", banner: str = "", banner_undo_path: str = "") -> bytes:
-    """/standup/workstreams: every active, decided or blocked topic, grouped
-    by workstream, with search and an owner filter."""
+def _render_standup_topics_page(snapshot: dict, status: str = "live", q: str = "", owner: str = "", banner: str = "",
+                                banner_undo_path: str = "") -> bytes:
+    """/standup/topics: the topics, either the live ones (active, decided or
+    blocked) grouped by workstream, or the closed ones (done and dropped)
+    most recently raised first. Search and owner filters. Quiet topics are on
+    Needs attention."""
     view = snapshot.get("view")
     if not view:
         return _standup_error_page(snapshot, banner)
     owner = _standup_clean_owner(view, owner)
-    qs = "&".join(f"{k}={quote(v)}" for k, v in (("q", q), ("owner", owner)) if v)
-    ctx = _StandupCtx(view, "/standup/workstreams" + (f"?{qs}" if qs else ""))
+    status = status if status in ("live", "closed") else "live"
+    ctx = _StandupCtx(view, _standup_path("/standup/topics", status="" if status == "live" else status, q=q, owner=owner))
+    select = '<select name="status" aria-label="Topics">' + "".join(
+        f'<option value="{v}"{" selected" if v == status else ""}>{label}</option>'
+        for v, label in (("live", "Active, decided and blocked"), ("closed", "Done and dropped"))
+    ) + "</select>"
+    form = _standup_filter_form("/standup/topics", view, q, owner, extra_select=select)
+    if status == "closed":
+        closed = [t for t in ctx.topics.values() if t.get("status") in ("done", "dropped") and _standup_topic_matches(t, q, owner)]
+        closed.sort(key=lambda t: t.get("last_date") or "", reverse=True)
+        body = form + (_standup_section("Closed topics", len(closed), _standup_grid([ctx.topic_row(t, controls=True) for t in closed]), "closed")
+                       if closed else _standup_empty("No closed topics match these filters."))
+        return _standup_frame(view, "/standup/topics", body, banner, banner_undo_path)
     rank = {"blocked": 0, "active": 1, "decided": 2}
     live = [t for t in ctx.topics.values() if t.get("status") in rank and _standup_topic_matches(t, q, owner)]
     sections = []
@@ -5251,25 +5284,10 @@ def _render_standup_workstreams_page(snapshot: dict, q: str = "", owner: str = "
         ts.sort(key=lambda t: t.get("last_date") or "", reverse=True)
         ts.sort(key=lambda t: rank[t["status"]])
         sections.append(_standup_section(ws, len(ts), _standup_grid([ctx.topic_row(t) for t in ts]), "ws"))
-    body = (_standup_filter_form("/standup/workstreams", view, q, owner)
-            + f'<p class="meta">{len(live)} active, decided or blocked topics. Quiet topics are on the Overview under Needs a decision; finished ones are under Closed.</p>'
+    body = (form
+            + f'<p class="meta">{len(live)} active, decided or blocked topics. Quiet topics are on Needs attention.</p>'
             + (f'<div class="standup-stack">{"".join(sections)}</div>' if sections else _standup_empty("No topics match these filters.")))
-    return _standup_frame(view, "/standup/workstreams", body, banner, banner_undo_path)
-
-
-def _render_standup_closed_page(snapshot: dict, q: str = "", owner: str = "", banner: str = "", banner_undo_path: str = "") -> bytes:
-    """/standup/closed: done and dropped topics, most recently raised first."""
-    view = snapshot.get("view")
-    if not view:
-        return _standup_error_page(snapshot, banner)
-    owner = _standup_clean_owner(view, owner)
-    ctx = _StandupCtx(view, "/standup/closed")
-    closed = [t for t in ctx.topics.values() if t.get("status") in ("done", "dropped") and _standup_topic_matches(t, q, owner)]
-    closed.sort(key=lambda t: t.get("last_date") or "", reverse=True)
-    body = (_standup_filter_form("/standup/closed", view, q, owner)
-            + (_standup_section("Closed topics", len(closed), _standup_grid([ctx.topic_row(t, controls=True) for t in closed]), "closed")
-               if closed else _standup_empty("No closed topics match these filters.")))
-    return _standup_frame(view, "/standup/closed", body, banner, banner_undo_path)
+    return _standup_frame(view, "/standup/topics", body, banner, banner_undo_path)
 
 
 def _render_standup_actions_page(snapshot: dict, show: str = "open", owner: str = "", q: str = "", banner: str = "",
@@ -5302,89 +5320,26 @@ def _render_standup_actions_page(snapshot: dict, show: str = "open", owner: str 
         select += f'<input type="hidden" name="age" value="{html.escape(age)}">'
     bulk_bar = (_standup_bulk_bar(len(acts), {"owner": owner, "age": age, "q": q}, ctx.return_to, "in this view")
                 if show == "open" and (age or q) else "")
+    owner_summary = ""
+    if owner:
+        theirs = [a for a in ctx.actions.values() if a.get("owner") == owner
+                  and (not q or q.lower() in (a.get("task", "") + " " + (a.get("topic") or "")).lower())]
+        if theirs:
+            outcomes = [(a["resolution"] or {}).get("outcome") for a in theirs if a.get("resolution")]
+            parts = [f"{sum(1 for a in theirs if not a.get('resolution'))} open", f"{outcomes.count('done')} done",
+                     f"{outcomes.count('dropped')} dropped"]
+            other = len(outcomes) - outcomes.count("done") - outcomes.count("dropped")
+            if other:
+                parts.append(f"{other} otherwise resolved")
+            inferred = sum(1 for a in theirs if a.get("owner_inferred"))
+            standups = len({a.get("date") for a in theirs if a.get("date")})
+            owner_summary = (f'<p class="meta">{html.escape(owner)}: {", ".join(parts)} across {standups} '
+                             f"standup{'s' if standups != 1 else ''}{f'; {inferred} with an inferred owner' if inferred else ''}.</p>")
     body = (_standup_filter_form("/standup/actions", view, q, owner, extra_select=select)
-            + age_pills + bulk_bar
+            + owner_summary + age_pills + bulk_bar
             + (_standup_section("Action items", len(acts), _standup_grid([ctx.action_row(a, show_owner=True) for a in acts]), "actions")
                if acts else _standup_empty("No action items match these filters.")))
     return _standup_frame(view, "/standup/actions", body, banner, banner_undo_path)
-
-
-def _standup_people(view: dict) -> list:
-    """The people offered on By person: _common.STANDUP_PEOPLE (not the Group /
-    Unassigned buckets)."""
-    return [n for n in _standup_owner_options(view) if n not in ("Group", "Unassigned")]
-
-
-def _render_standup_people_page(snapshot: dict, person: str = "", q: str = "", banner: str = "",
-                                banner_undo_path: str = "", tasks_by_action: dict | None = None, age: str = "") -> bytes:
-    """/standup/people: one person's action items from the notes -- what the
-    notes say they will do. Open items first (oldest first, with how long
-    each has been open), then done / dropped ones newest first. Opens on
-    STANDUP_DEFAULT_PERSON; the picker offers only _common.STANDUP_PEOPLE."""
-    view = snapshot.get("view")
-    if not view:
-        return _standup_error_page(snapshot, banner)
-    people = _standup_people(view)
-    default = _common.STANDUP_DEFAULT_PERSON if _common.STANDUP_DEFAULT_PERSON in people else (people[0] if people else "")
-    person = person if person in people else default
-    age = age if age in _common.STANDUP_AGE_KEYS else ""
-    qs = "&".join(f"{k}={quote(v)}" for k, v in (("person", person if person != default else ""), ("q", q), ("age", age)) if v)
-    ctx = _StandupCtx(view, "/standup/people" + (f"?{qs}" if qs else ""), tasks_by_action)
-
-    def _matches(a: dict) -> bool:
-        if not q:
-            return True
-        topic = (ctx.topic(a.get("topic_key")) or {}).get("name", "")
-        return q.lower() in (a.get("task", "") + " " + topic).lower()
-
-    mine = [a for a in ctx.actions.values() if person and a.get("owner") == person and _matches(a)]
-    open_items = sorted((a for a in mine if not a.get("resolution")), key=lambda a: (a.get("date") or "", a.get("id") or ""))
-    resolved = sorted((a for a in mine if a.get("resolution")), key=lambda a: (a.get("date") or "", a.get("id") or ""), reverse=True)
-    age_pills = ""
-    if open_items:
-        age_pills = _standup_age_pills("/standup/people", {"person": person if person != default else "", "q": q},
-                                       _common.standup_age_counts(open_items), len(open_items), age)
-    open_total = len(open_items)
-    if age:
-        open_items = [a for a in open_items if _common.standup_age_bucket(_common.standup_action_age_days(a)) == age]
-    options = "".join(
-        f'<option value="{html.escape(n)}"{" selected" if n == person else ""}>{html.escape(n)}</option>' for n in people
-    )
-    form = f"""<form method="get" action="/standup/people" class="standup-filter">
-  <select name="person" aria-label="Person">{options}</select>
-  <input type="search" name="q" value="{html.escape(q)}" placeholder="Search tasks and topics" aria-label="Search">
-  <button type="submit" class="internal">{_icon("search", "icon-sm")}<span>Show</span></button>
-  {f'<input type="hidden" name="age" value="{html.escape(age)}">' if age else ""}
-  {'<a href="/standup/people' + ('?person=' + quote(person) if person != default else '') + '" class="meta">Clear</a>' if q else ""}
-</form>"""
-    done = sum(1 for a in resolved if (a["resolution"] or {}).get("outcome") == "done")
-    dropped = sum(1 for a in resolved if (a["resolution"] or {}).get("outcome") == "dropped")
-    inferred = sum(1 for a in mine if a.get("owner_inferred"))
-    standups = len({a.get("date") for a in mine if a.get("date")})
-    summary = ""
-    if mine:
-        parts = [f"{open_total} open", f"{done} done", f"{dropped} dropped"]
-        other = len(resolved) - done - dropped
-        if other:
-            parts.append(f"{other} otherwise resolved")
-        inferred_note = f"; {inferred} with an inferred owner" if inferred else ""
-        summary = (f'<p class="meta">{html.escape(person)}: {", ".join(parts)} across {standups} '
-                   f"standup{'s' if standups != 1 else ''}{inferred_note}.</p>")
-    if not mine:
-        content = _standup_empty(f"No action items for {person}." if person else "No owners found in the notes.")
-    else:
-        content = age_pills
-        if age or q:
-            content += _standup_bulk_bar(len(open_items), {"owner": person, "age": age, "q": q}, ctx.return_to, "in this view")
-        if open_items:
-            content += _standup_section("Open", len(open_items),
-                                        _standup_grid([ctx.action_row(a, show_owner=bool(a.get("owner_inferred"))) for a in open_items]),
-                                        "people-open")
-        if resolved:
-            content += _standup_section("Done and dropped", len(resolved),
-                                        _standup_grid([ctx.action_row(a, show_owner=bool(a.get("owner_inferred"))) for a in resolved]),
-                                        "people-resolved")
-    return _standup_frame(view, "/standup/people", form + summary + content, banner, banner_undo_path)
 
 
 def _render_standup_meetings_page(snapshot: dict, banner: str = "") -> bytes:
@@ -6037,6 +5992,16 @@ class Handler(BaseHTTPRequestHandler):
                     result, day, default_day, today, banner=banner, banner_undo_path=banner_undo_path,
                 ))
                 return
+            # Pages that were merged into others keep working as redirects.
+            if sub == ["people"]:
+                self._redirect(_standup_path("/standup/actions", owner=arg("person"), q=arg("q"), age=arg("age")))
+                return
+            if sub == ["workstreams"]:
+                self._redirect(_standup_path("/standup/topics", q=arg("q"), owner=arg("owner")))
+                return
+            if sub == ["closed"]:
+                self._redirect(_standup_path("/standup/topics", status="closed", q=arg("q"), owner=arg("owner")))
+                return
             snap = _common.standup_view()
             if sub == [""]:
                 flagged = _common.fetch_flagged_tickets(_common.make_client(), log_fn=_log)
@@ -6045,23 +6010,17 @@ class Handler(BaseHTTPRequestHandler):
                     tagged_tickets=[i for i in flagged["items"] if "standup" in (i.get("matched_tags") or [])],
                     tickets_error=flagged["error"] or "",
                     tasks_by_action=_common.standup_tasks_by_action(),
-                    since=arg("since"),
                 )
             elif len(sub) == 2 and sub[0] == "topic":
                 page = _render_standup_topic_page(snap, _b64url_decode(sub[1]), banner=banner, banner_undo_path=banner_undo_path,
                                                   tasks_by_action=_common.standup_tasks_by_action())
-            elif sub == ["workstreams"]:
-                page = _render_standup_workstreams_page(snap, q=arg("q"), owner=arg("owner"), banner=banner, banner_undo_path=banner_undo_path)
-            elif sub == ["closed"]:
-                page = _render_standup_closed_page(snap, q=arg("q"), owner=arg("owner"), banner=banner, banner_undo_path=banner_undo_path)
+            elif sub == ["topics"]:
+                page = _render_standup_topics_page(snap, status=arg("status"), q=arg("q"), owner=arg("owner"), banner=banner,
+                                                   banner_undo_path=banner_undo_path)
             elif sub == ["actions"]:
                 page = _render_standup_actions_page(snap, show=arg("show") or "open", owner=arg("owner"), q=arg("q"), banner=banner,
                                                     banner_undo_path=banner_undo_path, tasks_by_action=_common.standup_tasks_by_action(),
                                                     age=arg("age"))
-            elif sub == ["people"]:
-                page = _render_standup_people_page(snap, person=arg("person"), q=arg("q"), banner=banner,
-                                                   banner_undo_path=banner_undo_path, tasks_by_action=_common.standup_tasks_by_action(),
-                                                   age=arg("age"))
             elif sub == ["attention"]:
                 page = _render_standup_attention_page(snap, banner=banner, banner_undo_path=banner_undo_path,
                                                       tasks_by_action=_common.standup_tasks_by_action())

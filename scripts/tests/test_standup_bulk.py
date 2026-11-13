@@ -306,13 +306,13 @@ def test_resolved_view_has_no_age_pills_or_bulk_bar():
     assert "Open for:" not in page and 'action="/standup/bulk"' not in page and "Already closed" in page
 
 
-def test_people_page_has_age_pills_and_bulk_bar_for_that_person():
+def test_owner_view_has_age_pills_bulk_bar_and_summary_for_that_person():
     _setup()
-    page = _render(review_server._render_standup_people_page, person="Sam", age="quarter")
+    page = _render(review_server._render_standup_actions_page, owner="Sam", age="quarter")
     assert "Open for:" in page and "31–60 days (1)" in page
     assert "Sam, over a month" in page and "Sam, a few weeks" not in page
     assert 'name="owner" value="Sam"' in page and 'action="/standup/bulk"' in page
-    assert "3 open" in page                                         # the summary still counts every open item
+    assert "Sam: 3 open" in page                                    # the summary still counts every open item
     assert 'name="age" value="quarter"' in page
 
 
