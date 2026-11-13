@@ -231,6 +231,8 @@ _ICONS = {
     # (Abyss), orbit (Galaxy), moon-star (Dark), terminal (Tomorrow Blue),
     # cloud-moon (Lesbian pride), ghost (Halloween), snowflake (Christmas).
     "sun": '<circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>',
+    "menu": '<line x1="4" y1="6" x2="20" y2="6"></line><line x1="4" y1="12" x2="20" y2="12"></line><line x1="4" y1="18" x2="20" y2="18"></line>',
+    "panel-left-close": '<rect x="3" y="3" width="18" height="18" rx="2"></rect><path d="M9 3v18"></path><path d="m16 15-3-3 3-3"></path>',
     "anchor": '<path d="M12 22V8"></path><path d="M5 12H2a10 10 0 0 0 20 0h-3"></path><circle cx="12" cy="5" r="3"></circle>',
     "orbit": '<circle cx="12" cy="12" r="3"></circle><circle cx="19" cy="5" r="2"></circle><circle cx="5" cy="19" r="2"></circle><path d="M10.4 21.9a10 10 0 0 0 9.941-15.416"></path><path d="M13.5 2.1a10 10 0 0 0-9.841 15.416"></path>',
     "moon-star": '<path d="M18 5h4"></path><path d="M20 3v4"></path><path d="M20.985 12.486a9 9 0 1 1-9.473-9.472c.405-.022.617.46.402.803a6 6 0 0 0 8.268 8.268c.344-.215.825-.004.803.401"></path>',
@@ -242,8 +244,6 @@ _ICONS = {
     # Seasonal-theme glyphs (Halloween / Christmas): the toggle buttons and
     # the small header accent both use these, same line-icon style as above.
     "image": '<rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline>',
-    "pumpkin": '<ellipse cx="12" cy="14" rx="9.5" ry="7"></ellipse><path d="M12 7c-3.2 2.4-3.2 11.6 0 14"></path><path d="M12 7c3.2 2.4 3.2 11.6 0 14"></path><path d="M12 7c0-1.8.8-3.2 2.4-4"></path>',
-    "tree": '<polyline points="12 3 17 10 14.5 10 18.5 16 14 16 16.5 20 7.5 20 10 16 5.5 16 9.5 10 7 10 12 3"></polyline><line x1="12" y1="20" x2="12" y2="22"></line>',
     # Added for the filter-as-you-type boxes (see _filter_box_html) on the
     # main queue, /flagged, /security, /solved, and the "Recently worked
     # on" sidebar.
@@ -469,6 +469,9 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
       root.style.setProperty('--csa-bg-veil', String(isNaN(veil) ? 60 : Math.max(0, Math.min(95, veil))));
       root.classList.add('has-bg-image');
     }
+    if (localStorage.getItem('csa-menu-collapsed') === '1') {
+      document.documentElement.classList.add('menu-collapsed');
+    }
   } catch (e) {}
 })();
 </script>"""
@@ -585,6 +588,92 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
     theme_script = """
 <script>
 (function() {
+  // Falling snow for the Christmas theme: one fixed canvas that ignores the
+  // mouse, started and stopped by applyTheme. Nothing runs in any other theme,
+  // when the tab is hidden, or when the OS asks for reduced motion.
+  var snow = { canvas: null, ctx: null, flakes: [], raf: 0, last: 0, w: 0, h: 0, dpr: 1, on: false };
+  function snowReduced() {
+    return !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  }
+  function snowFlake(initial) {
+    var r = 1 + Math.random() * 2.4;
+    return {
+      x: Math.random() * snow.w,
+      y: initial ? Math.random() * snow.h : -6 - Math.random() * 40,
+      r: r,
+      vy: 28 + r * 14 + Math.random() * 18,
+      amp: 6 + Math.random() * 16,
+      freq: 0.4 + Math.random() * 0.9,
+      phase: Math.random() * 6.283,
+      a: 0.45 + Math.random() * 0.45
+    };
+  }
+  function snowResize() {
+    if (!snow.canvas) { return; }
+    snow.dpr = Math.min(window.devicePixelRatio || 1, 2);
+    snow.w = window.innerWidth;
+    snow.h = window.innerHeight;
+    snow.canvas.width = Math.round(snow.w * snow.dpr);
+    snow.canvas.height = Math.round(snow.h * snow.dpr);
+    var want = Math.min(160, Math.max(40, Math.round(snow.w * snow.h / 12000)));
+    while (snow.flakes.length < want) { snow.flakes.push(snowFlake(true)); }
+    if (snow.flakes.length > want) { snow.flakes.length = want; }
+  }
+  function snowFrame(now) {
+    if (!snow.on) { return; }
+    var dt = Math.min(0.05, (now - (snow.last || now)) / 1000);
+    snow.last = now;
+    var ctx = snow.ctx;
+    ctx.setTransform(snow.dpr, 0, 0, snow.dpr, 0, 0);
+    ctx.clearRect(0, 0, snow.w, snow.h);
+    for (var i = 0; i < snow.flakes.length; i++) {
+      var f = snow.flakes[i];
+      f.y += f.vy * dt;
+      f.phase += f.freq * dt;
+      var x = f.x + Math.sin(f.phase) * f.amp;
+      if (f.y > snow.h + 6) { snow.flakes[i] = snowFlake(false); continue; }
+      ctx.globalAlpha = f.a;
+      ctx.fillStyle = '#ffffff';
+      ctx.beginPath();
+      ctx.arc(x, f.y, f.r, 0, 6.283);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    snow.raf = window.requestAnimationFrame(snowFrame);
+  }
+  function snowStart() {
+    if (snow.on || snowReduced() || document.hidden) { return; }
+    var c = document.getElementById('snow-canvas');
+    if (!c) {
+      c = document.createElement('canvas');
+      c.id = 'snow-canvas';
+      c.setAttribute('aria-hidden', 'true');
+      document.body.appendChild(c);
+    }
+    snow.canvas = c;
+    snow.ctx = c.getContext('2d');
+    if (!snow.ctx) { return; }
+    snow.on = true;
+    snow.last = 0;
+    snowResize();
+    snow.raf = window.requestAnimationFrame(snowFrame);
+  }
+  function snowStop() {
+    snow.on = false;
+    if (snow.raf) { window.cancelAnimationFrame(snow.raf); snow.raf = 0; }
+    var c = document.getElementById('snow-canvas');
+    if (c && c.parentNode) { c.parentNode.removeChild(c); }
+    snow.canvas = null;
+    snow.ctx = null;
+    snow.flakes = [];
+  }
+  window.addEventListener('resize', snowResize);
+  document.addEventListener('visibilitychange', function() {
+    if (document.documentElement.classList.contains('theme-christmas')) {
+      if (document.hidden) { snow.on = false; if (snow.raf) { window.cancelAnimationFrame(snow.raf); snow.raf = 0; } }
+      else { snowStart(); }
+    }
+  });
   function applyTheme(mode) {
     document.documentElement.classList.remove('theme-abyss', 'theme-tomorrow', 'theme-lesbian', 'theme-dark', 'theme-halloween', 'theme-christmas', 'theme-galaxy');
     if (mode === 'abyss' || mode === 'tomorrow' || mode === 'lesbian' || mode === 'dark' || mode === 'halloween' || mode === 'christmas' || mode === 'galaxy') {
@@ -601,6 +690,7 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
       var isDark = mode === 'dark' || (mode === 'system' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
       themeColorMeta.content = mode === 'abyss' ? '#000c18' : mode === 'tomorrow' ? '#002451' : mode === 'lesbian' ? '#d162a4' : mode === 'halloween' ? '#ff8a3d' : mode === 'christmas' ? '#4fd17f' : mode === 'galaxy' ? '#f09a7a' : (isDark ? '#6fa3ef' : '#1a56c4');
     }
+    if (mode === 'christmas') { snowStart(); } else { snowStop(); }
   }
   window.setTheme = function(mode) {
     try {
@@ -699,6 +789,37 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
     sync();
   });
   sync();
+})();
+</script>
+<script>
+(function() {
+  // Sidebar collapse: the button in the Background panel hides the left menu,
+  // and the small button at the top-left of the page brings it back. The
+  // choice is kept per browser (csa-menu-collapsed in localStorage).
+  var root = document.documentElement;
+  var KEY = 'csa-menu-collapsed';
+  var expand = document.getElementById('menu-expand');
+  var collapse = document.getElementById('menu-collapse');
+  function setCollapsed(on) {
+    root.classList.toggle('menu-collapsed', on);
+    try {
+      if (on) { localStorage.setItem(KEY, '1'); } else { localStorage.removeItem(KEY); }
+    } catch (e) {}
+  }
+  if (collapse) {
+    collapse.addEventListener('click', function() {
+      var panel = document.querySelector('details.bg-picker');
+      if (panel) { panel.open = false; }
+      setCollapsed(true);
+      if (expand) { expand.focus(); }
+    });
+  }
+  if (expand) {
+    expand.addEventListener('click', function() {
+      setCollapsed(false);
+      if (collapse) { collapse.focus(); }
+    });
+  }
 })();
 </script>"""
     # Three small, independent behaviors bundled into one script rather than
@@ -2097,6 +2218,30 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
   .bg-picker-veil {{ display: flex; align-items: center; gap: 0.5rem; }}
   .bg-picker-veil input {{ flex: 1; min-width: 0; }}
   .bg-picker-remove:disabled {{ opacity: 0.5; cursor: default; }}
+  /* Outlined secondary buttons (the global button rule gives white text and no
+     fill, which was unreadable here on the pale default button background). */
+  .bg-picker-remove, .bg-picker-collapse {{
+    display: inline-flex; align-items: center; justify-content: center; gap: 0.4rem;
+    background: transparent; color: var(--text); border-color: var(--input-border); font-size: 0.8rem; padding: 0.35rem 0.6rem;
+  }}
+  .bg-picker-remove:hover:not(:disabled), .bg-picker-collapse:hover {{ border-color: var(--accent); color: var(--accent); }}
+  /* Collapsed sidebar: the menu is hidden, the page content takes the width
+     (centered, as on narrow screens), and a small button at the top-left
+     brings the menu back. */
+  .menu-expand {{
+    display: none; position: fixed; top: 0.75rem; left: 0.75rem; z-index: 6;
+    width: 2.1rem; height: 2.1rem; padding: 0; align-items: center; justify-content: center;
+    background: var(--card-bg); color: var(--muted); border: 1px solid var(--input-border);
+    border-radius: 10px; box-shadow: var(--card-shadow); cursor: pointer;
+  }}
+  .menu-expand:hover {{ color: var(--text); border-color: var(--accent); }}
+  html.menu-collapsed .menu-expand {{ display: inline-flex; }}
+  html.menu-collapsed .brand {{ display: none; }}
+  @media (min-width: 861px) {{
+    html.menu-collapsed body {{ margin: 2rem auto; padding-top: 1.5rem; }}
+    html.menu-collapsed #page-loading-dim {{ left: 0; }}
+    html.menu-collapsed #page-loading-card {{ left: 50%; }}
+  }}
   .bg-picker-panel .meta {{ margin: 0; }}
   /* Confirmation after choosing or removing a background image. */
   .bg-toast {{
@@ -2160,9 +2305,7 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
     border: 1px solid transparent; background: transparent;
     transition: background-color 0.12s ease, color 0.12s ease;
   }}
-  /* flex: 1 is what pushes a trailing badge (see .nav-badge) to the row's
-     far end without needing a separate spacer element -- the label just
-     claims whatever width the icon and badge don't need. */
+  /* The label fills the row, so the active fill spans the full sidebar width. */
   .top-nav-label {{ flex: 1; }}
   .top-nav-link:hover {{ background: var(--divider); color: var(--text); text-decoration: none; }}
   /* Marks whichever nav link matches the page you're already on -- same
@@ -2218,21 +2361,6 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
     gap: 0.6rem; margin-top: 1rem; padding-top: 0.75rem;
     border-top: 1px solid var(--divider);
   }}
-  /* Small count badge riding on a nav link (tasks awaiting a decision,
-     flagged/security counts) -- lets that page's own status travel with
-     you to every other page instead of only being visible when you're
-     actually on it. .nav-badge-warn is available for a higher-severity
-     count (the same color as the "already replied" flag elsewhere) via
-     _badge()'s warn=True, though nothing currently uses it; the plain
-     .nav-badge (Tasks' count, among others) is neutral, since a waiting
-     task isn't inherently a problem. */
-  .nav-badge {{
-    display: inline-flex; align-items: center; justify-content: center;
-    min-width: 1.1rem; height: 1.1rem; padding: 0 0.3rem;
-    border-radius: 999px; background: var(--badge-bg); color: white;
-    font-size: 0.68rem; font-weight: 700; line-height: 1;
-  }}
-  .nav-badge-warn {{ background: var(--flag-alert-color); }}
   /* The logo/title becomes a link back to /firstreply -- color: inherit and
      text-decoration: none keep it looking like the plain heading it
      always was, not a normal blue underlined link. */
@@ -2390,12 +2518,8 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
   .icon {{ width: 14px; height: 14px; flex-shrink: 0; }}
   .icon-sm {{ width: 12px; height: 12px; flex-shrink: 0; }}
   .logo {{ height: 36px; width: auto; }}
-  /* Small seasonal glyph beside the header title -- hidden unless the
-     matching seasonal theme is active. */
-  .theme-deco {{ display: none; color: var(--accent); margin-left: 0.4rem; vertical-align: -0.1em; }}
-  .theme-deco .icon {{ width: 20px; height: 20px; }}
-  html.theme-halloween .theme-deco-halloween,
-  html.theme-christmas .theme-deco-christmas {{ display: inline-flex; }}
+  /* Snowfall canvas (Christmas theme only; see snowStart in the theme script): above the page, below the toast and loading overlay, never takes clicks. */
+  #snow-canvas {{ position: fixed; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 30; }}
   /* Topic icons (see _topic_icon()) -- self-contained colour badges, sized
      for three different spots: next to a page's own h2 heading, floating
      above an empty-state's muted text, and inline inside the small
@@ -2702,6 +2826,7 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
   <div id="page-loading-track"><div id="page-loading-fill"></div></div>
   <div id="page-loading-detail"></div>
 </div>
+<button type="button" id="menu-expand" class="menu-expand" title="Show the menu" aria-label="Show the menu">{_icon("menu", "icon")}</button>
 <div class="brand">
   <div class="brand-controls-row">
     <div class="theme-toggle" role="group" aria-label="Theme">
@@ -2721,7 +2846,7 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
   <div class="brand-footer">
     <a class="brand-home-link" href="/firstreply">
       {logo_html}
-      <h1>Workflow Asset<span class="theme-deco theme-deco-halloween" aria-hidden="true">{_icon("pumpkin", "icon")}</span><span class="theme-deco theme-deco-christmas" aria-hidden="true">{_icon("tree", "icon")}</span></h1>
+      <h1>Workflow Asset</h1>
       {pending_badge_html}
     </a>
     <div class="brand-status-row">
@@ -2734,6 +2859,7 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
         <label class="bg-picker-file">Choose image&hellip;<input type="file" id="bg-file" accept="image/*"></label>
         <label class="bg-picker-veil">Fade <input type="range" id="bg-veil" min="0" max="95" step="5" value="60" aria-label="How much the theme color covers the image"></label>
         <button type="button" id="bg-remove" class="bg-picker-remove">Remove</button>
+        <button type="button" id="menu-collapse" class="bg-picker-collapse" title="Hide the left menu">{_icon("panel-left-close", "icon-sm")}<span>Collapse menu</span></button>
         <p class="meta" id="bg-status" role="status">Stays in this browser only.</p>
       </div>
     </details>
@@ -2834,59 +2960,20 @@ def _top_nav_html(current_path: str = "") -> str:
     broken), not a page you navigate to as part of the actual workflow the
     other five are, so it doesn't belong in the same list.
 
-    /flagged and /security now carry a count badge too, but a cache-only
-    one rather than a live one: there's no local file tracking "block"/
-    "standup"-tagged tickets or the IT-Security group's own recent
-    activity the way personal_tasks.json backs Tasks' own badge, so a
-    genuinely live count for either would mean calling
-    _common.fetch_flagged_tickets/fetch_recent_tickets from this function
-    itself, on every page load, not just their own -- and
-    fetch_flagged_tickets in particular can page through up to
-    FLAGGED_TICKET_SCAN_PAGES pages (1000 tickets) of the IT-Operations
-    group on a cold cache. That's a real cost a page with nothing to do
-    with Discussion (say, /tasks) shouldn't ever risk paying just to
-    draw a header badge. _common.cached_flagged_ticket_count/
-    cached_security_ticket_count read those two functions' own caches
-    without ever calling Zendesk themselves -- so the badge shows the last
-    real count for as long as an actual visit to /flagged or /security
-    keeps that cache warm (SECURITY_CACHE_TTL_SECONDS/
-    FLAGGED_CACHE_TTL_SECONDS, 120 seconds each), and quietly disappears
-    once it goes stale rather than forcing a fresh scan. In practice that
-    means the badge is closer to "still warm from your last visit" than
-    "always current" the way Tasks' own count is -- an accepted
-    trade-off for keeping every other page's render free of a Zendesk
-    call it has no other reason to make.
-
-    Two things layered on top of the plain link list: an "active" state on
-    whichever link matches current_path, so it's obvious at a glance which
-    page you're already on (mirroring the theme toggle's own .active
-    treatment); and a small count badge per link -- the number of
-    personal tasks not yet in Zendesk on Tasks, and the cache-only Discussion and
-    Security counts described above -- riding at the end of the row rather
-    than crowding the label."""
-    tasks_count = len(_common.draft_personal_tasks())
-    # A local file read (mtime-cached in _common.standup_snapshot), not a
-    # Zendesk call, so this count is always current, like Tasks' own.
-    standup_count = _common.standup_open_action_count()
-    sla_breach_count = _common.cached_sla_breach_count()
-
-    def _badge(count, warn=False):
-        if not count:
-            return ""
-        cls = "nav-badge nav-badge-warn" if warn else "nav-badge"
-        return f'<span class="{cls}">{count}</span>'
-
-    def _link(path, icon, label, badge_html=""):
+    An "active" state marks whichever link matches current_path, so it is
+    obvious at a glance which page you are already on (mirroring the theme
+    toggle's own .active treatment). The links carry no count badges: they
+    used to show open tasks, standup items and SLA breaches, and were
+    removed because the numbers were more noise than signal."""
+    def _link(path, icon, label):
         is_active = current_path == path
         active_class = " active" if is_active else ""
         aria = ' aria-current="page"' if is_active else ""
-        # The label is real visible text now (a .top-nav-label span, not a
-        # title attribute) -- see the docstring above for why. flex:1 on
-        # that span (its own CSS) is what pushes badge_html to the row's
-        # far end without needing an extra wrapper here.
+        # The label is real visible text (a .top-nav-label span, not a title
+        # attribute): the sidebar has a whole column of room for it.
         return (
             f'<a class="top-nav-link{active_class}" href="{path}"{aria}>'
-            f'{_icon(icon)}<span class="top-nav-label">{html.escape(label)}</span>{badge_html}</a>'
+            f'{_icon(icon)}<span class="top-nav-label">{html.escape(label)}</span></a>'
         )
 
     # One flat list, ordered roughly by how often you'd actually reach for
@@ -2903,13 +2990,6 @@ def _top_nav_html(current_path: str = "") -> str:
     # working page, so there's no second category left to separate from
     # the first.
     nav_links = (
-        # No badge here despite this being the page with arguably the
-        # single most actionable count of any of them -- pending_badge_html
-        # (see _page()'s logo/title) already shows "N pending" on every
-        # page, so a matching badge on this link would be the exact
-        # duplicate-count problem that got the old second "N pending"
-        # stat-chip removed from the header meta line; one visible count
-        # is enough.
         _link("/firstreply", "reply", "First Reply")
         # Overview sits second -- it's the "check this before anything
         # else" glance across all four of the pages below it (see
@@ -2917,25 +2997,14 @@ def _top_nav_html(current_path: str = "") -> str:
         # rather than slotted in by topic like the rest.
         + _link("/overview", "grid", "Overview")
         # SLA sits right after Overview -- another "check this before you
-        # dig in" glance page rather than a queue you work from day to
-        # day, and its badge (unlike Tasks/Discussion/Security's own) is a
-        # warn-colored count specifically because a breach is something
-        # that needs escalating, not just a to-do count.
-        + _link("/sla", "clock", "SLA", _badge(sla_breach_count, warn=True))
-        + _link("/tasks", "check-square", "Tasks", _badge(tasks_count))
-        # Standup keeps its own tab (badge: your open standup action items,
-        # from the sibling meetingnotestool project). Discussion and Security
-        # are not tabs: they are blocks on Overview (see
-        # _render_overview_page), each linking to its full page, whose own
-        # pages keep Overview highlighted here.
-        + _link("/standup", "bar-chart", "Standup", _badge(standup_count))
-        # No badge here on purpose, unlike the three above -- those counts
-        # are all "does this need a look" signals (open tasks, blocked/
-        # standup tickets, Security's recent activity). Recently Solved
-        # would just show a static number that maxes out at
-        # _common.RECENTLY_SOLVED_LIMIT the moment its cache is warm --
-        # nothing about that number says "go look at this," so a badge
-        # here would just be visual noise dressed up as a signal.
+        # dig in" glance page rather than a queue you work from day to day.
+        + _link("/sla", "clock", "SLA")
+        + _link("/tasks", "check-square", "Tasks")
+        # Standup keeps its own tab. Discussion and Security are not tabs:
+        # they are blocks on Overview (see _render_overview_page), each
+        # linking to its full page, whose own pages keep Overview
+        # highlighted here.
+        + _link("/standup", "bar-chart", "Standup")
         + _link("/solved", "check-circle", "Recently Solved")
     )
     return f'<div class="top-nav">{nav_links}</div>'
@@ -4812,10 +4881,26 @@ def _standup_owner_options(view: dict) -> list:
     return people
 
 
-def _standup_clean_owner(view: dict, owner: str) -> str:
-    """An ?owner= value that isn't one of the filter choices is ignored (shows
-    Everyone), so a stale or hand-edited link can't filter by someone the
-    filter doesn't offer."""
+def _standup_default_owner(view: dict) -> str:
+    """Who the action items list shows when the link carries no ?owner=:
+    you. That is the notes' own "me" when it is one of the filter choices,
+    otherwise the first of _common.STANDUP_PEOPLE (the first name is you, as on
+    Overview), spelled as the notes spell it. "" when no people are configured."""
+    options = _standup_owner_options(view)
+    me = str(view.get("me") or "").casefold()
+    for name in options:
+        if me and name.casefold() == me:
+            return name
+    return options[0] if options else ""
+
+
+def _standup_clean_owner(view: dict, owner) -> str:
+    """No ?owner= at all (None) means the default person (you). An explicit
+    empty value or "all" means Everyone. A value that isn't one of the filter
+    choices is ignored (shows Everyone), so a stale or hand-edited link can't
+    filter by someone the filter doesn't offer."""
+    if owner is None:
+        return _standup_default_owner(view)
     return owner if owner in _standup_owner_options(view) else ""
 
 
@@ -4836,13 +4921,14 @@ def _standup_filter_form(action: str, view: dict, q: str, owner: str = "", extra
             f'<option value="{html.escape(o)}"{" selected" if o == owner else ""}>{html.escape(o)}</option>'
             for o in _standup_owner_options(view)
         )
-        owner_select = f'<select name="owner" aria-label="Owner"><option value="">Everyone</option>{owners}</select>'
+        owner_select = (f'<select name="owner" aria-label="Owner"><option value="all"{"" if owner else " selected"}>Everyone</option>'
+                        f'{owners}</select>')
     return f"""<form method="get" action="{action}" class="standup-filter">
   <input type="search" name="q" value="{html.escape(q)}" placeholder="{html.escape(placeholder)}" aria-label="Search">
   {owner_select}
   {extra_select}
   <button type="submit" class="internal">{_icon("search", "icon-sm")}<span>Filter</span></button>
-  {f'<a href="{action}" class="meta">Clear</a>' if (q or owner) else ""}
+  {f'<a href="{action}" class="meta">Clear</a>' if (q or (with_owner and owner != _standup_default_owner(view))) else ""}
 </form>"""
 
 
@@ -4880,11 +4966,13 @@ def _standup_error_page(snapshot: dict, banner: str = "") -> bytes:
     return _page(body, banner=banner, current_path="/standup", wide=True)
 
 
-def _render_standup_actions_page(snapshot: dict, show: str = "open", owner: str = "", q: str = "", banner: str = "",
+def _render_standup_actions_page(snapshot: dict, show: str = "open", owner: str | None = None, q: str = "", banner: str = "",
                                  banner_undo_path: str = "", tasks_by_action: dict | None = None) -> bytes:
     """/standup: every action item mentioned at a standup and who it belongs
     to, newest first -- open (default), resolved or all, filtered by person
-    and text. Each open item can become a local My tasks draft.
+    and text. owner=None (no ?owner= in the link) shows your own items;
+    "all" or "" shows everyone's. Each open item can become a local My tasks
+    draft.
 
     Everything comes from the sibling meetingnotestool project's precomputed
     dist/standup_data.json (see _common.standup_snapshot), which owns all of
@@ -4894,7 +4982,7 @@ def _render_standup_actions_page(snapshot: dict, show: str = "open", owner: str 
         return _standup_error_page(snapshot, banner)
     owner = _standup_clean_owner(view, owner)
     show = show if show in ("open", "resolved", "all") else "open"
-    ctx = _StandupCtx(view, _standup_path("/standup", show=show if show != "open" else "", owner=owner, q=q), tasks_by_action)
+    ctx = _StandupCtx(view, _standup_path("/standup", show=show if show != "open" else "", owner=owner or "all", q=q), tasks_by_action)
     acts = [a for a in ctx.actions.values()
             if (show == "all" or (show == "open") == (a.get("resolution") is None))
             and (not owner or a.get("owner") == owner)
@@ -4922,7 +5010,9 @@ def _render_standup_actions_page(snapshot: dict, show: str = "open", owner: str 
     body = (_standup_filter_form("/standup", view, q, owner, extra_select=select, placeholder="Search tasks and topics")
             + owner_summary
             + (_standup_section("Action items", len(acts), _standup_grid([ctx.action_row(a) for a in acts]), "actions")
-               if acts else _standup_empty("No action items match these filters.")))
+               if acts else _standup_empty(
+                   f"No action items for {owner} match these filters. Choose Everyone in the owner filter to see everyone's."
+                   if owner else "No action items match these filters.")))
     return _standup_frame(view, "/standup", body, banner, banner_undo_path)
 
 
@@ -5632,7 +5722,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             snap = _common.standup_view()
             if sub == [""]:
-                page = _render_standup_actions_page(snap, show=arg("show") or "open", owner=arg("owner"), q=arg("q"), banner=banner,
+                page = _render_standup_actions_page(snap, show=arg("show") or "open", owner=qs["owner"][0] if "owner" in qs else None, q=arg("q"), banner=banner,
                                                     banner_undo_path=banner_undo_path, tasks_by_action=_common.standup_tasks_by_action())
             elif sub == ["topics"]:
                 page = _render_standup_topics_page(snap, q=arg("q"), banner=banner, banner_undo_path=banner_undo_path)

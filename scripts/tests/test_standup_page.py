@@ -99,6 +99,8 @@ def _write(view=None):
 
 
 def _page(render, *args, **kwargs):
+    if render is review_server._render_standup_actions_page:
+        kwargs.setdefault("owner", "")      # these tests look at everyone's items; the default (you) is tested separately
     return render(_common.standup_view(), *args, **kwargs).decode()
 
 
@@ -132,11 +134,11 @@ def test_badge_count_is_zero_when_data_is_unavailable():
     assert _common.standup_open_action_count() == 0
 
 
-def test_nav_shows_standup_tab_with_badge_from_open_action_items():
+def test_nav_shows_standup_tab_without_a_count_badge():
     _write()
     nav = review_server._top_nav_html("/standup")
     assert 'href="/standup"' in nav and 'aria-current="page"' in nav
-    assert '<span class="nav-badge">1</span>' in nav
+    assert "nav-badge" not in nav
     assert 'href="/flagged"' not in nav and 'href="/security"' not in nav        # blocks on Overview, not tabs
 
 
@@ -381,3 +383,77 @@ def test_return_path_only_allows_standup_pages():
     assert ok(review_server._standup_topic_href("A, B & C|D")).startswith("/standup/topic/")
     for bad in ("https://evil.example", "//evil.example", "/tasks", "/standup//evil.example", "/standup?x=<b>", ""):
         assert ok(bad) == "/standup"
+
+
+# --- the action items list defaults to you ----------------------------------------------
+
+def _people(monkeypatch, people):
+    monkeypatch.setattr(_common, "STANDUP_PEOPLE", people)
+
+
+def test_actions_default_to_the_notes_me_when_they_are_a_filter_choice(monkeypatch):
+    _people(monkeypatch, ["Sam", "Alex"])                  # view["me"] is "Alex", the second name
+    _write()
+    page = review_server._render_standup_actions_page(_common.standup_view()).decode()
+    assert "Action items (1)" in page and "Email the vendor" in page and "Chase the vendor" not in page
+    assert '<option value="Alex" selected>' in page and '<option value="all">' in page
+
+
+def test_default_falls_back_to_the_first_configured_person(monkeypatch):
+    _people(monkeypatch, ["Sam", "Zed"])                    # "me" (Alex) is not offered
+    _write()
+    page = review_server._render_standup_actions_page(_common.standup_view()).decode()
+    assert "Chase the vendor" in page and "Email the vendor" not in page
+    assert '<option value="Sam" selected>' in page
+
+
+def test_everyone_is_still_selectable_and_is_remembered_in_links(monkeypatch):
+    _people(monkeypatch, ["Sam", "Alex"])
+    _write()
+    for value in ("all", ""):
+        page = review_server._render_standup_actions_page(_common.standup_view(), owner=value).decode()
+        assert "Action items (2)" in page
+        assert '<option value="all" selected>' in page
+        assert "owner=all" in page                           # a form or redirect keeps Everyone instead of snapping back to you
+
+
+def test_clear_link_shows_only_when_the_view_differs_from_the_default(monkeypatch):
+    _people(monkeypatch, ["Sam", "Alex"])
+    _write()
+    view = _common.standup_view()
+    default = review_server._render_standup_actions_page(view).decode()
+    everyone = review_server._render_standup_actions_page(view, owner="all").decode()
+    assert 'class="meta">Clear</a>' not in default
+    assert 'class="meta">Clear</a>' in everyone
+
+
+def test_unknown_owner_still_means_everyone(monkeypatch):
+    _people(monkeypatch, ["Sam", "Alex"])
+    _write()
+    page = review_server._render_standup_actions_page(_common.standup_view(), owner="Mallory").decode()
+    assert "Action items (2)" in page
+
+
+def test_empty_default_view_explains_how_to_see_everyone(monkeypatch):
+    _people(monkeypatch, ["Zed"])
+    _write()
+    page = review_server._render_standup_actions_page(_common.standup_view()).decode()
+    assert "No action items for Zed match these filters. Choose Everyone" in page
+
+
+def test_http_link_without_owner_shows_you_and_owner_all_shows_everyone(monkeypatch):
+    import threading
+    from http.server import ThreadingHTTPServer
+    from urllib.request import urlopen
+    _people(monkeypatch, ["Sam", "Alex"])
+    _write()
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), review_server.Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        base = f"http://127.0.0.1:{srv.server_address[1]}"
+        mine = urlopen(base + "/standup").read().decode()
+        everyone = urlopen(base + "/standup?owner=all").read().decode()
+    finally:
+        srv.shutdown()
+    assert "Action items (1)" in mine and "Email the vendor" in mine
+    assert "Action items (2)" in everyone

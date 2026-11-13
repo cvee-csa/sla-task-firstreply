@@ -40,7 +40,7 @@ def test_a_configured_person_missing_from_the_notes_is_still_offered(monkeypatch
 def test_filter_pages_do_not_offer_other_owners(monkeypatch):
     _setup(monkeypatch, ["Alex", "Sam"])
     out = _page(review_server._render_standup_actions_page)
-    assert _options(out, "owner") == ["", "Alex", "Sam"]
+    assert _options(out, "owner") == ["all", "Alex", "Sam"]
     assert "Casey" not in _options(out, "owner")
     for render in (review_server._render_standup_topics_page, review_server._render_standup_tracked_page):
         assert 'name="owner"' not in _page(render)          # no owner filter on those lists
@@ -63,7 +63,7 @@ def test_owner_param_outside_the_choices_is_ignored(monkeypatch):
 def test_owner_filter_for_one_person_never_offers_outsiders(monkeypatch):
     _setup(monkeypatch, ["Sam", "Alex"])
     out = _page(review_server._render_standup_actions_page, owner="Sam")
-    assert _options(out, "owner") == ["", "Sam", "Alex"]
+    assert _options(out, "owner") == ["all", "Sam", "Alex"]
     hostile = _page(review_server._render_standup_actions_page, owner="Casey")
     assert "Casey" not in _options(hostile, "owner")
 

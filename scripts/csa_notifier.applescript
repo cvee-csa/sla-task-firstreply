@@ -3,8 +3,9 @@ use scripting additions
 
 -- This path must match _common.OUTPUT_DIR / "notify_payload.json" in
 -- first_reply_check.py -- i.e. scripts/output/notify_payload.json inside
--- this repo checkout. Update it here if you ever move the repo.
-set payloadPath to "/Users/catherinevee/Desktop/git/sla-task-firstreply/scripts/output/notify_payload.json"
+-- this repo checkout. The part after your home folder assumes the repo is at
+-- ~/Desktop/git/sla-task-firstreply; edit that part if it lives elsewhere.
+set payloadPath to (POSIX path of (path to home folder)) & "Desktop/git/sla-task-firstreply/scripts/output/notify_payload.json"
 
 try
 	set nsData to current application's NSData's dataWithContentsOfFile:payloadPath

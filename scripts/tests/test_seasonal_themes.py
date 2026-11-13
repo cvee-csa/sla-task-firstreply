@@ -47,8 +47,24 @@ def test_seasonal_themes_force_dark_color_scheme():
     assert "colorScheme = mode === 'lesbian' ? 'light' : 'dark'" in out
 
 
-def test_header_glyphs_present_and_hidden_by_default():
+def test_no_seasonal_glyph_beside_the_header_title():
     out = _page()
-    assert "theme-deco-halloween" in out and "theme-deco-christmas" in out
-    assert re.search(r"\.theme-deco \{\s*display: none;", out)
-    assert "html.theme-halloween .theme-deco-halloween" in out
+    assert "<h1>Workflow Asset</h1>" in out
+    assert "theme-deco" not in out and "pumpkin" not in review_server._ICONS and "tree" not in review_server._ICONS
+
+
+def test_christmas_snowfall_is_wired_and_guarded():
+    out = _page()
+    assert "snowStart()" in out and "snowStop()" in out
+    assert "if (mode === 'christmas') { snowStart(); } else { snowStop(); }" in out
+    assert "prefers-reduced-motion: reduce" in out and "document.hidden" in out and "visibilitychange" in out
+    assert "requestAnimationFrame(snowFrame)" in out and "cancelAnimationFrame" in out
+
+
+def test_snow_canvas_never_blocks_clicks_and_stays_under_the_toast():
+    css = _page().split("<style>")[1].split("</style>")[0]
+    rule = re.search(r"#snow-canvas \{ (.*?) \}", css).group(1)
+    assert "position: fixed" in rule and "pointer-events: none" in rule
+    z = int(re.search(r"z-index: (\d+)", rule).group(1))
+    toast = int(re.search(r"\.bg-toast \{\s*[^}]*?z-index: (\d+)", css).group(1))
+    assert z < toast

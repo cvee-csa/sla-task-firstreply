@@ -1,6 +1,7 @@
 # Secrets -- never commit these to GitHub
 .env
 .env.*
+!.env.example
 .zendesk_oauth_tokens.json
 .zendesk_oauth_tokens.json.lock
 

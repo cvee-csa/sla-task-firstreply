@@ -79,7 +79,7 @@ def test_subnav_has_the_three_tabs_and_marks_the_current_one():
 
 
 def test_missing_data_shows_the_error_page():
-    out = render(_common.standup_snapshot()).decode()
+    out = render(_common.standup_snapshot(), owner="").decode()
     assert "No standup data found" in out
 
 

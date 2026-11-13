@@ -29,7 +29,9 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
-REPO_ROOT = Path("/Users/catherinevee/Desktop/git/sla-task-firstreply")
+# Derived from this file's own location (scripts/watchdog.py -> repo root), so a
+# checkout in any folder or user account works without editing this file.
+REPO_ROOT = Path(__file__).resolve().parent.parent
 OUTPUT_DIR = REPO_ROOT / "scripts" / "output"
 LAST_SCAN_FILE = OUTPUT_DIR / "last_scan.json"
 STATE_FILE = OUTPUT_DIR / "watchdog_state.json"

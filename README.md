@@ -1,6 +1,6 @@
 # sla-task-firstreply
 
-Local automation that watches the Cloud Security Alliance IT-Operations Zendesk queue for tickets awaiting a first reply, drafts a fixed acknowledgment template for each, and lets you review and edit every draft, then post it as a public reply or an internal-only comment. Nothing is posted without your click. It runs entirely on this machine via `launchd`, with no dependency on a cloud scheduler or a live Cowork session.
+Local automation that watches an IT-Operations Zendesk queue for tickets awaiting a first reply, drafts a fixed acknowledgment template for each, and lets you review and edit every draft, then post it as a public reply or an internal-only comment. Nothing is posted without your click. It runs entirely on your own Mac via `launchd`, with no dependency on a cloud scheduler or an always-open session.
 
 > The full, unabridged documentation (per-feature history and design rationale) is kept in [`docs/DESIGN.md`](docs/DESIGN.md). This README is the condensed version.
 
@@ -8,9 +8,9 @@ Local automation that watches the Cloud Security Alliance IT-Operations Zendesk 
 
 Two main `launchd` services share a JSON file, and a third job watches them:
 
-- **`scripts/first_reply_check.py`** runs every 2 minutes, Mon–Fri 9am–4pm local, and looks back up to 72 hours (`ZENDESK_LOOKBACK_HOURS`) so a sleeping Mac doesn't create a blind spot. It pulls recent IT-Operations tickets, keeps those with no public reply yet, drafts the acknowledgment text, and adds new candidates to `scripts/output/pending_drafts.json`. It never posts to Zendesk. It sends a macOS notification, prefixed "CSA", with a sound (`ZENDESK_NOTIFICATION_SOUND`, default `Glass`) when something new appears, or when the check itself is broken (throttled to once an hour).
+- **`scripts/first_reply_check.py`** runs every 2 minutes, Mon–Fri 9am–4pm local, and looks back up to 72 hours (`ZENDESK_LOOKBACK_HOURS`) so a sleeping Mac does not create a blind spot. It pulls recent IT-Operations tickets, keeps those with no public reply yet, drafts the acknowledgment text, and adds new candidates to `scripts/output/pending_drafts.json`. It never posts to Zendesk. It sends a macOS notification, prefixed "CSA", with a sound (`ZENDESK_NOTIFICATION_SOUND`, default `Glass`) when something new appears, or when the check itself is broken (throttled to once an hour).
 
-  Notifications go out through up to three independent paths every time: [terminal-notifier](https://github.com/julienXX/terminal-notifier) (if installed; its banner is click-through to the review page), a plain AppleScript banner, and the optional helper `.app` below. The redundancy is deliberate: on this Mac, neither terminal-notifier nor `osascript` reliably shows a banner when `launchd` triggers them, even though both exit cleanly, because macOS treats a headless `launchd` process and an interactive Terminal command as differently permissioned senders. The helper app is the path most likely to work, since real `.app` bundles get their own row in Notification settings. Every attempt's exit code and error text is logged to `scripts/output/first_reply_check.log`; a permission-denied message there points at System Settings → Notifications, not at this code.
+  Notifications go out through up to three independent paths every time: [terminal-notifier](https://github.com/julienXX/terminal-notifier) (if installed; its banner is click-through to the review page), a plain AppleScript banner, and the optional helper `.app` below. The redundancy is deliberate: on the Mac this was built on, neither terminal-notifier nor `osascript` reliably showed a banner when `launchd` triggered them, even though both exit cleanly, because macOS treats a headless `launchd` process and an interactive Terminal command as differently permissioned senders. The helper app is the path most likely to work, since real `.app` bundles get their own row in Notification settings. Every attempt's exit code and error text is logged to `scripts/output/first_reply_check.log`; a permission-denied message there points at System Settings → Notifications, not at this code.
 - **`scripts/review_server.py`** is a local-only web server at **http://127.0.0.1:8765/**, kept running (`KeepAlive`). It is the only piece that can post a comment to Zendesk, and only when you click **Public Reply** (visible to the requester) or **Internal Comment** (agent-only) on a ticket, optionally after editing the draft. It also has a manual **Refresh data** button (runs the detection logic on demand, bypassing business hours) and a self-service OAuth reconnect flow at `/reconnect`.
 - **`scripts/watchdog.py`** is re-run by `launchd` every 5 minutes and alerts if the review server stops answering. It checks the lightweight `/healthz` route, not a Zendesk-backed page.
 
@@ -18,39 +18,85 @@ All scripts share config and logic through **`scripts/_common.py`**, so they can
 
 ## Setup
 
+macOS only: the services run under `launchd`, and notifications use macOS facilities. Plan on 20 to 30 minutes, most of it creating the Zendesk credentials.
+
+### Prerequisites
+
+Everything in this list has to exist before the Quick start works.
+
+1. **macOS with Python 3.10 or newer.** The services were built and run on 3.12; CI runs 3.10. Check with `python3 --version`.
+2. **The sibling `zendesk-mcp-server` project**, a separate repository that supplies the Zendesk client this tool imports (`zendesk_mcp_server`). It is not on PyPI, so it has to be cloned (ask whoever maintains it for the URL) and given its own virtualenv. Put it next to this repo, as `../zendeskmcp/zendesk-mcp-server` or `../zendesk-mcp-server`, or anywhere else and tell the installer where (`ZENDESK_MCP_DIR`, Quick start step 4). From inside its folder:
+
+   ```
+   python3 -m venv .venv
+   .venv/bin/python3 -m pip install -e .
+   ```
+
+   Every service runs on that venv's Python, which is why the next Quick start step installs into it.
+3. **A Zendesk agent account** for the person this tool acts as ("Me" in the UI), plus access to Zendesk **Admin Center** (or an admin who can hand you the values below):
+   - an **API token**: Admin Center → Apps and integrations → APIs → Zendesk API → Settings → enable token access → add a token (the value is shown once);
+   - an **OAuth client**: the same page, **OAuth Clients** tab → add. Set the client kind to *Confidential* and add the redirect URL `https://localhost/callback` (the default `ZENDESK_REDIRECT_URI`; if a different URL is registered, set `ZENDESK_REDIRECT_URI` to the same string). Zendesk shows the client secret once, on save. The client's *Unique identifier* is `ZENDESK_CLIENT_ID`.
+
+   Zendesk's admin screens change from time to time; if a menu name differs, search Zendesk's documentation for "API token" and "OAuth client".
+4. **Optional:** [terminal-notifier](https://github.com/julienXX/terminal-notifier) (`brew install terminal-notifier`) for click-through notification banners, and the sibling repos for `/sla` and `/standup` (see below).
+
 ### Quick start
 
-1. **Check out the repos in the expected places.** The `launchd` plists and `scripts/reload_launchd.sh` use absolute paths, so this repo goes at `~/Desktop/git/sla-task-firstreply` and the Zendesk client at `~/Desktop/git/zendeskmcp/zendesk-mcp-server`, already set up with its own `.venv` (see Prerequisites below).
+1. **Clone this repo** anywhere you like. Cloning to `~/Desktop/git/sla-task-firstreply` is the one location the optional notification helper app assumes (see its section).
 
    ```
-   cd ~/Desktop/git
    git clone https://github.com/cvee-csa/sla-task-firstreply.git
+   cd sla-task-firstreply
    ```
 
-2. **Install this repo's one runtime dependency into that venv**, because the services run on that venv's Python:
+2. **Install this repo's one runtime dependency into the zendesk-mcp-server venv**, because the services run on that venv's Python (replace the path with your checkout):
 
    ```
-   cd ~/Desktop/git/sla-task-firstreply
-   ~/Desktop/git/zendeskmcp/zendesk-mcp-server/.venv/bin/python3 -m pip install -r requirements.txt
+   /path/to/zendesk-mcp-server/.venv/bin/python3 -m pip install -r requirements.txt
    ```
 
-3. **Create `.env`** in this repo's root. Copy `zendesk-mcp-server/.env.example` and fill it in, with `ZENDESK_OAUTH_TOKEN_PATH` set to the absolute path of `zendesk-mcp-server/.zendesk_oauth_tokens.json` (see Config below). Never commit it; it is git-ignored.
-
-4. **Install and start the three services:**
+3. **Create `.env`** from the committed template and fill in the five required values (table below). `.env` is git-ignored; never commit it.
 
    ```
+   cp .env.example .env
+   ```
+
+   | Variable | Required | Where it comes from |
+   |---|---|---|
+   | `ZENDESK_SUBDOMAIN` | yes | The part before `.zendesk.com` in your Zendesk URL |
+   | `ZENDESK_EMAIL` | yes | The agent account this tool acts as |
+   | `ZENDESK_API_KEY` | yes | The API token from Prerequisites step 3 |
+   | `ZENDESK_CLIENT_ID` | yes | The OAuth client's *Unique identifier* |
+   | `ZENDESK_CLIENT_SECRET` | yes | The OAuth client's secret |
+   | `ZENDESK_REDIRECT_URI` | no | Default `https://localhost/callback`; must match a registered redirect URL exactly |
+   | `ZENDESK_OAUTH_TOKEN_PATH` | no | Default `.zendesk_oauth_tokens.json` in this repo's root (see Config) |
+
+   Also review `STANDUP_PEOPLE`, `STANDUP_TRACKED_PERSON` and `OVERVIEW_PEOPLE` now. Their built-in defaults are the original team's names, so on another team the standup owner filter and the `/overview` cards show the wrong people until these are set (table below).
+
+4. **Check, then install and start the three services:**
+
+   ```
+   zsh scripts/reload_launchd.sh --check
    zsh scripts/reload_launchd.sh
    ```
 
-5. **Open http://127.0.0.1:8765/ and connect Zendesk.** If an amber banner says the connection needs attention, click **Reconnect now**, approve access in the tab it opens, then paste the redirect URL back into the page. Tickets are detected on the next 2-minute run (Mon–Fri, 9am–4pm), or click **Refresh data** to scan now.
+   `--check` finds the zendesk-mcp-server checkout, confirms its venv can import the Zendesk client, and confirms `.env` exists, without installing anything. The installer works out every path from where it sits, so no files need editing for a different folder or user account. If the checkout is not next to this repo, prefix both commands with `ZENDESK_MCP_DIR=/path/to/zendesk-mcp-server`. A `WARNING` about an import failure means step 2 or the editable install in Prerequisites step 2 is incomplete.
 
-6. **Optional:** the notification helper app, and the sibling repos for `/sla` and `/standup`, are described below.
+5. **Verify the services are up:**
 
-Cloning to a different folder or user account: change `REPO_ROOT` in `scripts/reload_launchd.sh` and the absolute paths in the three `scripts/*.plist` files before step 4.
+   ```
+   curl http://127.0.0.1:8765/healthz      # prints: ok
+   launchctl list | grep com.csa           # three rows; a number in the first column means running
+   tail scripts/output/review_server.err.log scripts/output/launchd.err.log
+   ```
 
-**Prerequisites:** the sibling `zendesk-mcp-server` repo (at `~/Desktop/git/zendeskmcp/zendesk-mcp-server`) checked out with its own `.venv`, with `zendesk_mcp_server` installed (`pip install -e .`) alongside `zenpy`, `requests` and `python-dotenv`. This repo's `launchd` plists point at that venv's Python directly.
+   Empty or absent error logs are the good case. If `healthz` does not answer after about ten seconds, read `review_server.err.log` and see Troubleshooting.
 
-**Config:** start from `zendesk-mcp-server`'s `.env.example`, or use this repo's own `.env` (git-ignored, never committed). One field is unusual: `ZENDESK_OAUTH_TOKEN_PATH` is an **absolute path** to `zendesk-mcp-server/.zendesk_oauth_tokens.json`, not a copy, because that server also refreshes the file, and one shared token file avoids two copies drifting apart.
+6. **Open http://127.0.0.1:8765/ and connect Zendesk.** If an amber banner says the connection needs attention, click **Reconnect now**, approve access in the tab it opens, then paste the redirect URL back into the page. The tab that opens at `https://localhost/callback` is expected to show a connection error; its address bar is what gets pasted. Tickets are detected on the next 2-minute run (Mon–Fri, 9am–4pm local), or click **Refresh data** to scan now.
+
+7. **Optional:** the notification helper app, and the sibling repos for `/sla` and `/standup`, are described below.
+
+**Config:** `.env` lives in this repo's root (copy `.env.example`). One field is unusual: `ZENDESK_OAUTH_TOKEN_PATH`. Left unset, the OAuth tokens are stored in `.zendesk_oauth_tokens.json` in this repo's root. Set it to an **absolute path** only when `zendesk-mcp-server` is also used on its own and should share one token file (it refreshes the file too, and a single shared copy avoids two copies drifting apart).
 
 Optional knobs, all with defaults:
 
@@ -79,7 +125,7 @@ Optional knobs, all with defaults:
 A small Automator application gives macOS a real notification sender to track. About five minutes of GUI setup:
 
 1. Open **Automator**, choose **File → New → Application**.
-2. Add a **Run AppleScript** action and replace its placeholder code with the contents of `scripts/csa_notifier.applescript`. If this repo moves, update the `payloadPath` line near the top of that script.
+2. Add a **Run AppleScript** action and replace its placeholder code with the contents of `scripts/csa_notifier.applescript`. The script builds `payloadPath` from your home folder plus `Desktop/git/sla-task-firstreply/scripts/output/notify_payload.json`; if this repo is cloned somewhere else, edit the part after the home folder on the `payloadPath` line near the top.
 3. **File → Save** as `CSA Notifier` in `~/Applications` (the default `ZENDESK_NOTIFIER_APP_PATH`; set that variable if you save elsewhere).
 4. Double-click `CSA Notifier.app` once. A "CSA Notifier — Ready" banner should appear; approve notifications if prompted, then in System Settings → Notifications confirm "CSA Notifier" is allowed with an alert style other than "None".
 
@@ -87,16 +133,18 @@ A small Automator application gives macOS a real notification sender to track. A
 
 ### Install the services
 
-`scripts/reload_launchd.sh` is the install step and the reload step. It copies all three plists (first-reply check, review server, watchdog) into `~/Library/LaunchAgents/` and (re)loads each with `launchctl bootout` then `bootstrap`. It is safe to re-run, so run it again after pulling changes:
+`scripts/reload_launchd.sh` is the install step and the reload step. It resolves this repo's location from its own, finds the `zendesk-mcp-server` checkout (`$ZENDESK_MCP_DIR`, else a sibling folder), copies all three plists (first-reply check, review server, watchdog) into `~/Library/LaunchAgents/` with those paths filled in, and (re)loads each with `launchctl bootout` then `bootstrap`. The plists in the repo keep the original author's paths and are never modified; only the copies in `~/Library/LaunchAgents/` are rewritten, so a plist edited by hand there is overwritten on the next run. It also creates `scripts/output/`, which is git-ignored and which `launchd` needs for the log files. It is safe to re-run, so run it again after pulling changes:
 
 ```
-zsh scripts/reload_launchd.sh
+zsh scripts/reload_launchd.sh            # install / reload
+zsh scripts/reload_launchd.sh --check    # resolve paths and run the prerequisite checks only
 ```
 
-To do one service by hand, copy its plist into `~/Library/LaunchAgents/` and register it, using `bootstrap` rather than the older `launchctl load`, which can silently leave an old definition running:
+The watchdog deliberately avoids the zendesk-mcp-server venv (so it keeps working when that venv breaks). Its interpreter is the one in the committed plist when that exists on the machine, otherwise the real interpreter underneath the venv. Set `WATCHDOG_PYTHON=/path/to/python3` to choose another one.
+
+To do one service by hand, take its generated plist from `~/Library/LaunchAgents/` (run the installer once first, because the copy in the repo still has the original author's paths) and register it, using `bootstrap` rather than the older `launchctl load`, which can silently leave an old definition running:
 
 ```
-cp scripts/com.csa.zendesk-review-server.plist ~/Library/LaunchAgents/
 launchctl bootout gui/$(id -u)/com.csa.zendesk-review-server 2>/dev/null
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.csa.zendesk-review-server.plist
 ```
@@ -105,7 +153,7 @@ After changing a script, reload it the same way. For just the review server, see
 
 ## Day to day
 
-Open **http://127.0.0.1:8765/** to see what's waiting on you. The header nav links to every page below; each link carries a status badge where one makes sense, and the active page is highlighted.
+Open **http://127.0.0.1:8765/** to see what's waiting on you. The header nav links to every page below; the active page is highlighted. The links carry no count badges.
 
 ### The main queue (`/firstreply`)
 
@@ -134,11 +182,11 @@ Tickets detected before the full-text change keep their old truncated "..." text
 
 The page follows your Mac's light/dark setting. A header control overrides it, left to right: **Abyss / Galaxy / Dark / Tomorrow Blue / Lesbian pride / Halloween / Christmas**. Each button is a line icon (anchor, orbit, moon with star, terminal, cloud with moon, ghost, snowflake); hover for the theme's name. The choice is remembered per browser (`localStorage`, not written to any tracked file). There is no longer an Auto button: with nothing saved, the page follows the Mac's light/dark setting, and a browser that had saved Light, Auto or B68FBF is back on that default after this change. To return to the default after picking a theme, clear the site's data for `127.0.0.1:8765` (or run `localStorage.removeItem('csa-theme')` in the browser console).
 
-**Background image.** The **Background** control under the theme toggle sets an image as the page background. **Choose image…** takes any image file, scales it down to at most 1920px on its long edge, and keeps it as a JPEG in this browser's `localStorage` (a very large image that won't fit is applied to the current page only, with a note). **Fade** sets how much of the theme's own color covers the image (0 to 95%, default 60%) so text stays readable in every theme, and **Remove** clears it. While an image is set the interface switches to a liquid-glass look: cards, board columns, filter boxes, inputs and chips become translucent, blurred panels with a bright top edge, rounder corners and a soft shadow, all built from the active theme's own colors, and loose headings get a soft halo for contrast. Browsers without `backdrop-filter` keep the solid cards. With no image, nothing changes. After choosing an image, a notification confirms it. The image is read back from storage first, so the message is accurate: when it was saved, it says the image stays in this browser and does not need to be uploaded again after the page is closed (clearing the browser's site data, or a private window, removes it); when it could not be saved, a red notification says it will need to be uploaded again if the page is closed or reloaded. Removing the image shows a notification too. Nothing is uploaded or written to disk by the server; another browser starts without the image. The image is applied in `<head>` before first paint, so it doesn't flash in late.
+**Background image.** The **Background** control under the theme toggle sets an image as the page background. **Collapse menu** in the same panel hides the left menu to give the page the full width; a small menu button at the top-left of the page brings it back, and the choice is kept per browser (`csa-menu-collapsed` in `localStorage`, applied before first paint). **Choose image…** takes any image file, scales it down to at most 1920px on its long edge, and keeps it as a JPEG in this browser's `localStorage` (a very large image that won't fit is applied to the current page only, with a note). **Fade** sets how much of the theme's own color covers the image (0 to 95%, default 60%) so text stays readable in every theme, and **Remove** clears it. While an image is set the interface switches to a liquid-glass look: cards, board columns, filter boxes, inputs and chips become translucent, blurred panels with a bright top edge, rounder corners and a soft shadow, all built from the active theme's own colors, and loose headings get a soft halo for contrast. Browsers without `backdrop-filter` keep the solid cards. With no image, nothing changes. After choosing an image, a notification confirms it. The image is read back from storage first, so the message is accurate: when it was saved, it says the image stays in this browser and does not need to be uploaded again after the page is closed (clearing the browser's site data, or a private window, removes it); when it could not be saved, a red notification says it will need to be uploaded again if the page is closed or reloaded. Removing the image shows a notification too. Nothing is uploaded or written to disk by the server; another browser starts without the image. The image is applied in `<head>` before first paint, so it doesn't flash in late.
 - **Abyss** is VS Code's Abyss palette: a deep navy ground (`#000c18`), `#060621` panels, the editor's `#6688cc` blue for muted text (body text is a lighter tint of it, for contrast) and Abyss gold (`#ddbb88`) as the accent. The button hues are darkened Abyss token colors (badge blue, purple, slate, rose, gold). The Abyss values were written from memory of the VS Code theme and could not be checked against the source file, so small differences are possible.
 - **Tomorrow Blue** is VS Code's built-in Tomorrow Night Blue: `#002451` ground, the Tomorrow pastels (`#bbdaff` blue as the accent, plus purple, aqua, red and orange) darkened for the button fills so white text stays readable. The background, selection (`#003f8e`) and ANSI-style palette were confirmed against a published copy of the theme.
 - **Lesbian pride** is a soft, light theme: a page wash running through the flag's seven bands (orange tints at the top, white in the middle, rose and magenta tints at the bottom), warm-white cards, and the flag's own colors (`#d52d00`, `#ef7627`, `#ff9a56`, `#ffffff`, `#d162a4`, `#b55690`, `#a30262`) as tints and as deepened shades on text and buttons. It is the only light named theme and sets `color-scheme: light`. Its toggle button is a cloud-and-moon icon.
-- **Halloween** (near-black, pumpkin-orange accent, purple secondary buttons) and **Christmas** (deep pine-black, bright green accent, cranberry secondary buttons) are seasonal dark themes with a small pumpkin or tree glyph beside the header title. Christmas is the only place red/green appears in the buttons.
+- **Halloween** (near-black, pumpkin-orange accent, purple secondary buttons) and **Christmas** (deep pine-black, bright green accent, cranberry secondary buttons) are seasonal dark themes. Christmas is the only place red/green appears in the buttons. Christmas also has falling snow: one fixed canvas (about 40 to 160 white flakes, scaled to the window) that ignores the mouse and sits above the page but below the toast and loading overlay. It runs only while Christmas is active, pauses while the tab is hidden, and is not shown when the OS asks for reduced motion.
 - **Galaxy** is a dark theme built around a galaxy photo (`scripts/assets/galaxy-bg.jpg`, 1280px wide, about 270 KB, served by the review server at `/assets/galaxy-bg.jpg`). The photo is the page background, under a dark veil, and the liquid-glass panels described above are always on in this theme. The colors come from the photo: blue-black space, the coral star-forming lanes as the accent (with dark text on the active pills), and teal, blue, violet, slate, coral and orange hues for the action buttons. Choosing your own background image with **Background** takes priority over the galaxy photo. The credit line under the Background control is shown only while the photo is the background.
 - **Image credit:** NGC 7253 and Arp 278, Gemini North. Image: International Gemini Observatory / NOIRLab / NSF / AURA. Processing: J. Miller and M. Rodriguez (International Gemini Observatory / NSF NOIRLab), T.A. Rector (University of Alaska Anchorage / NSF NOIRLab), D. de Martin and M. Zamani (NSF NOIRLab). Licensed [CC BY 4.0](https://noirlab.edu/public/copyright/); seen via NASA's Astronomy Picture of the Day, 2026-09-04. Keep the credit if the image is reused, and do not use it to imply NOIRLab endorses anything.
 - Every other theme avoids the red/green traffic-light convention: each action has its own hue, and the connection warning is amber. All themes leave the amber warning/alert colors unchanged, since those are functional signals.
@@ -185,13 +233,13 @@ All of these share one row renderer (`_render_readonly_ticket_row`), show no dra
 - **Recently Solved** (`/solved`): your last `RECENTLY_SOLVED_LIMIT` (40) solved tickets in the IT-Operations group, with a "solved *N*h ago" time. Solved tickets assigned to you in other groups don't appear, because the scan is group-scoped. The same "stopped early" note applies (`SOLVED_TICKET_SCAN_PAGES`, default 10).
 - **Overview** (`/overview`): who holds which open IT-Operations tickets. One column per person (you first, then Jesstin, Nekoashi and Ryan) and an Unassigned column, each listing that person's new/open/pending/hold tickets oldest first, with age, an SLA-not-met or due-soon chip naming the rule, and Claim on tickets that aren't yours. Tickets held by anyone else are only counted in a note. The page is a Trello-style board: the columns sit in one row that scrolls sideways, and each column scrolls vertically past a screenful. To the right of the people, two columns replace what used to be the Discussion and Security nav tabs. **Discussion** shows the tickets tagged `block` or `standup` (five of each at most, with a link to `/flagged`). **Security** shows the IT-Security group's most recent tickets (five at most, with Claim and a link to `/security`). The ticket cards reuse the `/sla` page's cached scan (`_common.fetch_sla_tickets`, personal tasks excluded); the two blocks read `_common.fetch_flagged_tickets`' and `_common.fetch_recent_tickets`' own caches, so a cold load adds one listing scan for each. The Discussion and Security full pages keep Overview highlighted in the nav. Standup stays a nav tab. `OVERVIEW_PEOPLE` sets the names (comma-separated, exact Zendesk display names, first = you).
 
-**Nav badges.** The count of personal tasks not yet in Zendesk, your open standup action items and the Zendesk OAuth warning come from cheap local files, so they are always current. The SLA count reads that page's in-process cache (`_common.cached_sla_breach_count`) and never calls Zendesk, so it is "warm from your last visit" and disappears when the 2-minute cache goes stale. Badges are neutral gray except the warning ones.
+**No tab count badges.** The nav links used to show open tasks, standup items and SLA breaches; those numbers were removed. The "N pending" badge beside the title and the count in the browser tab's title remain. The helpers that fed the old badges (`_common.cached_sla_breach_count`, `cached_flagged_ticket_count`, `cached_security_ticket_count`, `standup_open_action_count`) are still in `_common.py`, tested, but nothing renders them now.
 
 ### Standup (`/standup`)
 
 Three read-only lists built from the Operations Standup notes. They come from the separate `meetingnotestool` project, which parses the notes and owns all status logic; these pages only display its view. Pages are server-rendered, work without JavaScript, and filter through plain query parameters.
 
-- **Action items** (`/standup?show=open|resolved|all&owner=&q=`): every action item mentioned at a standup and whose it is, newest first. A search box and an owner filter (only `STANDUP_PEOPLE`; no Group or Unassigned option) narrow the list; picking one owner adds a summary line (open, done and dropped counts). Each row shows the standup it was raised at (linked to those notes) and its topic. An owner the notes only implied is shown with a dotted underline, and a "check" tag marks a guessed detail. The owner is the person the notes assign the item to, which is not necessarily the person who said it. **Add to My tasks** on an open item owned by one of `STANDUP_PEOPLE` turns it into a local My tasks draft; other owners' items (Group, Unassigned, anyone else) have no button.
+- **Action items** (`/standup?show=open|resolved|all&owner=&q=`): every action item mentioned at a standup and whose it is, newest first. The owner filter **defaults to you**: a link with no `owner` shows your items only, where "you" is the notes' own `me` when that name is one of `STANDUP_PEOPLE`, otherwise the first name in `STANDUP_PEOPLE`. Choose **Everyone** (`owner=all`) to see all of them; that choice is kept in the page's links, and **Clear** returns to your items. A search box and an owner filter (only `STANDUP_PEOPLE`; no Group or Unassigned option) narrow the list; picking one owner adds a summary line (open, done and dropped counts). Each row shows the standup it was raised at (linked to those notes) and its topic. An owner the notes only implied is shown with a dotted underline, and a "check" tag marks a guessed detail. The owner is the person the notes assign the item to, which is not necessarily the person who said it. **Add to My tasks** on an open item owned by one of `STANDUP_PEOPLE` turns it into a local My tasks draft; other owners' items (Group, Unassigned, anyone else) have no button.
 - **Topics** (`/standup/topics?q=`): every topic the action items belong to, A to Z with letter headings, each with its status, how many standups raised it and how many open items it has. Opening one shows **Topic history** (`/standup/topic/<key>`): every update across standups, newest first, with each action item under the update it came from, so a topic can be followed over time.
 - **The tracked person's items** (`/standup/tracked?q=`, labelled with the person's name, Ryan by default; set `STANDUP_TRACKED_PERSON`): every topic update that person gave at a standup, grouped under that standup's date (linked to the notes), newest date first, so nothing they said is forgotten.
 
@@ -213,7 +261,7 @@ The reasoning behind each decision is in [`docs/DESIGN.md`](docs/DESIGN.md); thi
 - **A failed post leaves the draft intact.** There are no bulk actions: every reply is reviewed individually.
 - **The assignee badge is a hint, never a gate.** Zendesk's Assignee can be stale or irrelevant, so it never blocks a post or pulls a ticket. It costs one extra `get_ticket` per pending ticket per scan, an accepted tradeoff.
 - **Claim is a plain assignee change**, reversible and nothing posted, so it needs no interstitial. Taking over someone else's ticket asks for one in-page confirmation.
-- **Localhost only, no login.** The server binds to `127.0.0.1`; there is deliberately no auth layer beyond being logged into this Mac.
+- **Localhost only, no login.** The server binds to `127.0.0.1`; there is deliberately no auth layer beyond being logged into your macOS user account.
 - **Credential-bearing files are tightened.** `AUTH_STATE_FILE`, `OAUTH_PENDING_FILE` and the shared token file are `chmod`'d to `0600` after writes (`_harden_file_permissions`), best-effort.
 - **Private data stays out of this public repo.** `/standup` reads `meetingnotestool` data from that checkout at request time (`_common.standup_snapshot`, mtime-cached), never copying or caching it, and writes nothing there. `scripts/tests/conftest.py` points `STANDUP_DATA_FILE` at a temp path, so tests can't read real notes.
 - **A read-only dependency stays read-only.** This tool only reads `sla-report-slack`'s `sla_history.json`. It never pulls, writes or commits there, so it can't create a merge commit or send that repo's email.
@@ -249,11 +297,11 @@ The reasoning behind each decision is in [`docs/DESIGN.md`](docs/DESIGN.md); thi
 - **Missing is not zero.** A field absent from a day's snapshot becomes `null`, drawn as a gap, because 0 h is a real median and 0 breaches is a real day. Rule counts are blank on days from before the history recorded them.
 - **Outliers are clamped visibly, not hidden.** Response-time values beyond 4x the limit sit at the top of the axis as triangles with the true value in the tooltip, so one bad day doesn't flatten the rest.
 - **Charts match the sibling dashboard.** Chart.js (4.4.1) with the zoom plugin is the one external script dependency in the tool, a deliberate exception to the one-self-contained-response style, so these charts behave like `sla_dashboard.html`'s. Theme colors are read from CSS variables at build time.
-- **Keep only what's asked for.** An earlier KPI strip, rule cards and awaiting-first-response list were removed on request. The live scan stays, because it feeds the nav badge.
+- **Keep only what's asked for.** An earlier KPI strip, rule cards and awaiting-first-response list were removed on request. The live scan stays, because Overview uses it.
 
 **UI**
 
-- **A new workflow gets a new page**, and a page's status shows where you are: nav badges are computed from cheap local files or warm caches, never a new Zendesk call. A badge exists only where the count is a signal, so Recently Solved has none.
+- **A new workflow gets a new page**, and a page's status shows where you are through the highlighted nav link. Anything counted for a header is computed from cheap local files or warm caches, never a new Zendesk call.
 - **One primary action per page, everything else outlined.** Icons are a fixed set of hand-authored inline SVGs (`_ICONS`, `currentColor`). Decorative topic icons (`_topic_icon()`) are separate self-contained colored PNG badges with empty `alt` text and degrade to nothing if a file is missing.
 - **Avatars only beside names the tool trusts** (`_avatar_html`, `_requester_avatar_prefix`), never beside an unconfirmed guess.
 - **The toast and the auth banner share CSS but not behavior.** The toast (`data-toast`) floats and auto-dismisses; the auth warning stays docked, since a standing condition shouldn't vanish on a timer.
@@ -282,6 +330,7 @@ The reasoning behind each decision is in [`docs/DESIGN.md`](docs/DESIGN.md); thi
 ## Repo layout
 
 ```
+.env.example                                  template for the git-ignored .env (copy it, fill it in)
 requirements.txt                              runtime dependencies (pinned)
 requirements-dev.txt                          + pytest, for running scripts/tests/
 docs/DESIGN.md                                full original documentation and design rationale
@@ -294,7 +343,7 @@ scripts/
   com.csa.zendesk-first-reply-check.plist     launchd config for the cron job
   com.csa.zendesk-review-server.plist         launchd config for the web server
   com.csa.zendesk-watchdog.plist              launchd config for the watchdog (every 5 min)
-  reload_launchd.sh                           (re)installs all three services
+  reload_launchd.sh                           (re)installs all three services; works out paths itself, `--check` for a dry run
   csa_notifier.applescript                    source for the optional "CSA Notifier.app" helper
   recolor_topic_icons.py                      (unused since the B68FBF theme was removed; safe to delete)
   assets/                                     csa-logo.png, galaxy-bg.jpg, topic-icons/ (the *-b68fbf.png and b68fbf-logo.png files are unused)
@@ -313,7 +362,7 @@ python3 -m pytest scripts/tests/ -v
 
 The suite runs in seconds with no real Zendesk credentials, no network and no sibling `zendesk-mcp-server` checkout. `scripts/tests/conftest.py` puts a stand-in (`scripts/tests/stub_pkg/`) ahead of the real `zendesk_mcp_server` on `sys.path` and repoints every `_common.py` file path at a fresh temp directory per test, so no test touches the live `pending_drafts.json` or `personal_tasks.json`. Fixtures are all made up.
 
-**Covered:** the personal-task lifecycle and its shared validation; the atomic-write-under-flock guarantee for both stores (with real concurrent writer threads); the nav badge caches and their locks; form-body parsing edge cases; the three standup lists (action items with person filter and Add to My tasks, topics A to Z with history, the tracked person's updates by date) and the redirects from the old pages; the measured-progress counting, history and `/__progress` wiring (including a real HTTP test); the seasonal-theme markup; the comment cache and stale-while-revalidate behavior, including that click-time checks stay live; the `/sla` chart series (gaps versus zeros) and markup; the `/overview` grouping by assignee and its page; the `/tasks` page layout (drafts only, two columns) and its nav badge; the Assignee/Requester choices (only the four people, exact-name lookup, rejection of anything else); the background picker's markup, head script and CSS.
+**Covered:** the personal-task lifecycle and its shared validation; the atomic-write-under-flock guarantee for both stores (with real concurrent writer threads); the nav badge caches and their locks; form-body parsing edge cases; the three standup lists (action items with person filter and Add to My tasks, topics A to Z with history, the tracked person's updates by date) and the redirects from the old pages; the measured-progress counting, history and `/__progress` wiring (including a real HTTP test); the seasonal-theme markup; the comment cache and stale-while-revalidate behavior, including that click-time checks stay live; the `/sla` chart series (gaps versus zeros) and markup; the `/overview` grouping by assignee and its page; the `/tasks` page layout (drafts only, two columns) and the absence of count badges on the nav tabs; the Assignee/Requester choices (only the four people, exact-name lookup, rejection of anything else); the background picker's markup, head script and CSS; the install tooling (`reload_launchd.sh` run under zsh with a stubbed `launchctl` and a temporary home folder, so the generated plists, XML escaping, `--check` mode and the missing-`.env` and missing-checkout failures are exercised, plus `.env.example` against the settings the code reads). The install tests are skipped where zsh is absent.
 
 **Not covered:** anything JS-driven in a real browser (the loading bar's drawing and the detail card, the `/sla` charts' drawing, theme switching, choosing and removing a background image, the category auto-fill listener) and full end-to-end page rendering. Those are checked manually with Playwright during development. Promote, complete and quick-solve, which need a live-ish client, are not covered yet either.
 
@@ -332,4 +381,4 @@ The suite runs in seconds with no real Zendesk credentials, no network and no si
   lsof -ti :8765 | xargs kill -9 2>/dev/null; launchctl bootout gui/$(id -u)/com.csa.zendesk-review-server 2>/dev/null; sleep 2; launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.csa.zendesk-review-server.plist
   ```
 - **The watchdog** checks every 5 minutes that the review server answers HTTP (via the lightweight `/healthz` route, so a slow Zendesk scan can't trip it) and that `first_reply_check` has completed a scan recently during business hours, and notifies as soon as either looks stuck. It has no dependency on `_common.py` or `zendesk_mcp_server`, so it keeps working if that import chain breaks, which is why it exists: the `ModuleNotFoundError` above once broke both services unnoticed. A "Connection reset by peer" alert with a working page usually means a hung request, not a down server; restart as above.
-- **`watchdog.err.log` fills with `can't open file '.../watchdog.py': [Errno 1] Operation not permitted`:** macOS privacy protection is blocking the watchdog's interpreter from reading `~/Desktop` (this happened with the Command Line Tools `/usr/bin/python3`). The watchdog plist points at the standalone uv-managed CPython the other two services use. If a `uv` upgrade removes that exact version, update the path in `com.csa.zendesk-watchdog.plist`, copy it to `~/Library/LaunchAgents/`, and reload the watchdog.
+- **`watchdog.err.log` fills with `can't open file '.../watchdog.py': [Errno 1] Operation not permitted`:** macOS privacy protection is blocking the watchdog's interpreter from reading a protected folder such as `~/Desktop` (this happened with the Command Line Tools `/usr/bin/python3`). The watchdog must run on a standalone interpreter that already has that access, such as the uv-managed CPython the other two services' venv is built on. If a `uv` upgrade removes the interpreter it was using, re-run the installer with `WATCHDOG_PYTHON=/path/to/python3 zsh scripts/reload_launchd.sh` to point the watchdog at another one.

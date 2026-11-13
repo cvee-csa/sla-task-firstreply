@@ -2,6 +2,8 @@
 apply-before-paint script and the CSS must be on every page, and nothing about
 the image may reach the server. (Picking, persisting and removing an image is
 checked in a real browser, like the other JS behavior; see the README.)"""
+import re
+
 import review_server
 
 
@@ -92,3 +94,35 @@ def test_a_toast_confirms_the_upload_and_says_whether_re_uploading_is_needed():
     assert "you will not need to upload it again after closing the page" in script
     assert "You will need to upload it again if the page is closed or reloaded" in script
     assert "Background image removed" in script
+
+
+def test_collapse_menu_option_lives_in_the_background_panel():
+    out = _page_html()
+    panel = out.split('class="bg-picker-panel"')[1].split("</details>")[0]
+    assert 'id="menu-collapse"' in panel and "Collapse menu" in panel
+    assert out.count('id="menu-expand"') == 1 and 'id="menu-expand"' not in panel
+    assert out.index('id="menu-expand"') < out.index('<div class="brand">')
+
+
+def test_collapsed_menu_css_hides_the_sidebar_and_shows_the_expand_button():
+    css = _css()
+    assert "html.menu-collapsed .brand { display: none; }" in css
+    assert "html.menu-collapsed .menu-expand { display: inline-flex; }" in css
+    assert re.search(r"\.menu-expand \{\s*display: none; position: fixed;", css)
+    assert "html.menu-collapsed body { margin: 2rem auto;" in css
+    assert "html.menu-collapsed #page-loading-dim { left: 0; }" in css
+
+
+def test_collapse_state_is_applied_before_paint_and_kept_in_this_browser():
+    out = _page_html()
+    head = out.split("</head>")[0]
+    assert "csa-menu-collapsed" in head and "menu-collapsed" in head
+    assert "localStorage.setItem(KEY, '1')" in out and "localStorage.removeItem(KEY)" in out
+
+
+def test_panel_buttons_are_outlined_and_readable():
+    """The global button rule is white text with no fill; without their own
+    rule the Remove and Collapse buttons were white on pale grey."""
+    css = _css()
+    rule = re.search(r"\.bg-picker-remove, \.bg-picker-collapse \{\s*(.*?)\s*\}", css, re.S).group(1)
+    assert "background: transparent" in rule and "color: var(--text)" in rule

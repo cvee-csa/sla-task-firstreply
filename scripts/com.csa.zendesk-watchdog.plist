@@ -9,7 +9,7 @@
          third-party dependencies on purpose, so it keeps working even if
          that venv breaks again (that's the whole point of it). This is the
          standalone uv-managed CPython that venv is built on, not the venv
-         itself -- no installed packages are involved.
+         itself, no installed packages are involved.
 
          Not /usr/bin/python3 any more: macOS's privacy protection blocks
          the Command Line Tools python3 from reading anything under

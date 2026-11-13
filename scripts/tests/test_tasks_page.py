@@ -34,13 +34,13 @@ def test_empty_state():
     assert "Not yet in Zendesk (0)" in page and "Nothing here yet." in page
 
 
-def test_nav_badge_counts_drafts_only(monkeypatch):
+def test_nav_tabs_carry_no_count_badges(monkeypatch):
     monkeypatch.setattr(_common, "draft_personal_tasks", lambda: [_draft(1), _draft(2)])
     monkeypatch.setattr(_common, "open_personal_tasks", lambda: [{"local_id": "o1"}] * 5)
     nav = review_server._top_nav_html(current_path="/tasks")
+    assert "nav-badge" not in nav
     tag = nav[nav.index('href="/tasks"'):]
-    tag = tag[:tag.index("</a>")]
-    assert '<span class="nav-badge">2</span>' in tag      # not 7: the open (promoted) tasks aren't counted
+    assert tag[:tag.index("</a>")].endswith('<span class="top-nav-label">Tasks</span>')
 
 
 def test_nav_badge_hidden_with_no_drafts(monkeypatch):
