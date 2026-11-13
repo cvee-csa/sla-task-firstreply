@@ -227,13 +227,17 @@ _ICONS = {
     "check-circle": '<path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline>',
     "chevron-up": '<polyline points="18 15 12 9 6 15"></polyline>',
     "chevron-down": '<polyline points="6 9 12 15 18 9"></polyline>',
-    # Added for the icon-only theme toggle (see _page()'s brand-right). Named
-    # palettes (Tomorrow Blue, the lesbian-pride theme) have no icon here --
-    # they render as an actual color swatch (see .theme-swatch) instead.
+    # Icons for the icon-only theme toggle (see _page()'s brand-right): anchor
+    # (Abyss), orbit (Galaxy), moon-star (Dark), terminal (Tomorrow Blue),
+    # cloud-moon (Lesbian pride), ghost (Halloween), snowflake (Christmas).
     "sun": '<circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>',
-    "waves": '<path d="M2 6c.6.5 1.2 1 2.5 1C7 7 7 5 9.5 5c2.6 0 2.4 2 5 2 2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1"></path><path d="M2 12c.6.5 1.2 1 2.5 1 2.5 0 2.5-2 5-2 2.6 0 2.4 2 5 2 2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1"></path><path d="M2 18c.6.5 1.2 1 2.5 1 2.5 0 2.5-2 5-2 2.6 0 2.4 2 5 2 2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1"></path>',
-    "galaxy": '<path d="M12 12.4c-.5-.9.2-1.9 1.2-1.9 1.4 0 2.2 1.6 1.5 2.9-1 1.9-3.6 2.3-5.4 1-2.3-1.6-2.5-5-.5-7 2.6-2.6 7-2 9 1.1"></path><path d="M12 12.4c.5.9-.2 1.9-1.2 1.9-1.4 0-2.2-1.6-1.5-2.9"></path><path d="M16.2 17.9c-3.3 2.6-8.3 1.8-10.8-1.7"></path><path d="M3.4 8.3C4.6 5.2 7.4 3.1 10.6 2.7"></path>',
-    "moon": '<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>',
+    "anchor": '<path d="M12 22V8"></path><path d="M5 12H2a10 10 0 0 0 20 0h-3"></path><circle cx="12" cy="5" r="3"></circle>',
+    "orbit": '<circle cx="12" cy="12" r="3"></circle><circle cx="19" cy="5" r="2"></circle><circle cx="5" cy="19" r="2"></circle><path d="M10.4 21.9a10 10 0 0 0 9.941-15.416"></path><path d="M13.5 2.1a10 10 0 0 0-9.841 15.416"></path>',
+    "moon-star": '<path d="M18 5h4"></path><path d="M20 3v4"></path><path d="M20.985 12.486a9 9 0 1 1-9.473-9.472c.405-.022.617.46.402.803a6 6 0 0 0 8.268 8.268c.344-.215.825-.004.803.401"></path>',
+    "terminal": '<polyline points="4 17 10 11 4 5"></polyline><line x1="12" y1="19" x2="20" y2="19"></line>',
+    "cloud-moon": '<path d="M13 16a3 3 0 0 1 0 6H7a5 5 0 1 1 4.9-6Z"></path><path d="M10.1 9A6 6 0 0 1 16 4a4.24 4.24 0 0 0 6 6 6 6 0 0 1-3 5.197"></path>',
+    "ghost": '<path d="M9 10h.01"></path><path d="M15 10h.01"></path><path d="M12 2a8 8 0 0 0-8 8v12l3-3 2.5 2.5L12 19l2.5 2.5L17 19l3 3V10a8 8 0 0 0-8-8z"></path>',
+    "snowflake": '<line x1="2" y1="12" x2="22" y2="12"></line><line x1="12" y1="2" x2="12" y2="22"></line><path d="m20 16-4-4 4-4"></path><path d="m4 8 4 4-4 4"></path><path d="m16 4-4 4-4-4"></path><path d="m8 20 4-4 4 4"></path>',
     "monitor": '<rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line>',
     # Seasonal-theme glyphs (Halloween / Christmas): the toggle buttons and
     # the small header accent both use these, same line-icon style as above.
@@ -2133,15 +2137,6 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
   .theme-toggle button:hover {{ background: var(--divider); }}
   .theme-toggle button.active {{ background: var(--accent); color: white; }}
   .theme-toggle button.active:hover {{ background: var(--accent); }}
-  /* Theme buttons for a named palette (rather than a concept a line-icon
-     could stand in for) get an actual swatch of that palette instead. */
-  .theme-swatch {{
-    display: inline-block; width: 12px; height: 12px; border-radius: 50%;
-    border: 1px solid rgba(128, 128, 128, 0.45);
-  }}
-  .theme-swatch-tomorrow {{ background: linear-gradient(135deg, #002451 0 50%, #bbdaff 50% 100%); }}
-  /* The seven horizontal bands of the lesbian pride flag, top to bottom. */
-  .theme-swatch-lesbian {{ background: linear-gradient(180deg, #d52d00 0 14.3%, #ef7627 0 28.6%, #ff9a56 0 42.9%, #ffffff 0 57.1%, #d162a4 0 71.4%, #b55690 0 85.7%, #a30262 0 100%); }}
   /* Nav list of actual working pages (Overview / Tasks / Discussion /
      Security / Recently Solved) -- its own dedicated
      stack (see .brand-nav-row) instead of as middot-separated text down
@@ -2710,13 +2705,13 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
 <div class="brand">
   <div class="brand-controls-row">
     <div class="theme-toggle" role="group" aria-label="Theme">
-      <button type="button" data-theme="abyss" title="Abyss (VS Code)" onclick="setTheme('abyss')">{_icon("waves", "icon-sm")}</button>
-      <button type="button" data-theme="galaxy" title="Galaxy" onclick="setTheme('galaxy')">{_icon("galaxy", "icon-sm")}</button>
-      <button type="button" data-theme="dark" title="Dark" onclick="setTheme('dark')">{_icon("moon", "icon-sm")}</button>
-      <button type="button" data-theme="tomorrow" title="Tomorrow Blue (VS Code)" onclick="setTheme('tomorrow')"><span class="theme-swatch theme-swatch-tomorrow"></span></button>
-      <button type="button" data-theme="lesbian" title="Lesbian pride (soft)" onclick="setTheme('lesbian')"><span class="theme-swatch theme-swatch-lesbian"></span></button>
-      <button type="button" data-theme="halloween" title="Halloween" onclick="setTheme('halloween')">{_icon("pumpkin", "icon-sm")}</button>
-      <button type="button" data-theme="christmas" title="Christmas" onclick="setTheme('christmas')">{_icon("tree", "icon-sm")}</button>
+      <button type="button" data-theme="abyss" title="Abyss (VS Code)" onclick="setTheme('abyss')">{_icon("anchor", "icon-sm")}</button>
+      <button type="button" data-theme="galaxy" title="Galaxy" onclick="setTheme('galaxy')">{_icon("orbit", "icon-sm")}</button>
+      <button type="button" data-theme="dark" title="Dark" onclick="setTheme('dark')">{_icon("moon-star", "icon-sm")}</button>
+      <button type="button" data-theme="tomorrow" title="Tomorrow Blue (VS Code)" onclick="setTheme('tomorrow')">{_icon("terminal", "icon-sm")}</button>
+      <button type="button" data-theme="lesbian" title="Lesbian pride (soft)" onclick="setTheme('lesbian')">{_icon("cloud-moon", "icon-sm")}</button>
+      <button type="button" data-theme="halloween" title="Halloween" onclick="setTheme('halloween')">{_icon("ghost", "icon-sm")}</button>
+      <button type="button" data-theme="christmas" title="Christmas" onclick="setTheme('christmas')">{_icon("snowflake", "icon-sm")}</button>
     </div>
   </div>
   <div class="brand-nav-row">

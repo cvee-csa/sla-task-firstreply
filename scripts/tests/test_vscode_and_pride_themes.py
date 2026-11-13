@@ -99,18 +99,22 @@ def test_dark_accent_pills_get_dark_text_but_lesbian_does_not():
         assert f"html.theme-lesbian {sel}" not in css
 
 
-def test_lesbian_theme_has_the_soft_flag_wash_and_swatches():
+def test_lesbian_theme_has_the_soft_flag_wash():
     css = _css()
     assert "html.theme-lesbian body { background: transparent; }" in css
     assert "linear-gradient(180deg, #ffe0cc" in css
-    swatch = re.search(r"\.theme-swatch-lesbian \{ background: (.*?); \}", css).group(1)
-    for flag in ("#d52d00", "#ef7627", "#ff9a56", "#ffffff", "#d162a4", "#b55690", "#a30262"):
-        assert flag in swatch
-    assert ".theme-swatch-tomorrow" in css
 
 
-def test_waves_icon_exists():
-    assert "waves" in review_server._ICONS and 'd="M2 6c' in review_server._icon("waves")
+def test_each_theme_button_has_its_line_icon():
+    out = _page().split('class="theme-toggle"')[1].split("</div>")[0]
+    expected = {"abyss": "anchor", "galaxy": "orbit", "dark": "moon-star", "tomorrow": "terminal",
+                "lesbian": "cloud-moon", "halloween": "ghost", "christmas": "snowflake"}
+    buttons = dict(re.findall(r'data-theme="([a-z0-9]+)"[^>]*>(.*?)</button>', out, re.S))
+    assert set(buttons) == set(expected)
+    for theme, icon in expected.items():
+        assert buttons[theme].strip() == review_server._icon(icon, "icon-sm"), theme
+        assert icon in review_server._ICONS and review_server._ICONS[icon]
+    assert "theme-swatch" not in out
 
 
 def test_avatar_hue_rules_are_valid_single_brace_css():
