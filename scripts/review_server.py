@@ -1576,9 +1576,13 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
   .overview-section-head {{ display: flex; align-items: baseline; justify-content: space-between; gap: 0.75rem; margin-bottom: 0.75rem; }}
   .overview-section-head .column-heading {{ margin: 0; }}
   .overview-see-all {{ font-size: 0.82rem; font-weight: 600; white-space: nowrap; }}
-  /* /overview: one card per person. Auto-fit columns, so four people sit in a
-     row on a wide screen and stack on a narrow one. */
-  .person-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(270px, 1fr)); gap: 1.25rem; align-items: start; }}
+  /* /overview is a board, like Trello: one column per person, then Unassigned,
+     Discussion and Security, in a single row that scrolls sideways. Each
+     column has a fixed width and scrolls vertically past a screenful. */
+  .overview-board {{ display: flex; gap: 1.25rem; align-items: flex-start; overflow-x: auto; padding: 0.25rem 0.25rem 1rem 0; scroll-snap-type: x proximity; }}
+  .overview-board > .overview-section {{ flex: 0 0 var(--board-col-width, 330px); width: var(--board-col-width, 330px); max-height: calc(100vh - 11rem); overflow-y: auto; scroll-snap-align: start; margin-bottom: 0; box-sizing: border-box; }}
+  .overview-board > .overview-block-discussion, .overview-board > .overview-block-security {{ --board-col-width: 380px; }}
+  .overview-board-hint {{ margin: 0 0 0.5rem; }}
   .person-card .overview-section-head {{ flex-wrap: wrap; row-gap: 0.35rem; }}
   .sla-history-note.person-others-note {{ margin-top: 1.5rem; }}
   .person-card {{ min-width: 0; margin-bottom: 0; }}
@@ -2179,7 +2183,6 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
      an existing theme token's color, so every theme (B68FBF included)
      picks it up without its own rules. Blocked borrows --flag-alert-color
      because it already means "needs attention" everywhere else here. */
-  .standup-layout .overview-section {{ margin-bottom: 0; min-width: 0; }}
   .standup-task-chip {{ text-decoration: none; align-self: center; }}
   .standup-subnav {{ display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; margin: 0.6rem 0 1rem; }}
   .standup-subnav a {{ text-decoration: none; }}
@@ -2205,7 +2208,6 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
   .standup-inferred {{ text-decoration: underline dotted; text-underline-offset: 3px; }}
   .overview-block-link {{ color: inherit; text-decoration: none; }}
   .overview-block-link:hover {{ text-decoration: underline; }}
-  .overview-blocks {{ margin-top: 1.75rem; }}
   .standup-group-heading {{ font-size: 0.82rem; font-weight: 600; color: var(--muted); margin: 1rem 0 0.4rem; text-transform: uppercase; letter-spacing: 0.04em; }}
   /* Avatar-initials bubble next to a resolved person's name -- a stable
      per-name color (see _avatar_html) rather than a photo, for a quick
@@ -4408,24 +4410,27 @@ def _overview_security_block_html(security: dict) -> str:
 def _render_overview_page(sla_result: dict, banner: str = "", flagged: dict | None = None,
                           security: dict | None = None) -> bytes:
     """/overview: who holds which open IT-Operations tickets -- one card per
-    person in _common.OVERVIEW_PEOPLE (you first), then Unassigned -- followed
-    by two blocks that used to be nav tabs of their own, Discussion (tickets
-    tagged block or standup) and Security (the IT-Security group's most
-    recent tickets). A block is left out when its data isn't passed in.
+    person in _common.OVERVIEW_PEOPLE (you first), then Unassigned -- laid out
+    as a Trello-style board that scrolls sideways. Two more columns sit to
+    the right of the people, ones that used to be nav tabs of their own:
+    Discussion (tickets tagged block or standup) and Security (the
+    IT-Security group's most recent tickets). A column is left out when its
+    data isn't passed in.
 
     The tickets are exactly fetch_sla_tickets' result (new/open/pending/hold,
     personal tasks excluded; the same 2-minute cache the /sla page and the
     nav badge use). Discussion reads fetch_flagged_tickets' own cache. Tickets
     held by anyone outside the list are only counted, in a note. Each card
     keeps the Claim button on tickets that aren't yours."""
+    columns = []
     if sla_result.get("error") and not sla_result.get("items"):
-        cards_html = f'<p class="flag-alert">{html.escape(sla_result["error"])}</p>'
+        error_html = f'<p class="flag-alert">{html.escape(sla_result["error"])}</p>'
         others_note = ""
     else:
+        error_html = ""
         groups = _common.group_tickets_by_person(sla_result.get("items") or [])
-        cards_html = '<div class="person-grid">' + "".join(
-            _person_card_html(c["name"], c["items"], "person", is_me=c["is_me"]) for c in groups["people"]
-        ) + _person_card_html("Unassigned", groups["unassigned"], "unassigned", avatar=False) + "</div>"
+        columns += [_person_card_html(c["name"], c["items"], "person", is_me=c["is_me"]) for c in groups["people"]]
+        columns.append(_person_card_html("Unassigned", groups["unassigned"], "unassigned", avatar=False))
         n = groups["others"]
         others_note = (
             f'<p class="sla-history-note person-others-note">{n} more open ticket{"s are" if n != 1 else " is"} assigned to someone else and not shown.</p>'
@@ -4436,19 +4441,18 @@ def _render_overview_page(sla_result: dict, banner: str = "", flagged: dict | No
         "Some tickets may be missing: the queue exceeds the scan limit.</p>"
         if sla_result.get("capped") else ""
     )
-    blocks = []
     if flagged is not None:
-        blocks.append(_overview_discussion_block_html(flagged))
+        columns.append(_overview_discussion_block_html(flagged))
     if security is not None:
-        blocks.append(_overview_security_block_html(security))
-    blocks_html = f'<div class="two-panel overview-blocks">{"".join(blocks)}</div>' if blocks else ""
+        columns.append(_overview_security_block_html(security))
+    board_html = f'<div class="overview-board" role="region" aria-label="Overview board, scrolls sideways" tabindex="0">{"".join(columns)}</div>' if columns else ""
     body = f"""
 <h2>{_topic_icon("overview")}Overview</h2>
-<p class="meta">Open IT-Operations tickets by assignee (new, open, pending and hold; personal tasks excluded), oldest first.</p>
+<p class="meta">Open IT-Operations tickets by assignee (new, open, pending and hold; personal tasks excluded), oldest first. Scroll sideways for Discussion and Security.</p>
 {capped_note}
-{cards_html}
+{error_html}
+{board_html}
 {others_note}
-{blocks_html}
 """
     return _page(body, banner=banner, current_path="/overview", wide=True)
 

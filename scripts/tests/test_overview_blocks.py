@@ -1,5 +1,5 @@
-"""The Discussion and Security blocks on /overview (they used to be nav
-tabs). Fixtures are made up."""
+"""The Discussion and Security columns on /overview (they used to be nav
+tabs) and the sideways-scrolling board they sit in. Fixtures are made up."""
 import review_server
 import _common
 
@@ -15,8 +15,13 @@ def _ticket(n, tag=None):
     return t
 
 
-def _render(**kw):
+def _full(**kw):
     return review_server._render_overview_page(SLA, **kw).decode()
+
+
+def _render(**kw):
+    """Just the markup after the page's stylesheet (the CSS names the same classes)."""
+    return _full(**kw).split("</style>")[-1]
 
 
 def test_blocks_are_left_out_when_their_data_is_not_passed_in():
@@ -62,3 +67,20 @@ def test_security_and_discussion_pages_keep_overview_highlighted():
         top = text.split('class="top-nav"')[1].split("</div>")[0]
         assert 'class="top-nav-link active" href="/overview"' in top
         assert '<a href="/overview">&larr; back to Overview</a>' in text
+
+
+def test_board_puts_people_then_unassigned_then_discussion_then_security_in_one_scrolling_row():
+    out = _render(flagged={"items": [], "error": None, "capped": False}, security={"items": [], "error": None})
+    assert out.count('class="overview-board"') == 1 and "person-grid" not in out
+    board = out.split('class="overview-board"')[1]
+    order = [board.index(x) for x in ("person-card-unassigned", "overview-block-discussion", "overview-block-security")]
+    assert order == sorted(order)
+    css = _full().split("</style>")[0].split(".overview-board {")[1].split("}")[0]
+    assert "overflow-x: auto" in css
+
+
+def test_board_still_shows_the_columns_when_the_ticket_scan_failed():
+    out = review_server._render_overview_page({"items": [], "error": "Zendesk isn't connected", "capped": False},
+                                              flagged={"items": [], "error": None, "capped": False}).decode().split("</style>")[-1]
+    assert "Zendesk isn&#x27;t connected" in out and "overview-block-discussion" in out
+    assert "person-card-unassigned" not in out
