@@ -6533,6 +6533,9 @@ Handler.do_POST = _with_progress(Handler.do_POST)
 def main() -> None:
     server = ThreadingHTTPServer((BIND_HOST, _common.REVIEW_SERVER_PORT), Handler)
     _log(f"Zendesk review server listening on http://{BIND_HOST}:{_common.REVIEW_SERVER_PORT}/")
+    # Fill the main queue's slow live cache in the background so the first
+    # page load after a restart doesn't wait for it.
+    threading.Thread(target=_common.warm_caches, args=(_log,), name="cache-warmup", daemon=True).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

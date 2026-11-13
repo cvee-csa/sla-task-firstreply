@@ -6,6 +6,7 @@ duplicated (and drifting) across files, so this time there's one source of
 truth both scripts import from.
 """
 
+import collections
 import copy
 import fcntl
 import json
@@ -1431,7 +1432,7 @@ def find_candidates(client, log_fn=print, agent_user_id=None) -> list:
                 continue
 
             try:
-                comments = client.get_ticket_comments(ticket["id"])
+                comments = cached_ticket_comments(client, ticket["id"], ticket.get("updated_at"))
             except Exception as exc:
                 # One ticket failing to fetch shouldn't discard every
                 # candidate already found this run -- log it and move on.
@@ -1711,6 +1712,59 @@ def recent_replied_items(limit: "int | None" = 10) -> list:
     return items if limit is None else items[:limit]
 
 
+# --- Per-ticket comment cache ----------------------------------------------
+# Several scans (the first-reply candidate check, Recently worked on, the
+# workday recap, the SLA ticket scan) fetch the same tickets' comments again
+# and again. A ticket's comments cannot change unless Zendesk bumps its
+# `updated_at`, so (ticket id, updated_at) is an exact cache key rather than
+# a time-based guess. A hit costs nothing; a changed ticket gets a new key
+# and is fetched fresh.
+#
+# Used ONLY where the ticket dict came from a live get_tickets() listing in
+# the same scan (so its updated_at is current). Deliberately NOT used by
+# check_already_replied (the click-time safety check) or the per-scan
+# re-check of pending tickets: those exist to catch a reply that landed
+# seconds ago and must always read live.
+#
+# Callers must treat the returned list as read-only (it is shared). Entries
+# also expire after COMMENT_CACHE_MAX_AGE_SECONDS as a backstop for the rare
+# comment change that doesn't bump updated_at (e.g. a redaction), and the
+# cache is bounded (least-recently-used entries are dropped). The lock guards
+# only the dict, never the Zendesk call.
+COMMENT_CACHE_MAX_ENTRIES = 1000
+COMMENT_CACHE_MAX_AGE_SECONDS = 6 * 3600
+_comment_cache: "collections.OrderedDict" = collections.OrderedDict()  # (ticket id, updated_at) -> (stored_at, comments)
+_comment_cache_lock = threading.Lock()
+
+
+def cached_ticket_comments(client, ticket_id, updated_at):
+    """client.get_ticket_comments(ticket_id), served from the cache when the
+    ticket's updated_at is unchanged. With no updated_at there is nothing
+    safe to key on, so it always reads live. Errors propagate to the caller
+    exactly as from the client."""
+    if not updated_at:
+        return client.get_ticket_comments(ticket_id)
+    key = (str(ticket_id), str(updated_at))
+    now = time_module.monotonic()
+    with _comment_cache_lock:
+        hit = _comment_cache.get(key)
+        if hit and now - hit[0] < COMMENT_CACHE_MAX_AGE_SECONDS:
+            _comment_cache.move_to_end(key)
+            return hit[1]
+    comments = client.get_ticket_comments(ticket_id)
+    with _comment_cache_lock:
+        _comment_cache[key] = (now, comments)
+        _comment_cache.move_to_end(key)
+        while len(_comment_cache) > COMMENT_CACHE_MAX_ENTRIES:
+            _comment_cache.popitem(last=False)
+    return comments
+
+
+def clear_comment_cache() -> None:
+    with _comment_cache_lock:
+        _comment_cache.clear()
+
+
 # A get_ticket_comments() call is one extra Zendesk request per candidate
 # ticket -- WORKED_ON_COMMENT_CHECK_LIMIT caps how many NOT-already-
 # locally-known tickets get that extra check on a single live scan (see
@@ -1734,7 +1788,11 @@ _worked_on_cache: dict = {}
 # forward reference that fails at import time. Same value, same reasoning:
 # the same 2-minute cadence as every other read-only Zendesk-backed panel.
 WORKED_ON_CACHE_TTL_SECONDS = 120
+WORKED_ON_MAX_STALE_SECONDS = 3600  # beyond this a request waits for a fresh scan instead of showing stale data
+WORKED_ON_RETRY_BACKOFF_SECONDS = 30  # after a failed background refresh
 _worked_on_cache_lock = threading.Lock()
+_worked_on_refreshing = False  # single-flight guard for the background refresh
+_worked_on_next_attempt = None  # datetime: no background refresh before this
 
 
 def _zendesk_ts_to_local_iso(ts: str) -> str:
@@ -1775,60 +1833,14 @@ def _most_recent_own_comment(comments: list, agent_user_id):
     return own[0]
 
 
-def fetch_recently_worked_on(client, limit: int = RECENTLY_WORKED_ON_LIMIT, log_fn=print, force: bool = False) -> dict:
-    """Returns {"items": [...], "capped": bool, "zendesk_unavailable": bool}
-    -- the union of recent_replied_items() (replies sent THROUGH this tool)
-    and a live scan of the IT-Operations group for tickets NOT already in
-    that local set that carry a comment authored by this tool's own
-    configured Zendesk account -- i.e. a reply sent directly in Zendesk,
-    bypassing this tool entirely, that pending_drafts.json would otherwise
-    have no record of at all. Merged and sorted most-recent-first, capped
-    at `limit`.
-
-    This is the one place on the main page ("/") that now touches Zendesk
-    at all -- see the "GET / never touches Zendesk" design principle in
-    the README, which this function deliberately narrows rather than
-    removes: the local half of the result (recent_replied_items) is always
-    computed first and returned on its own the moment anything about the
-    live half goes wrong, so "/" still never actually BREAKS over Zendesk
-    being unreachable, it just quietly stops finding outside-the-tool
-    replies until the connection's back -- zendesk_unavailable=True is how
-    the caller knows to say so.
-
-    capped=True means the live scan hit its own page-depth
-    (WORKED_ON_SCAN_PAGES) or per-scan comment-check
-    (WORKED_ON_COMMENT_CHECK_LIMIT) budget before covering every recently-
-    updated ticket in the group -- there could be an outside-the-tool reply
-    further back this pass didn't reach yet.
-
-    Known simplification: a ticket already tracked locally (you replied to
-    it at least once through this tool) is never re-checked against
-    Zendesk, so a LATER reply sent directly in Zendesk on that same ticket
-    won't bump its position or move its timestamp forward here -- it'll
-    still show at the tool-recorded time of your last reply through this
-    tool specifically. Scoped to IT-Operations only, the same restriction
-    fetch_flagged_tickets/fetch_recently_solved_tickets already live with
-    and for the identical reason (get_tickets() takes one group_id or
-    none)."""
-    global _worked_on_cache
-    now = datetime.now()
-    with _worked_on_cache_lock:
-        cached = _worked_on_cache or None
-        if (
-            not force and cached and cached.get("limit") == limit
-            and (now - cached["fetched_at"]).total_seconds() < WORKED_ON_CACHE_TTL_SECONDS
-        ):
-            return {"items": cached["items"], "capped": cached["capped"], "zendesk_unavailable": cached["zendesk_unavailable"]}
-
-    local_items = recent_replied_items(limit=None)
-    local_ids = {str(i.get("ticket_id")) for i in local_items}
-
+def _scan_worked_on_live(client, log_fn) -> dict:
+    """The live half of fetch_recently_worked_on: page through the
+    IT-Operations group (most recently updated first) and collect replies
+    this tool has no local record of. Never raises. Returns
+    {"discovered": [...], "capped": bool, "zendesk_unavailable": bool}."""
+    local_ids = {str(i.get("ticket_id")) for i in recent_replied_items(limit=None)}
     if client.client is None:
-        items = local_items[:limit]
-        with _worked_on_cache_lock:
-            _worked_on_cache = {"items": items, "fetched_at": now, "capped": False, "zendesk_unavailable": True, "limit": limit}
-        return {"items": items, "capped": False, "zendesk_unavailable": True}
-
+        return {"discovered": [], "capped": False, "zendesk_unavailable": True}
     try:
         agent_user_id = resolve_own_agent_id(client, log_fn=log_fn)
         if agent_user_id is None:
@@ -1851,6 +1863,11 @@ def fetch_recently_worked_on(client, limit: int = RECENTLY_WORKED_ON_LIMIT, log_
                     page=page,
                 )
             except Exception as exc:
+                if page == 1:
+                    # Nothing was scanned at all: report Zendesk as
+                    # unreachable (the caller keeps any last good result)
+                    # rather than an empty, "capped" result.
+                    raise
                 log_fn(f"fetch_recently_worked_on() page {page} failed ({exc}) -- "
                        f"stopping with {len(discovered)} outside-the-tool repl(y/ies) already found")
                 capped = True
@@ -1869,7 +1886,7 @@ def fetch_recently_worked_on(client, limit: int = RECENTLY_WORKED_ON_LIMIT, log_
                     break
                 checked += 1
                 try:
-                    comments = client.get_ticket_comments(ticket.get("id"))
+                    comments = cached_ticket_comments(client, ticket.get("id"), ticket.get("updated_at"))
                 except Exception as exc:
                     log_fn(f"fetch_recently_worked_on(): get_ticket_comments(#{tid}) failed ({exc}), skipping")
                     continue
@@ -1908,17 +1925,117 @@ def fetch_recently_worked_on(client, limit: int = RECENTLY_WORKED_ON_LIMIT, log_
         else:
             capped = True
 
-        merged = local_items + discovered
-        merged.sort(key=lambda i: i.get("posted_at", ""), reverse=True)
-        items = merged[:limit]
-        with _worked_on_cache_lock:
-            _worked_on_cache = {"items": items, "fetched_at": now, "capped": capped, "zendesk_unavailable": False, "limit": limit}
-        return {"items": items, "capped": capped, "zendesk_unavailable": False}
+        return {"discovered": discovered, "capped": capped, "zendesk_unavailable": False}
     except Exception as exc:
         log_fn(f"fetch_recently_worked_on() failed ({exc})")
-        if cached:
-            return {"items": cached["items"], "capped": cached["capped"], "zendesk_unavailable": cached["zendesk_unavailable"]}
-        return {"items": local_items[:limit], "capped": False, "zendesk_unavailable": True}
+        return {"discovered": [], "capped": False, "zendesk_unavailable": True}
+
+
+def _merge_worked_on(local_items: list, discovered: list, limit: int) -> list:
+    """Fresh local history plus the (possibly cached) discovered replies; a
+    ticket in both appears once, as its local record."""
+    local_ids = {str(i.get("ticket_id")) for i in local_items}
+    merged = local_items + [d for d in discovered if str(d.get("ticket_id")) not in local_ids]
+    merged.sort(key=lambda i: i.get("posted_at", ""), reverse=True)
+    return merged[:limit]
+
+
+def _store_worked_on(scan: dict, limit: int) -> None:
+    global _worked_on_cache
+    with _worked_on_cache_lock:
+        _worked_on_cache = {"discovered": scan["discovered"], "capped": scan["capped"],
+                            "zendesk_unavailable": scan["zendesk_unavailable"],
+                            "fetched_at": datetime.now(), "limit": limit}
+
+
+def _refresh_worked_on_background(limit: int, log_fn) -> None:
+    """Runs the live scan off the request thread. A fresh client is built
+    here (this thread has no tracked request, so it is not progress-counted).
+    A failed refresh keeps the last good cache and backs off briefly."""
+    global _worked_on_refreshing, _worked_on_next_attempt
+    try:
+        scan = _scan_worked_on_live(make_client(), log_fn)
+        if scan["zendesk_unavailable"]:
+            with _worked_on_cache_lock:
+                _worked_on_next_attempt = datetime.now() + timedelta(seconds=WORKED_ON_RETRY_BACKOFF_SECONDS)
+        else:
+            _store_worked_on(scan, limit)
+            with _worked_on_cache_lock:
+                _worked_on_next_attempt = None
+    except Exception as exc:
+        log_fn(f"fetch_recently_worked_on() background refresh failed ({exc})")
+        with _worked_on_cache_lock:
+            _worked_on_next_attempt = datetime.now() + timedelta(seconds=WORKED_ON_RETRY_BACKOFF_SECONDS)
+    finally:
+        with _worked_on_cache_lock:
+            _worked_on_refreshing = False
+
+
+def warm_caches(log_fn=print) -> None:
+    """Fills the main queue's slow live cache once at server start, so the
+    first page load after a restart doesn't pay for the scan. Never raises."""
+    try:
+        fetch_recently_worked_on(make_client(), log_fn=log_fn)
+    except Exception as exc:
+        log_fn(f"warm_caches() failed ({exc})")
+
+
+def fetch_recently_worked_on(client, limit: int = RECENTLY_WORKED_ON_LIMIT, log_fn=print, force: bool = False) -> dict:
+    """Your most recent replies, merged from two sources: replies sent
+    through this tool (local history, always read fresh) and replies sent
+    directly in Zendesk that this tool has no record of (a live scan of the
+    IT-Operations group's comments). Returns
+    {"items": [...], "capped": bool, "zendesk_unavailable": bool}.
+
+    The live scan is the slowest thing on the main queue (tens of seconds
+    cold), so it is stale-while-revalidate: the last result is served
+    immediately, and once it is older than WORKED_ON_CACHE_TTL_SECONDS one
+    background thread refreshes it (a failed refresh keeps the last good
+    result and backs off for WORKED_ON_RETRY_BACKOFF_SECONDS). Only a
+    missing cache (first load; warm_caches() normally covers this), force=True,
+    or a cache older than WORKED_ON_MAX_STALE_SECONDS makes a request wait
+    for a scan. Only the live half is cached; the local half is merged in
+    fresh on every call, so a reply you just sent shows immediately.
+
+    zendesk_unavailable=True means the live half could not run (local
+    history alone is shown); capped=True means the scan hit its page-depth
+    (WORKED_ON_SCAN_PAGES) or comment-check (WORKED_ON_COMMENT_CHECK_LIMIT)
+    budget before covering every recently updated ticket.
+
+    Known simplification: a ticket already tracked locally is never
+    re-checked against Zendesk, so a LATER reply sent directly in Zendesk on
+    that same ticket won't move its timestamp here. Scoped to IT-Operations
+    only, like fetch_flagged_tickets/fetch_recently_solved_tickets (the
+    client's get_tickets() takes one group_id or none)."""
+    global _worked_on_refreshing
+    now = datetime.now()
+    local_items = recent_replied_items(limit=None)
+    start_refresh = False
+    with _worked_on_cache_lock:
+        previous = _worked_on_cache or None
+        cached = previous if (previous and not force and previous.get("limit") == limit) else None
+        age = (now - cached["fetched_at"]).total_seconds() if cached else None
+        usable = cached is not None and age < WORKED_ON_MAX_STALE_SECONDS
+        if usable and age >= WORKED_ON_CACHE_TTL_SECONDS and not _worked_on_refreshing and (
+            _worked_on_next_attempt is None or now >= _worked_on_next_attempt
+        ):
+            _worked_on_refreshing = True
+            start_refresh = True
+    if usable:
+        if start_refresh:
+            threading.Thread(target=_refresh_worked_on_background, args=(limit, log_fn),
+                             name="worked-on-refresh", daemon=True).start()
+        return {"items": _merge_worked_on(local_items, cached["discovered"], limit),
+                "capped": cached["capped"], "zendesk_unavailable": cached["zendesk_unavailable"]}
+
+    scan = _scan_worked_on_live(client, log_fn)
+    if scan["zendesk_unavailable"] and previous and previous.get("limit") == limit and not previous["zendesk_unavailable"]:
+        # A failed forced/very-stale scan must not replace a good result.
+        scan = previous
+    else:
+        _store_worked_on(scan, limit)
+    return {"items": _merge_worked_on(local_items, scan["discovered"], limit),
+            "capped": scan["capped"], "zendesk_unavailable": scan["zendesk_unavailable"]}
 
 
 # --- Previous-workday activity recap (/standup/yesterday) ------------------
@@ -2060,7 +2177,7 @@ def fetch_activity_for_day(client, day, log_fn=print, force: bool = False) -> di
                 tid = ticket.get("id")
                 events = []
                 try:
-                    comments = client.get_ticket_comments(tid)
+                    comments = cached_ticket_comments(client, tid, ticket.get("updated_at"))
                 except Exception as exc:
                     log_fn(f"fetch_activity_for_day(): get_ticket_comments(#{tid}) failed ({exc}), skipping")
                     comments = []
@@ -2848,7 +2965,7 @@ def fetch_sla_tickets(client, log_fn=print, force: bool = False) -> dict:
                 if PERSONAL_TASK_TAG in (ticket.get("tags") or []):
                     continue
                 try:
-                    comments = client.get_ticket_comments(ticket["id"])
+                    comments = cached_ticket_comments(client, ticket["id"], ticket.get("updated_at"))
                 except Exception as exc:
                     log_fn(f"fetch_sla_tickets(): comments fetch failed for #{ticket.get('id')} ({exc}) -- skipping")
                     continue

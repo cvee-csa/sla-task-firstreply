@@ -25,6 +25,7 @@ def fresh_progress_state(monkeypatch):
     monkeypatch.setattr(_common, "_progress_registry", {})
     monkeypatch.setattr(_common, "_progress_history", {})
     monkeypatch.setattr(_common, "_activity_cache", {})
+    _common.clear_comment_cache()
     _common._progress_tls.current = None
     yield
     _common._progress_tls.current = None
@@ -252,6 +253,7 @@ def test_http_progress_unknown_then_measured(server):
     assert first[-1]["finished"] and first[-1]["pct"] == 1.0
     assert _common._progress_history["GET /standup/yesterday"] == clients[0].total_calls == 13
 
+    _common.clear_comment_cache()   # unchanged tickets' comments are cached now; this test measures a full-cost load
     second = _load_and_watch(port, DAY2, "fedcba9876543210")
     pcts = [s["pct"] for s in second if s["known"] and not s["finished"] and s["pct"] is not None]
     assert len(set(pcts)) >= 3, pcts                     # real, advancing values
