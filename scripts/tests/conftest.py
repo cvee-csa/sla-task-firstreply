@@ -69,6 +69,5 @@ def isolated_output_dir(tmp_path, monkeypatch):
     # The made-up owners the standup fixtures use, not the real filter list.
     monkeypatch.setattr(_common, "STANDUP_PEOPLE", ["Alex", "Sam"])
     monkeypatch.setattr(_common, "_standup_cache", {})
-    monkeypatch.setattr(_common, "STANDUP_DECISIONS_FILE", tmp_path / "decisions.json")
-    monkeypatch.setattr(_common, "STANDUP_DECISIONS_LOCK_FILE", tmp_path / "standup_decisions.json.lock")
+    monkeypatch.setattr(_common, "STANDUP_TRACKED_PERSON", "Sam")
     yield

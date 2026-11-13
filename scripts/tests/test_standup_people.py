@@ -1,5 +1,5 @@
-"""One person's action items on /standup/actions?owner=. (The separate By person
-page was merged into Action items; /standup/people now redirects here.) Every
+"""One person's action items on /standup?owner=. (Old /standup/actions and
+/standup/people URLs redirect to /standup.) Every
 fixture is made up (see test_standup_page.py); this repo is public, so no real
 notes appear here."""
 import io
@@ -67,14 +67,15 @@ def test_unknown_or_hostile_owner_param_is_ignored():
     assert "<script>alert(1)</script>" not in out and "Chase the vendor" in out and "Email the vendor" in out
 
 
-def test_subnav_has_the_five_tabs_and_marks_the_current_one():
+def test_subnav_has_the_three_tabs_and_marks_the_current_one():
     _setup()
     out = _page(render)
-    for label in ("Overview", "Needs attention", "Action items", "Topics", "Meetings"):
-        assert f">{label}</a>" in out
-    for gone in ("By person", "Workstreams", ">Closed</a>", "Workday recap"):
-        assert gone not in out.split("</nav>")[0].split("standup-subnav")[-1]
-    assert 'class="sla-range-btn active" href="/standup/actions" aria-current="page"' in out
+    nav = out.split('class="standup-subnav"')[1].split("</nav>")[0]
+    for label in ("Action items", "Topics", "Sam&#x27;s items"):
+        assert f">{label}</a>" in nav
+    for gone in ("Overview", "Needs attention", "Meetings", "By person", "Workstreams", "Closed", "Workday recap"):
+        assert gone not in nav
+    assert 'class="sla-range-btn active" href="/standup" aria-current="page"' in nav
 
 
 def test_missing_data_shows_the_error_page():
@@ -102,14 +103,20 @@ def _get(url):
     return parsed.path, parse_qs(parsed.query)
 
 
-def test_old_by_person_url_redirects_to_action_items_with_the_owner():
-    path, q = _get("/standup/people?person=Sam&q=vendor&age=old")
-    assert path == "/standup/actions" and q == {"owner": ["Sam"], "q": ["vendor"], "age": ["old"]}
-    assert _get("/standup/people")[0] == "/standup/actions"
+def test_old_actions_and_by_person_urls_redirect_to_action_items_with_the_filters():
+    path, q = _get("/standup/people?person=Sam&q=vendor&show=all")
+    assert path == "/standup" and q == {"owner": ["Sam"], "q": ["vendor"], "show": ["all"]}
+    path, q = _get("/standup/actions?owner=Alex")
+    assert path == "/standup" and q == {"owner": ["Alex"]}
+    assert _get("/standup/people")[0] == "/standup"
 
 
 def test_old_workstreams_and_closed_urls_redirect_to_topics():
     path, q = _get("/standup/workstreams?q=x&owner=Sam")
-    assert path == "/standup/topics" and q == {"q": ["x"], "owner": ["Sam"]}
-    path, q = _get("/standup/closed")
-    assert path == "/standup/topics" and q == {"status": ["closed"]}
+    assert path == "/standup/topics" and q == {"q": ["x"]}
+    assert _get("/standup/closed") == ("/standup/topics", {})
+
+
+def test_removed_pages_redirect_to_action_items():
+    for url in ("/standup/attention", "/standup/yesterday", "/standup/meetings", "/standup/meetings/2026-01-15", "/standup/bulk"):
+        assert _get(url)[0] == "/standup"

@@ -7,12 +7,10 @@ truth both scripts import from.
 """
 
 import collections
-import copy
 import fcntl
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import threading
@@ -2039,194 +2037,6 @@ def fetch_recently_worked_on(client, limit: int = RECENTLY_WORKED_ON_LIMIT, log_
             "capped": scan["capped"], "zendesk_unavailable": scan["zendesk_unavailable"]}
 
 
-# --- Previous-workday activity recap (/standup/yesterday) ------------------
-# "What did I do on <day>?" for standup: every public reply and internal
-# note this tool's own Zendesk account left on a given local calendar day,
-# plus tickets assigned to it that sit solved with their last update on that
-# day. Distinct from fetch_recently_worked_on above (last-N, no day window,
-# one row per ticket): this one is bounded by a DAY, lists every event, and
-# pages back only as far as that day requires.
-ACTIVITY_SCAN_PAGES = int(os.getenv("ACTIVITY_SCAN_PAGES", "10"))
-ACTIVITY_TICKET_PER_PAGE = 100
-ACTIVITY_COMMENT_CHECK_LIMIT = int(os.getenv("ACTIVITY_COMMENT_CHECK_LIMIT", "150"))
-ACTIVITY_CACHE_TTL_SECONDS = 120
-_activity_cache: dict = {}
-_activity_cache_lock = threading.Lock()
-
-
-def previous_workday(today=None):
-    """The most recent BUSINESS_WEEKDAYS date strictly before `today` (a
-    date, default: today's local date) -- Monday gives the prior Friday,
-    Tuesday through Friday give the day before."""
-    day = today or datetime.now().date()
-    day = day - timedelta(days=1)
-    while day.weekday() not in BUSINESS_WEEKDAYS:
-        day -= timedelta(days=1)
-    return day
-
-
-def adjacent_workday(day, step: int):
-    """The business day `step` (+1 or -1) away from `day`."""
-    delta = timedelta(days=1 if step > 0 else -1)
-    day = day + delta
-    while day.weekday() not in BUSINESS_WEEKDAYS:
-        day += delta
-    return day
-
-
-def _activity_events_from_local(day_iso: str) -> dict:
-    """{ticket_id: item} built from replies sent THROUGH this tool on
-    `day_iso` (pending_drafts.json "posted" entries) -- the offline
-    fallback, and a supplement for anything the live scan missed."""
-    out = {}
-    for it in recent_replied_items(limit=None):
-        at = str(it.get("posted_at", ""))
-        if at[:10] != day_iso:
-            continue
-        tid = str(it.get("ticket_id"))
-        entry = out.setdefault(tid, {
-            "ticket_id": it.get("ticket_id"),
-            "subject": it.get("subject", ""),
-            "url": it.get("url") or ticket_url(it.get("ticket_id")),
-            "requester_name": it.get("requester_name") if it.get("name_confidence") == "confirmed" else None,
-            "events": [],
-        })
-        entry["events"].append({"at": at, "kind": "public" if it.get("posted_public") else "internal"})
-    return out
-
-
-def _finish_activity_items(by_ticket: dict) -> list:
-    items = []
-    for entry in by_ticket.values():
-        entry["events"].sort(key=lambda e: e["at"])
-        entry["first_at"] = entry["events"][0]["at"]
-        items.append(entry)
-    items.sort(key=lambda i: i["first_at"])
-    return items
-
-
-def fetch_activity_for_day(client, day, log_fn=print, force: bool = False) -> dict:
-    """Returns {"items": [...], "capped": bool, "zendesk_unavailable": bool}
-    for the local calendar `day` (a date). Each item is one ticket with
-    "events": [{"at": local-iso, "kind": "public"|"internal"|"solved"}],
-    items ordered by each ticket's first event that day.
-
-    Live path: pages IT-Operations tickets by updated_at desc and stops at
-    the first ticket last updated BEFORE `day` (nothing older can carry
-    activity on it). Every ticket updated on/after `day` has its comments
-    checked for ones authored by this tool's own account dated `day`;
-    a ticket assigned to that account with status solved and updated_at on
-    `day` additionally gets a "solved" event (updated_at stands in for the
-    solve time -- the same proxy fetch_recently_solved_tickets uses, so a
-    ticket touched again after being solved will not show as solved on
-    `day`). capped=True means the page or comment-check budget ran out
-    before the scan reached the day boundary, so older-in-scan activity may
-    be missing. Scoped to IT-Operations like the other group-bound scans.
-    Offline (or on failure) it falls back to replies sent through this
-    tool, flagged zendesk_unavailable=True."""
-    global _activity_cache
-    now = datetime.now()
-    day_iso = day.isoformat()
-    with _activity_cache_lock:
-        cached = _activity_cache.get(day_iso)
-        if (not force and cached and (now - cached["fetched_at"]).total_seconds() < ACTIVITY_CACHE_TTL_SECONDS):
-            return {k: cached[k] for k in ("items", "capped", "zendesk_unavailable")}
-
-    def _store(result):
-        with _activity_cache_lock:
-            _activity_cache[day_iso] = {**result, "fetched_at": now}
-        return result
-
-    local = _activity_events_from_local(day_iso)
-    if client.client is None:
-        return _store({"items": _finish_activity_items(local), "capped": False, "zendesk_unavailable": True})
-
-    try:
-        agent_user_id = resolve_own_agent_id(client, log_fn=log_fn)
-        if agent_user_id is None:
-            raise RuntimeError("could not resolve this tool's own Zendesk account")
-
-        found = {}
-        capped = False
-        checked = 0
-        page = 1
-        reached_boundary = False
-        max_page = min(ACTIVITY_SCAN_PAGES, ZENDESK_SEARCH_RESULT_CAP // ACTIVITY_TICKET_PER_PAGE)
-        while page <= max_page and not reached_boundary:
-            try:
-                result = client.get_tickets(
-                    group_id=IT_OPERATIONS_GROUP_ID, sort_by="updated_at", sort_order="desc",
-                    per_page=ACTIVITY_TICKET_PER_PAGE, page=page,
-                )
-            except Exception as exc:
-                log_fn(f"fetch_activity_for_day() page {page} failed ({exc}) -- stopping with {len(found)} ticket(s) found")
-                capped = True
-                break
-            tickets = result.get("tickets", [])
-            if not tickets:
-                break
-            stop_budget = False
-            for ticket in tickets:
-                updated_local = _zendesk_ts_to_local_iso(ticket.get("updated_at", ""))
-                if updated_local and updated_local[:10] < day_iso:
-                    reached_boundary = True
-                    break
-                if checked >= ACTIVITY_COMMENT_CHECK_LIMIT:
-                    stop_budget = True
-                    break
-                checked += 1
-                tid = ticket.get("id")
-                events = []
-                try:
-                    comments = cached_ticket_comments(client, tid, ticket.get("updated_at"))
-                except Exception as exc:
-                    log_fn(f"fetch_activity_for_day(): get_ticket_comments(#{tid}) failed ({exc}), skipping")
-                    comments = []
-                for c in comments:
-                    if c.get("author_id") != agent_user_id:
-                        continue
-                    at = _zendesk_ts_to_local_iso(c.get("created_at", ""))
-                    if at and at[:10] == day_iso:
-                        events.append({"at": at, "kind": "public" if c.get("public") else "internal"})
-                if (
-                    ticket.get("status") == "solved" and ticket.get("assignee_id") == agent_user_id
-                    and updated_local and updated_local[:10] == day_iso
-                ):
-                    events.append({"at": updated_local, "kind": "solved"})
-                if not events:
-                    continue
-                name, name_confidence, _ = resolve_requester_name(
-                    client, ticket.get("requester_id"), ticket.get("description") or "", log_fn=log_fn
-                )
-                found[str(tid)] = {
-                    "ticket_id": tid,
-                    "subject": ticket.get("subject", ""),
-                    "url": ticket_url(tid),
-                    "requester_name": name if name_confidence == "confirmed" else None,
-                    "events": events,
-                }
-            if stop_budget:
-                capped = True
-                break
-            if not result.get("has_more"):
-                reached_boundary = True
-            page += 1
-        if not reached_boundary and not capped:
-            capped = True
-
-        # Replies sent through this tool for tickets the live scan did not
-        # surface (outside the scanned group/window) still belong on the list.
-        for tid, entry in local.items():
-            if tid not in found:
-                found[tid] = entry
-        return _store({"items": _finish_activity_items(found), "capped": capped, "zendesk_unavailable": False})
-    except Exception as exc:
-        log_fn(f"fetch_activity_for_day() failed ({exc})")
-        if cached:
-            return {k: cached[k] for k in ("items", "capped", "zendesk_unavailable")}
-        return {"items": _finish_activity_items(local), "capped": False, "zendesk_unavailable": True}
-
-
 # --- IT-Security "recent activity" column -----------------------------
 # A read-only companion panel, distinct from the IT-Operations working
 # queue above: no candidate filtering, no already-replied check, no
@@ -3172,391 +2982,54 @@ def standup_snapshot() -> dict:
     return result
 
 
-# What this tool writes in meetingnotestool: your own calls on standup
-# action items and quiet topics, in decisions.json. IDs, a decision and a
-# timestamp only -- no free text -- so nothing from the notes is copied into
-# it. meetingnotestool's build.py applies it permanently on its next build;
-# apply_standup_decisions() below shows it on /standup immediately.
-# Beside it this tool also keeps decisions.log.jsonl (an append-only history
-# of every change, same IDs-only rule, which bulk Undo reads) and
-# decisions_backups/ (daily and pre-bulk copies of decisions.json).
-STANDUP_DECISIONS_FILE = Path(os.getenv(
-    "STANDUP_DECISIONS_FILE",
-    str(Path.home() / "Desktop" / "git" / "meetingnotestool" / "decisions.json"),
-))
-STANDUP_DECISIONS_LOCK_FILE = OUTPUT_DIR / "standup_decisions.json.lock"
-STANDUP_ACTION_DECISIONS = {"done", "dropped", "open"}
-STANDUP_TOPIC_DECISIONS = {"done", "dropped", "keep"}
-
-
-def load_standup_decisions() -> dict:
-    """Plain read of decisions.json; an empty store if it's missing or
-    unreadable (same fail-open read posture as load_pending)."""
-    empty = {"schema": 1, "actions": {}, "topics": {}}
-    try:
-        data = json.loads(STANDUP_DECISIONS_FILE.read_text())
-    except Exception:
-        return empty
-    if not isinstance(data, dict):
-        return empty
-    return {"schema": 1, "actions": dict(data.get("actions") or {}), "topics": dict(data.get("topics") or {})}
-
-
-def _standup_known_ids(view: dict) -> tuple:
-    """(action ids, topic keys) a decision may be recorded for -- your own
-    action items and any topic in the view. Anything else is refused rather
-    than written."""
-    me = view.get("me")
-    actions = {aid for aid, a in (view.get("actions") or {}).items() if me and a.get("owner") == me}
-    topics = set((view.get("topics") or {}).keys())
-    return actions, topics
-
-
-STANDUP_BATCH_DECISIONS = {"done", "dropped"}
-STANDUP_BATCH_MAX_ITEMS = 1000
-STANDUP_BACKUPS_KEEP = 30
-_STANDUP_BATCH_ID_RE = re.compile(r"^\d{8}T\d{6}-[0-9a-f]{6}$")
-_NO_EXPECTATION = object()
-
-
-def standup_decisions_log_file() -> Path:
-    """Append-only history of every decision this tool writes, beside decisions.json."""
-    return STANDUP_DECISIONS_FILE.with_name("decisions.log.jsonl")
-
-
-def standup_decisions_backup_dir() -> Path:
-    return STANDUP_DECISIONS_FILE.parent / "decisions_backups"
-
-
-def _backup_standup_decisions(batch_id: str | None) -> None:
-    """Copies decisions.json aside before a write: one snapshot per day
-    (the state at the first write of that day) and, for a bulk change, one
-    more taken just before it. Keeps the newest STANDUP_BACKUPS_KEEP of
-    each kind. Best effort -- a failed backup never blocks a decision, the
-    log still records it. Called with the decisions lock held."""
-    if not STANDUP_DECISIONS_FILE.exists():
-        return
-    try:
-        folder = standup_decisions_backup_dir()
-        folder.mkdir(exist_ok=True)
-        today = datetime.now().strftime("%Y-%m-%d")
-        daily = folder / f"decisions-{today}.json"
-        if not daily.exists():
-            shutil.copy2(STANDUP_DECISIONS_FILE, daily)
-        if batch_id:
-            shutil.copy2(STANDUP_DECISIONS_FILE, folder / f"decisions-{today}-before-{batch_id}.json")
-        for pattern in ("decisions-????-??-??.json", "decisions-*-before-*.json"):
-            for old in sorted(folder.glob(pattern))[:-STANDUP_BACKUPS_KEEP]:
-                old.unlink(missing_ok=True)
-    except OSError:
-        pass
-
-
-def _apply_standup_changes(changes: list, source: str, batch_id: str | None = None, skip_noops: bool = False,
-                           undo_of: str | None = None) -> list:
-    """The one place decisions.json is written. `changes` are dicts with
-    kind ("action"/"topic"), id, to (a decision, or "clear" to remove) and
-    optionally expect (the decision the item must currently have, else it is
-    left alone -- how a batch undo avoids overwriting a later call).
-
-    Under the decisions lock: back up, append one log line per real change
-    (IDs, old and new decision, time -- no text), then atomically write
-    decisions.json. The log goes first and is required: if it can't be
-    written nothing changes. Returns one dict per change: kind, id, from,
-    to, changed (False for a skipped no-op or a failed expectation) and
-    skipped (a failed expectation). Raises OSError when the log or
-    decisions.json can't be written."""
-    results = []
-    with open(STANDUP_DECISIONS_LOCK_FILE, "w") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        data = load_standup_decisions()
-        now = datetime.now().astimezone().isoformat(timespec="seconds")
-        pending = []
-        for ch in changes:
-            section = "actions" if ch["kind"] == "action" else "topics"
-            field = "outcome" if ch["kind"] == "action" else "decision"
-            current = (data[section].get(ch["id"]) or {}).get(field)
-            new = None if ch["to"] == "clear" else ch["to"]
-            entry = {"kind": ch["kind"], "id": ch["id"], "from": current, "to": new, "changed": True, "skipped": False}
-            expect = ch.get("expect", _NO_EXPECTATION)
-            if expect is not _NO_EXPECTATION and current != expect:
-                entry.update(changed=False, skipped=True)
-            elif skip_noops and current == new:
-                entry["changed"] = False
-            results.append(entry)
-            if entry["changed"]:
-                pending.append((section, field, entry))
-        if not pending:
-            return results
-        _backup_standup_decisions(batch_id)
-        lines = "".join(
-            json.dumps({"at": now, "source": source, "batch": batch_id, "undo_of": undo_of, "kind": e["kind"],
-                        "id": e["id"], "from": e["from"], "to": e["to"]}, ensure_ascii=False) + "\n"
-            for _, _, e in pending
-        )
-        with open(standup_decisions_log_file(), "a") as log:
-            log.write(lines)
-        for section, field, e in pending:
-            if e["to"] is None:
-                data[section].pop(e["id"], None)
-            else:
-                data[section][e["id"]] = {field: e["to"], "at": now}
-        for section in ("actions", "topics"):
-            data[section] = dict(sorted(data[section].items()))
-        _atomic_write_json(STANDUP_DECISIONS_FILE, data)
-    return results
-
-
-def record_standup_decision(kind: str, item_id: str, decision: str) -> tuple:
-    """Sets (or with decision="clear", removes) your decision on one standup
-    action item or quiet topic in decisions.json. Returns (ok, message,
-    previous_decision_or_None) -- the previous value is what an Undo puts
-    back. Refuses unknown kinds/decisions, IDs the current standup view
-    doesn't contain, and a missing meetingnotestool checkout (it never
-    creates that project's folder). Every write is logged and backed up
-    (see _apply_standup_changes)."""
-    allowed = {"action": STANDUP_ACTION_DECISIONS, "topic": STANDUP_TOPIC_DECISIONS}.get(kind)
-    if allowed is None or (decision not in allowed and decision != "clear"):
-        return False, "That standup decision isn't one this page knows how to record.", None
-    view = standup_snapshot()["view"]
-    if not view:
-        return False, "Standup data isn't available, so nothing was recorded.", None
-    known_actions, known_topics = _standup_known_ids(view)
-    if item_id not in (known_actions if kind == "action" else known_topics):
-        return False, "That standup item isn't in the current view (it may have changed since the page loaded). Nothing was recorded.", None
-    if not STANDUP_DECISIONS_FILE.parent.is_dir():
-        return False, f"No meetingnotestool folder at {STANDUP_DECISIONS_FILE.parent}, so nothing was recorded.", None
-    try:
-        results = _apply_standup_changes([{"kind": kind, "id": item_id, "to": decision}], "single")
-    except OSError as exc:
-        return False, f"Could not save the decision ({exc}). Nothing was recorded.", None
-    return True, "", results[0]["from"]
-
-
-# --- bulk resolve --------------------------------------------------------------
-
-# (key, label, min days open, max days open or None). "60+" means more than 60.
-STANDUP_AGE_BUCKETS = (
-    ("week", "This week", 0, 7),
-    ("month", "8–30 days", 8, 30),
-    ("quarter", "31–60 days", 31, 60),
-    ("old", "60+ days", 61, None),
-)
-STANDUP_AGE_KEYS = tuple(b[0] for b in STANDUP_AGE_BUCKETS)
-
-
-def standup_action_age_days(action: dict, today=None):
-    """Whole days since the standup that raised the item; None if undated."""
-    today = today or datetime.now().date()
-    try:
-        return max((today - datetime.strptime(action.get("date") or "", "%Y-%m-%d").date()).days, 0)
-    except ValueError:
-        return None
-
-
-def standup_age_bucket(days) -> str | None:
-    if days is None:
-        return None
-    for key, _label, lo, hi in STANDUP_AGE_BUCKETS:
-        if days >= lo and (hi is None or days <= hi):
-            return key
-    return None
-
-
-def standup_age_counts(actions: list, today=None) -> dict:
-    """{bucket key: how many of these actions fall in it}."""
-    counts = {k: 0 for k in STANDUP_AGE_KEYS}
-    for a in actions:
-        key = standup_age_bucket(standup_action_age_days(a, today))
-        if key:
-            counts[key] += 1
-    return counts
-
-
-def standup_open_actions(view: dict) -> list:
-    """Every unresolved action item in the (decision-applied) view."""
-    return [a for a in (view.get("actions") or {}).values() if not a.get("resolution")]
-
-
-def standup_bulk_candidates(view: dict, owner: str = "", age: str = "", q: str = "", topic_key: str = "",
-                            closed_topics: bool = False, today=None) -> list:
-    """The open action items a bulk resolve would cover, oldest first within
-    each owner: filtered by exact owner name, age bucket, a text search over
-    the task and its topic, one topic, and/or "sits under a done or dropped
-    topic". An unknown age key matches nothing, so a hand-edited link never
-    widens the set."""
-    if age and age not in STANDUP_AGE_KEYS:
-        return []
-    topics = view.get("topics") or {}
-    out = []
-    for a in standup_open_actions(view):
-        if owner and a.get("owner") != owner:
-            continue
-        if age and standup_age_bucket(standup_action_age_days(a, today)) != age:
-            continue
-        if q and q.lower() not in ((a.get("task") or "") + " " + (a.get("topic") or "")).lower():
-            continue
-        if topic_key and a.get("topic_key") != topic_key:
-            continue
-        if closed_topics and (topics.get(a.get("topic_key")) or {}).get("status") not in ("done", "dropped"):
-            continue
-        out.append(a)
-    out.sort(key=lambda a: (a.get("owner") or "~", a.get("date") or "", a.get("id") or ""))
-    return out
-
-
-def record_standup_batch(ids: list, decision: str) -> dict:
-    """Marks many open action items done or dropped in one logged write
-    (one batch id, so one Undo reverses all of it). Unlike a single click,
-    this is allowed on anyone's items -- the confirmation page lists every
-    one first. IDs that aren't open action items in the current view are
-    skipped, not written. Returns {ok, message, batch, applied, skipped}."""
-    result = {"ok": False, "message": "", "batch": None, "applied": 0, "skipped": 0}
-    if decision not in STANDUP_BATCH_DECISIONS:
-        result["message"] = "Bulk changes can only mark items done or dropped."
-        return result
-    ids = list(dict.fromkeys(i for i in ids if isinstance(i, str) and i))
-    if not ids or len(ids) > STANDUP_BATCH_MAX_ITEMS:
-        result["message"] = "Nothing was selected." if not ids else f"Too many items at once (limit {STANDUP_BATCH_MAX_ITEMS})."
-        return result
-    view = standup_view()["view"]
-    if not view:
-        result["message"] = "Standup data isn't available, so nothing was recorded."
-        return result
-    if not STANDUP_DECISIONS_FILE.parent.is_dir():
-        result["message"] = f"No meetingnotestool folder at {STANDUP_DECISIONS_FILE.parent}, so nothing was recorded."
-        return result
-    open_ids = {a["id"] for a in standup_open_actions(view) if a.get("id")}
-    eligible = [i for i in ids if i in open_ids]
-    result["skipped"] = len(ids) - len(eligible)
-    if not eligible:
-        result["message"] = "None of the selected items are open any more, so nothing was recorded."
-        return result
-    batch_id = f"{datetime.now():%Y%m%dT%H%M%S}-{uuid.uuid4().hex[:6]}"
-    try:
-        done = _apply_standup_changes([{"kind": "action", "id": i, "to": decision} for i in eligible],
-                                      "batch", batch_id=batch_id, skip_noops=True)
-    except OSError as exc:
-        result["message"] = f"Could not save the decisions ({exc}). Nothing was recorded."
-        return result
-    result.update(ok=True, batch=batch_id, applied=sum(1 for d in done if d["changed"]))
-    return result
-
-
-def undo_standup_batch(batch_id: str) -> dict:
-    """Reverses one bulk change using the log: each item goes back to what it
-    was before, unless it has been changed again since (those are left
-    alone and counted). Returns {ok, message, restored, skipped}."""
-    result = {"ok": False, "message": "", "restored": 0, "skipped": 0}
-    if not _STANDUP_BATCH_ID_RE.match(batch_id or ""):
-        result["message"] = "That isn't a bulk change this page knows about."
-        return result
-    entries = []
-    try:
-        with open(standup_decisions_log_file()) as log:
-            for line in log:
-                try:
-                    e = json.loads(line)
-                except ValueError:
-                    continue
-                if isinstance(e, dict) and e.get("batch") == batch_id and e.get("source") == "batch":
-                    entries.append(e)
-    except OSError:
-        pass
-    if not entries:
-        result["message"] = "That bulk change isn't in the decision log, so it can't be undone from here."
-        return result
-    changes = [{"kind": e["kind"], "id": e["id"], "to": e.get("from") or "clear", "expect": e.get("to")} for e in entries]
-    try:
-        done = _apply_standup_changes(changes, "undo", undo_of=batch_id)
-    except OSError as exc:
-        result["message"] = f"Could not undo ({exc}). Nothing was changed."
-        return result
-    result.update(ok=True, restored=sum(1 for d in done if d["changed"]), skipped=sum(1 for d in done if d["skipped"]))
-    return result
-
-
-def standup_attention(view: dict, today=None) -> dict:
-    """What the Needs attention page shows, from the decision-applied view:
-    open items under done/dropped topics; quiet topics you haven't decided;
-    open items with no real owner (Unassigned/Group/blank); open items the
-    notes flag with a "check"; and how many open items are over 30 days old,
-    per age bucket."""
-    topics = view.get("topics") or {}
-    open_actions = standup_open_actions(view)
-    by_age = lambda a: (a.get("date") or "", a.get("id") or "")
-    return {
-        "closed_topic_items": sorted((a for a in open_actions
-                                      if (topics.get(a.get("topic_key")) or {}).get("status") in ("done", "dropped")), key=by_age),
-        "quiet_topics": [t for k in view.get("quiet_topics") or [] if (t := topics.get(k)) and not t.get("decision")],
-        "no_owner": sorted((a for a in open_actions if (a.get("owner") or "Unassigned") in ("Unassigned", "Group")), key=by_age),
-        "flagged": sorted((a for a in open_actions if a.get("check")), key=by_age),
-        "stale_counts": {k: v for k, v in standup_age_counts(open_actions, today).items() if k in ("quarter", "old")},
-    }
-
-
-def apply_standup_decisions(view: dict, decisions: dict) -> dict:
-    """Returns a copy of the standup view with your decisions.json calls
-    applied, so /standup reflects a click immediately instead of waiting for
-    meetingnotestool's next build. Idempotent: once that build has applied a
-    decision itself, applying it again here changes nothing.
-
-    Action items: done/dropped resolves the item ("by you", marked pending
-    until the next build); open clears a resolution the notes gave it. Your
-    open and resolved lists are then rebuilt from the items themselves.
-    Topics: the decision rides on the topic as "decision" -- and done/dropped
-    becomes its status -- but only if made on or after the topic's latest
-    mention; a later standup update wins, the same rule build.py uses."""
-    v = copy.deepcopy(view)
-    acts = decisions.get("actions") or {}
-    tops = decisions.get("topics") or {}
-    actions = v.get("actions") or {}
-    topics = v.get("topics") or {}
-
-    for aid, d in acts.items():
-        a = actions.get(aid)
-        outcome = (d or {}).get("outcome")
-        if not a:
-            continue
-        r = a.get("resolution")
-        if outcome in ("done", "dropped"):
-            if not (r and r.get("by_you") and r.get("outcome") == outcome):
-                a["resolution"] = {"date": str(d.get("at", ""))[:10], "outcome": outcome, "note": "Marked by you",
-                                   "by_you": True, "pending": True}
-        elif outcome == "open" and r:
-            a["resolution"] = None
-
-    me = v.get("me")
-    mine = [a for a in actions.values() if me and a.get("owner") == me]
-    v["my_open_actions"] = [a["id"] for a in sorted((a for a in mine if not a.get("resolution")),
-                                                    key=lambda a: (a.get("date") or "", a.get("id") or ""))]
-    v["my_resolved_actions"] = [a["id"] for a in sorted((a for a in mine if a.get("resolution")),
-                                                        key=lambda a: (a["resolution"].get("date") or "", a.get("id") or ""),
-                                                        reverse=True)[:20]]
-
-    for key, d in tops.items():
-        t = topics.get(key)
-        decision = (d or {}).get("decision")
-        if t and decision in STANDUP_TOPIC_DECISIONS and str(d.get("at", ""))[:10] >= (t.get("last_date") or ""):
-            t["decision"] = decision
-            if decision in ("done", "dropped"):
-                t["status"] = decision
-    return v
+# Whose topic updates the third /standup tab lists (spelled as the notes spell
+# them; matching is case-insensitive). Override in .env.
+STANDUP_TRACKED_PERSON = os.getenv("STANDUP_TRACKED_PERSON", "Ryan").strip() or "Ryan"
 
 
 def standup_view() -> dict:
-    """standup_snapshot() with your decisions applied -- what /standup and
-    its nav badge actually show. {"view": dict|None, "error": str|None}."""
-    snap = standup_snapshot()
-    if not snap["view"]:
-        return snap
-    return {"view": apply_standup_decisions(snap["view"], load_standup_decisions()), "error": None}
+    """The standup view /standup and its nav badge show: today, exactly the
+    snapshot meetingnotestool built (this tool writes nothing back to it).
+    {"view": dict|None, "error": str|None}."""
+    return standup_snapshot()
+
+
+def standup_topic_matches(topic: dict, q: str) -> bool:
+    """Case-insensitive search over a topic's name, workstream and updates."""
+    if not q:
+        return True
+    hay = " ".join([topic.get("name", ""), topic.get("workstream", "")] + [e.get("update", "") for e in topic.get("entries") or []]).lower()
+    return q.lower() in hay
+
+
+def standup_topics_alpha(view: dict, q: str = "") -> list:
+    """Every topic matching `q`, A to Z by name (case-insensitive)."""
+    topics = [t for t in (view.get("topics") or {}).values() if standup_topic_matches(t, q)]
+    return sorted(topics, key=lambda t: ((t.get("name") or "").casefold(), t.get("key") or ""))
+
+
+def standup_person_entries(view: dict, person: str, q: str = "") -> list:
+    """Every topic update `person` is recorded as giving at a standup, newest
+    standup first (then by topic name). Each is the topic entry plus its
+    topic_key, topic_name and workstream."""
+    wanted = person.casefold()
+    out = []
+    for key, t in (view.get("topics") or {}).items():
+        for e in t.get("entries") or []:
+            if (e.get("owner") or "").casefold() != wanted:
+                continue
+            if q and q.lower() not in (e.get("update", "") + " " + t.get("name", "")).lower():
+                continue
+            out.append({**e, "topic_key": key, "topic_name": t.get("name", ""), "workstream": t.get("workstream", "")})
+    out.sort(key=lambda e: (e["topic_name"].casefold(), e.get("id") or ""))
+    out.sort(key=lambda e: e.get("date") or "", reverse=True)
+    return out
 
 
 def standup_open_action_count() -> int:
-    """Nav-badge count: your open standup action items, after your own
-    decisions. 0 (no badge) when the standup data isn't available, same
-    fail-quiet posture as the other cache-backed badges."""
+    """Nav-badge count: your open standup action items. 0 (no badge) when the
+    standup data isn't available, same fail-quiet posture as the other
+    cache-backed badges."""
     view = standup_view()["view"]
     return len(view.get("my_open_actions") or []) if view else 0
 
@@ -3577,21 +3050,22 @@ def standup_tasks_by_action() -> dict:
 
 
 def add_standup_action_to_tasks(action_id: str, log_fn=print) -> dict:
-    """/standup's "Add to My tasks": saves one of your open standup action
-    items as a local My tasks draft (add_personal_task -- no Zendesk call;
-    promoting it to a real ticket stays a separate click on /tasks).
+    """/standup's "Add to My tasks": saves one open standup action item (anyone's)
+    as a local My tasks draft (add_personal_task -- no Zendesk call; promoting
+    it to a real ticket stays a separate click on /tasks).
 
-    The draft's notes say only which standup it came from, deliberately
-    without the Google Doc link: a promoted task's notes can end up in a
-    Zendesk ticket, and the standup notes aren't meant to travel there.
-    Refuses an action item that isn't one of your open ones in the current
-    view, or one that already has a task (live or archived)."""
+    The draft's notes say only which standup it came from (and whose item it
+    was, when that isn't yours), deliberately without the Google Doc link: a
+    promoted task's notes can end up in a Zendesk ticket, and the standup
+    notes aren't meant to travel there. Refuses an action item that isn't
+    open in the current view, or one that already has a task (live or
+    archived)."""
     view = standup_view()["view"]
     if not view:
         return {"ok": False, "error": "Standup data isn't available, so no task was added."}
-    action = (view.get("actions") or {}).get(action_id) if action_id in (view.get("my_open_actions") or []) else None
-    if action is None:
-        return {"ok": False, "error": "That action item isn't one of your open standup items any more. No task was added."}
+    action = (view.get("actions") or {}).get(action_id)
+    if action is None or action.get("resolution"):
+        return {"ok": False, "error": "That action item isn't open any more. No task was added."}
     if action_id in standup_tasks_by_action():
         return {"ok": False, "error": "That standup action item is already in My tasks."}
     try:
@@ -3599,7 +3073,9 @@ def add_standup_action_to_tasks(action_id: str, log_fn=print) -> dict:
         when = f"{raised.strftime('%b')} {raised.day}"
     except ValueError:
         when = action.get("date", "")
-    return add_personal_task(action.get("task", ""), f"From the {when} Operations Standup.", log_fn=log_fn,
+    owner = action.get("owner")
+    whose = f" ({owner}'s item)" if owner and owner != view.get("me") else ""
+    return add_personal_task(action.get("task", ""), f"From the {when} Operations Standup{whose}.", log_fn=log_fn,
                              standup_action_id=action_id)
 
 

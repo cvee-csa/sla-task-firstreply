@@ -39,10 +39,11 @@ def test_a_configured_person_missing_from_the_notes_is_still_offered(monkeypatch
 
 def test_filter_pages_do_not_offer_other_owners(monkeypatch):
     _setup(monkeypatch, ["Alex", "Sam"])
-    for render in (review_server._render_standup_topics_page, review_server._render_standup_actions_page):
-        out = _page(render)
-        assert _options(out, "owner") == ["", "Alex", "Sam", "Group"]
-        assert "Casey" not in _options(out, "owner")
+    out = _page(review_server._render_standup_actions_page)
+    assert _options(out, "owner") == ["", "Alex", "Sam", "Group"]
+    assert "Casey" not in _options(out, "owner")
+    for render in (review_server._render_standup_topics_page, review_server._render_standup_tracked_page):
+        assert 'name="owner"' not in _page(render)          # no owner filter on those lists
 
 
 def test_everyone_still_shows_items_owned_by_other_people(monkeypatch):

@@ -19,7 +19,6 @@ def fresh_caches(monkeypatch):
     monkeypatch.setattr(_common, "_worked_on_cache", {})
     monkeypatch.setattr(_common, "_worked_on_refreshing", False)
     monkeypatch.setattr(_common, "_worked_on_next_attempt", None)
-    monkeypatch.setattr(_common, "_activity_cache", {})
     monkeypatch.setattr(_common, "resolve_own_agent_id", lambda client, log_fn=print: ME)
     monkeypatch.setattr(_common, "resolve_requester_name", lambda client, rid, desc, log_fn=print: ("Pat Example", "confirmed", None))
     monkeypatch.setattr(_common, "recent_replied_items", lambda limit=None: list(LOCAL))
@@ -116,14 +115,6 @@ def test_entries_expire_after_the_max_age(monkeypatch):
     _common.cached_ticket_comments(c, 1, "t")
     _common.cached_ticket_comments(c, 1, "t")
     assert c.comment_calls == [1, 1]
-
-
-def test_activity_scan_reuses_comments_for_unchanged_tickets():
-    day = datetime(2026, 1, 1).date()
-    c = FakeClient(tickets=[_ticket(1, "2026-01-01T12:00:00Z")], comments={1: _own_comment()})
-    _common.fetch_activity_for_day(c, day, log_fn=NOOP, force=True)
-    _common.fetch_activity_for_day(c, day, log_fn=NOOP, force=True)
-    assert c.comment_calls == [1]
 
 
 def test_click_time_check_always_reads_live():

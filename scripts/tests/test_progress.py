@@ -24,7 +24,7 @@ ME = 111
 def fresh_progress_state(monkeypatch):
     monkeypatch.setattr(_common, "_progress_registry", {})
     monkeypatch.setattr(_common, "_progress_history", {})
-    monkeypatch.setattr(_common, "_activity_cache", {})
+    monkeypatch.setattr(_common, "_sla_ticket_cache", {})
     _common.clear_comment_cache()
     _common._progress_tls.current = None
     yield
@@ -162,7 +162,7 @@ def test_registry_is_bounded_and_purges_old_records(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# HTTP level: a real server, a slow fake Zendesk client, /standup/yesterday.
+# HTTP level: a real server, a slow fake Zendesk client, /overview.
 # ---------------------------------------------------------------------------
 
 DAY1 = date(2026, 10, 28)
@@ -223,12 +223,12 @@ def _get(port, path, cookie=None):
 
 
 def _load_and_watch(port, day, pid):
-    """GET /standup/yesterday with a progress cookie in a thread while
+    """GET /overview with a progress cookie in a thread while
     polling /__progress from here; returns every snapshot seen."""
     result = {}
 
     def load():
-        result["status"], _ = _get(port, f"/standup/yesterday?date={day.isoformat()}", cookie=f"csa_pid={pid}")
+        result["status"], _ = _get(port, "/overview", cookie=f"csa_pid={pid}")
 
     thread = threading.Thread(target=load)
     thread.start()
@@ -251,9 +251,10 @@ def test_http_progress_unknown_then_measured(server):
     first = _load_and_watch(port, DAY1, PID)
     assert all(s["pct"] is None for s in first[:-1] if not s["finished"])   # no baseline yet: no made-up number
     assert first[-1]["finished"] and first[-1]["pct"] == 1.0
-    assert _common._progress_history["GET /standup/yesterday"] == clients[0].total_calls == 13
+    assert _common._progress_history["GET /overview"] == clients[0].total_calls == 13
 
     _common.clear_comment_cache()   # unchanged tickets' comments are cached now; this test measures a full-cost load
+    _common._sla_ticket_cache = {}  # (restored by the fixture) so /overview scans again instead of serving its cache
     second = _load_and_watch(port, DAY2, "fedcba9876543210")
     pcts = [s["pct"] for s in second if s["known"] and not s["finished"] and s["pct"] is not None]
     assert len(set(pcts)) >= 3, pcts                     # real, advancing values
@@ -265,7 +266,7 @@ def test_http_progress_unknown_then_measured(server):
 def test_http_untracked_requests_and_bad_ids(server):
     httpd, _ = server
     port = httpd.server_address[1]
-    _get(port, f"/standup/yesterday?date={DAY1.isoformat()}")            # no cookie
+    _get(port, "/overview")            # no cookie
     assert _common._progress_registry == {}
     for bad in ("", "nothex", "g" * 16, "a" * 40):
         _, body = _get(port, f"/__progress?id={bad}")

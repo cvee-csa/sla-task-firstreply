@@ -1,13 +1,12 @@
-"""/standup and its sub-pages: the view of the sibling meetingnotestool
-project's standup data (_common.standup_snapshot / standup_view and the
-review_server._render_standup_* functions), your decisions, and the My tasks
-and Zendesk links.
+"""/standup: the three read-only lists (action items, topics A to Z, one
+person's updates by date) built from the sibling meetingnotestool project's
+standup data (_common.standup_snapshot and the review_server._render_standup_*
+functions), plus Add to My tasks.
 
 Every fixture here is made up. This repo is public, so real standup notes
 must never appear in it -- not even as test data.
 """
 import json
-from urllib.parse import parse_qs, quote, unquote
 
 import _common
 import review_server
@@ -140,225 +139,57 @@ def test_nav_shows_standup_badge_from_open_action_items():
     assert '<span class="nav-badge">1</span>' in nav
 
 
-# --- overview ----------------------------------------------------------------
+# --- action items list (/standup) ------------------------------------------------
 
-def test_overview_renders_sections_and_escapes_note_text():
+def test_actions_page_lists_open_items_newest_first_with_owner_and_topic():
     _write()
-    page = _page(review_server._render_standup_page)
-    assert "Open action items, oldest first (1)" in page and "Blocked or recently updated topics (1)" in page
-    assert "&lt;b&gt;patch&lt;/b&gt;" in page and "<b>patch</b>" not in page
-    assert "Waiting on Vendor" in page
-    assert 'title="Name was a guess"' in page
-    assert 'href="/standup/topic/' in page
-
-
-def test_error_page_replaces_sections_when_data_is_missing():
-    page = review_server._render_standup_page(_common.standup_snapshot()).decode()
-    assert "No standup data found" in page and "Open action items" not in page
-
-
-def test_inferred_owner_is_marked_on_team_rows_but_your_rows_show_no_owner():
-    _write()
-    ctx = review_server._StandupCtx(_common.standup_view()["view"], "/standup")
-    action = ctx.action("2026-01-13-a1")
-    assert 'class="standup-inferred"' in ctx.action_row(action, show_owner=True)
-    assert "Alex" not in ctx.action_row(action)
-
-
-def test_buttons_only_appear_on_your_own_action_items():
-    _write()
-    ctx = review_server._StandupCtx(_common.standup_view()["view"], "/standup")
-    assert 'value="done"' in ctx.action_row(ctx.action("2026-01-13-a1"))
-    assert "/standup/decide" not in ctx.action_row(ctx.action("2026-01-15-a1"), show_owner=True)
-
-
-def test_resolved_action_shows_outcome_instead_of_age():
-    _write()
-    ctx = review_server._StandupCtx(_common.standup_view()["view"], "/standup")
-    row = ctx.action_row(ctx.action("2026-01-12-a2"))
-    assert "Done Jan 14" in row and "Renewed" in row and "open " not in row and 'value="open"' in row
-
-
-# --- sub-pages ---------------------------------------------------------------
-
-def test_topic_page_shows_history_newest_first_with_action_items_under_their_update():
-    _write()
-    page = _page(review_server._render_standup_topic_page, "Widgets|Widget rollout")
-    assert page.index("Waiting on the vendor") < page.index("Rollout started.")
-    assert page.index("Rollout started.") < page.index("Email the vendor")
-    assert "raised at 2 standups, Jan 13 to Jan 15" in page
-
-
-def test_topic_page_offers_decisions_only_while_quiet():
-    _write()
-    quiet = _page(review_server._render_standup_topic_page, "Widgets|Old widget")
-    assert 'value="keep"' in quiet and "Suggested: possibly stuck." in quiet
-    blocked = _page(review_server._render_standup_topic_page, "Widgets|Widget rollout")
-    assert 'value="keep"' not in blocked
-
-
-def test_topic_page_for_an_unknown_topic_says_so():
-    _write()
-    assert "in the standup data" in _page(review_server._render_standup_topic_page, "Nope|Nope")
-
-
-def test_topics_page_lists_only_live_topics_by_default_and_filters():
-    _write()
-    page = _page(review_server._render_standup_topics_page)
-    assert "Widget rollout" in page and "Old widget" not in page and "Certificates" not in page
-    assert "Widget rollout" not in _page(review_server._render_standup_topics_page, q="nothing matches")
-    assert "Widget rollout" not in _page(review_server._render_standup_topics_page, owner="Sam")
-    assert 'value="live" selected' in page
-
-
-def test_topics_page_closed_view_lists_done_and_dropped_topics():
-    _write()
-    page = _page(review_server._render_standup_topics_page, status="closed")
-    assert "Closed topics (1)" in page and "Certificates" in page and "Widget rollout" not in page
-    assert 'value="closed" selected' in page
-    assert 'value="live" selected' in _page(review_server._render_standup_topics_page, status="bogus")
+    page = _page(review_server._render_standup_actions_page)
+    assert "Action items (2)" in page
+    assert page.index("Chase the vendor") < page.index("Email the vendor")            # newest raised first
+    assert "<strong>Sam</strong> &middot; Raised" in page                              # who it belongs to
+    assert 'href="/standup/topic/' in page and "Widget rollout" in page
+    assert "Renew the certificate" not in page                                         # resolved items stay out of the open view
 
 
 def test_actions_page_filters_by_state_owner_and_text():
     _write()
-    assert "Action items (2)" in _page(review_server._render_standup_actions_page)
     assert "Action items (1)" in _page(review_server._render_standup_actions_page, show="resolved")
     assert "Action items (3)" in _page(review_server._render_standup_actions_page, show="all")
     assert "Action items (1)" in _page(review_server._render_standup_actions_page, owner="Sam")
     assert "Chase the vendor" in _page(review_server._render_standup_actions_page, q="chase")
+    assert "Action items (2)" in _page(review_server._render_standup_actions_page, show="bogus")     # falls back to open
 
 
-def test_meeting_pages_list_standups_and_show_one_standups_notes():
+def test_actions_page_has_no_decision_or_bulk_controls():
     _write()
-    listing = _page(review_server._render_standup_meetings_page)
-    assert "Standups (2)" in listing and 'href="/standup/meetings/2026-01-15"' in listing
-    one = _page(review_server._render_standup_meeting_page, "2026-01-14")
-    assert "Earlier action items resolved here (1)" in one and "Renew the certificate" in one
-    assert "in the standup data" in _page(review_server._render_standup_meeting_page, "1999-01-01")
+    page = _page(review_server._render_standup_actions_page, show="all")
+    for gone in ("/standup/decide", "/standup/bulk", "Still open", "Review and mark", 'value="dropped"'):
+        assert gone not in page
 
 
-def test_return_path_only_allows_standup_pages():
-    ok = review_server._standup_return_path
-    assert ok("/standup/actions?show=all&owner=Sam") == "/standup/actions?show=all&owner=Sam"
-    assert ok(review_server._standup_topic_href("A, B & C|D")).startswith("/standup/topic/")
-    for bad in ("https://evil.example", "//evil.example", "/tasks", "/standup//evil.example", "/standup?x=<b>", ""):
-        assert ok(bad) == "/standup"
+def test_actions_page_error_when_data_is_missing():
+    assert "No standup data found" in review_server._render_standup_actions_page(_common.standup_snapshot()).decode()
 
 
-# --- decisions (/standup/decide) ---------------------------------------------
+def test_actions_page_escapes_note_text_and_marks_guesses():
+    view = _view()
+    view["actions"]["2026-01-15-a1"]["task"] = "<b>bold</b> task"
+    _write(view)
+    page = _page(review_server._render_standup_actions_page)
+    assert "&lt;b&gt;bold&lt;/b&gt; task" in page and "<b>bold</b>" not in page
+    assert 'title="Name was a guess"' in page and 'class="standup-inferred"' in page
 
-def test_record_refuses_an_unknown_decision_or_id():
+
+# --- Add to My tasks -------------------------------------------------------------
+
+def test_open_items_offer_add_to_my_tasks_and_resolved_ones_do_not():
     _write()
-    assert _common.record_standup_decision("action", "2026-01-13-a1", "delete")[0] is False
-    assert _common.record_standup_decision("action", "2099-01-01-a9", "done")[0] is False
-    assert _common.record_standup_decision("action", "2026-01-15-a1", "done")[0] is False  # someone else's
-    assert _common.record_standup_decision("topic", "Nope|Nope", "keep")[0] is False
-    assert not _common.STANDUP_DECISIONS_FILE.exists()
+    open_page = _page(review_server._render_standup_actions_page)
+    assert open_page.count('action="/standup/add-task"') == 2
+    assert 'name="return_to" value="/standup"' in open_page
+    resolved = _page(review_server._render_standup_actions_page, show="resolved")
+    assert 'action="/standup/add-task"' not in resolved
 
-
-def test_record_refuses_when_standup_data_is_missing():
-    ok, msg, _ = _common.record_standup_decision("action", "2026-01-13-a1", "done")
-    assert ok is False and "isn't available" in msg
-
-
-def test_marking_an_action_done_moves_it_out_of_open_and_undo_restores_it():
-    _write()
-    ok, _, previous = _common.record_standup_decision("action", "2026-01-13-a1", "done")
-    assert ok and previous is None
-    view = _common.standup_view()["view"]
-    assert view["my_open_actions"] == []
-    assert view["my_resolved_actions"][0] == "2026-01-13-a1"
-    r = view["actions"]["2026-01-13-a1"]["resolution"]
-    assert r["by_you"] and r["pending"] and r["outcome"] == "done"
-    assert _common.standup_open_action_count() == 0
-    assert _common.record_standup_decision("action", "2026-01-13-a1", previous or "clear")[0]
-    assert _common.standup_view()["view"]["my_open_actions"] == ["2026-01-13-a1"]
-
-
-def test_still_open_moves_a_resolved_action_back_to_open():
-    _write()
-    assert _common.record_standup_decision("action", "2026-01-12-a2", "open")[0]
-    view = _common.standup_view()["view"]
-    assert view["my_open_actions"] == ["2026-01-12-a2", "2026-01-13-a1"]
-    assert view["my_resolved_actions"] == []
-
-
-def test_topic_decision_applies_and_a_later_mention_wins():
-    _write()
-    assert _common.record_standup_decision("topic", "Widgets|Old widget", "dropped")[0]
-    t = _common.standup_view()["view"]["topics"]["Widgets|Old widget"]
-    assert t["decision"] == "dropped" and t["status"] == "dropped"
-    raised_again = _view()
-    raised_again["topics"]["Widgets|Old widget"]["last_date"] = "2099-01-01"
-    applied = _common.apply_standup_decisions(raised_again, _common.load_standup_decisions())
-    assert applied["topics"]["Widgets|Old widget"]["decision"] is None
-
-
-def test_decisions_file_holds_only_ids_decisions_and_timestamps():
-    _write()
-    _common.record_standup_decision("action", "2026-01-13-a1", "done")
-    _common.record_standup_decision("topic", "Widgets|Old widget", "keep")
-    data = json.loads(_common.STANDUP_DECISIONS_FILE.read_text())
-    assert set(data["actions"]["2026-01-13-a1"]) == {"outcome", "at"}
-    assert set(data["topics"]["Widgets|Old widget"]) == {"decision", "at"}
-
-
-def test_apply_is_idempotent():
-    decisions = {"actions": {"2026-01-13-a1": {"outcome": "done", "at": "2026-01-15T10:00:00"}},
-                 "topics": {"Widgets|Old widget": {"decision": "keep", "at": "2026-01-15T10:00:00"}}}
-    once = _common.apply_standup_decisions(_view(), decisions)
-    assert _common.apply_standup_decisions(once, decisions) == once
-
-
-def test_overview_offers_item_buttons_and_carries_return_to():
-    _write()
-    page = _page(review_server._render_standup_page)
-    assert 'action="/standup/decide"' in page
-    assert 'value="done"' in page and 'value="dropped"' in page and 'value="open"' in page
-    assert 'name="return_to" value="/standup"' in page
-
-
-def test_quiet_topic_decisions_live_on_needs_attention_not_the_overview():
-    _write()
-    overview = _page(review_server._render_standup_page)
-    assert 'value="keep"' not in overview and "Possibly stuck" not in overview and "Needs a decision" not in overview
-    attention = _page(review_server._render_standup_attention_page)
-    assert 'value="keep"' in attention and 'name="return_to" value="/standup/attention"' in attention
-    assert "Possibly stuck (1)" in attention and "No progress since it paused." in attention
-
-
-def test_decided_quiet_topics_stay_reachable_for_undo_on_needs_attention():
-    _write()
-    assert _common.record_standup_decision("topic", "Widgets|Old widget", "keep")[0]
-    attention = _page(review_server._render_standup_attention_page)
-    assert "Decided by you (1)" in attention and "Keeping watch" in attention and 'value="clear"' in attention
-    assert "Quiet topics awaiting a decision (0)" in attention
-
-
-def test_overview_is_one_yours_section_plus_collapsed_extras():
-    _write()
-    body = _page(review_server._render_standup_page).split("</style>")[-1]
-    assert 'id="standup-yours"' in body and "Yours" in body
-    for gone in ("Since the", "Compare with", "standup-summary", "Your topics", "Needs a decision", "Waiting on others (0)"):
-        assert gone not in body
-    assert body.count('class="security-panel overview-section standup-fold"') == 3
-    assert "Zendesk tickets (0)" in body and "Recently resolved for you (1)" in body and "Waiting on others, whole team (1)" in body
-    assert 'data-storage-key="csa-standup-fold-tickets">' in body                  # collapsed by default (no open attribute)
-    assert 'href="/standup/yesterday">Workday recap</a>' in body
-
-
-def test_undo_path_survives_the_double_decoding_of_the_undo_query_param():
-    """do_GET runs unquote() on top of parse_qs's own decoding of ?undo=, so
-    the undo target must be made of characters neither step changes."""
-    key = "Research, Ops & CMS|Topic / 50% done"
-    ret = "/standup/actions?show=all&owner=Sam"
-    path = f"/standup/undo/topic/{review_server._b64url(key)}/clear/{review_server._b64url(ret)}"
-    assert unquote(parse_qs("undo=" + quote(path))["undo"][0]) == path
-    parts = path.strip("/").split("/")
-    assert review_server._b64url_decode(parts[3]) == key and review_server._b64url_decode(parts[5]) == ret
-
-
-# --- Add to My tasks and Zendesk ticket links ------------------------------
 
 def test_add_to_my_tasks_creates_one_linked_local_draft():
     _write()
@@ -373,21 +204,32 @@ def test_add_to_my_tasks_creates_one_linked_local_draft():
     assert len(_common.load_personal_tasks()) == 1
 
 
-def test_add_to_my_tasks_sees_archived_tasks_and_refuses_other_items():
+def test_add_to_my_tasks_works_for_anyones_open_item_and_names_the_owner():
+    _write()
+    result = _common.add_standup_action_to_tasks("2026-01-15-a1", log_fn=NOOP)           # Sam's
+    assert result["ok"]
+    assert _common.load_personal_tasks()[result["local_id"]]["notes"] == "From the Jan 15 Operations Standup (Sam's item)."
+
+
+def test_add_to_my_tasks_sees_archived_tasks_and_refuses_resolved_or_unknown_items():
     _write()
     _common.PERSONAL_TASKS_ARCHIVE_FILE.write_text(json.dumps([{"local_id": "old1", "status": "done", "standup_action_id": "2026-01-13-a1"}]))
     assert _common.add_standup_action_to_tasks("2026-01-13-a1", log_fn=NOOP)["ok"] is False
-    assert _common.add_standup_action_to_tasks("2026-01-15-a1", log_fn=NOOP)["ok"] is False  # someone else's
     assert _common.add_standup_action_to_tasks("2026-01-12-a2", log_fn=NOOP)["ok"] is False  # already resolved
+    assert _common.add_standup_action_to_tasks("no-such-id", log_fn=NOOP)["ok"] is False
     assert _common.load_personal_tasks() == {}
+
+
+def test_add_to_my_tasks_refuses_when_standup_data_is_missing():
+    assert "isn't available" in _common.add_standup_action_to_tasks("x", log_fn=NOOP)["error"]
 
 
 def test_page_swaps_the_button_for_a_chip_once_the_task_exists():
     _write()
-    assert 'action="/standup/add-task"' in _page(review_server._render_standup_page)
+    assert 'action="/standup/add-task"' in _page(review_server._render_standup_actions_page)
     _common.add_standup_action_to_tasks("2026-01-13-a1", log_fn=NOOP)
-    page = _page(review_server._render_standup_page, tasks_by_action=_common.standup_tasks_by_action())
-    assert 'action="/standup/add-task"' not in page and "In My tasks (draft)" in page
+    page = _page(review_server._render_standup_actions_page, tasks_by_action=_common.standup_tasks_by_action())
+    assert page.count('action="/standup/add-task"') == 1 and "In My tasks (draft)" in page
 
 
 def test_ticket_numbers_link_only_when_a_subdomain_is_configured(monkeypatch):
@@ -400,18 +242,141 @@ def test_ticket_numbers_link_only_when_a_subdomain_is_configured(monkeypatch):
     assert "&lt;b&gt;now&lt;/b&gt;" in out
 
 
-def test_tickets_section_shows_tagged_tickets_and_other_mentions(monkeypatch):
-    monkeypatch.setattr(_common, "ZENDESK_SUBDOMAIN", "example")
-    mention = {"date": "2026-01-14", "topic": "Widget rollout", "doc_url": "https://docs.example.com/a"}
-    _write(_view(ticket_mentions={"111111": [mention], "222222": [mention]}))
-    tagged = [{"ticket_id": 111111, "subject": "Widget outage", "url": "https://example.zendesk.com/agent/tickets/111111",
-               "status": "open", "requester_name": "Sam", "already_ours": True, "matched_tags": ["standup"]}]
-    page = _page(review_server._render_standup_page, tagged_tickets=tagged)
-    assert 'Tagged "standup" in Zendesk (1)' in page and "Widget outage" in page
-    assert "Mentioned at the" in page and "Jan 14 standup" in page
-    assert "Mentioned in the notes (1)" in page and "#222222" in page
+# --- topics, A to Z ----------------------------------------------------------------
+
+def _topics_view():
+    view = _view()
+    for key, name in (("Widgets|zebra", "zebra crossing"), ("Widgets|Apple", "Apple pickup"), ("Widgets|1099", "1099 forms")):
+        view["topics"][key] = _topic(key, name, "active", [_entry(f"{name}-1", "2026-01-10", f"About {name}.")])
+    return view
 
 
-def test_tickets_section_shows_a_zendesk_error_instead_of_an_empty_list():
+def test_topics_are_alphabetical_case_insensitive_with_letter_headings():
+    _write(_topics_view())
+    page = _page(review_server._render_standup_topics_page)
+    names = ["Apple pickup", "Certificates", "Old widget", "Widget rollout", "zebra crossing"]
+    positions = [page.index(n) for n in names]
+    assert positions == sorted(positions)
+    assert page.index("1099 forms") < page.index("Apple pickup") or page.index("# (1)") < page.index("A (1)")
+    for heading in ("A (1)", "C (1)", "O (1)", "W (1)", "Z (1)"):
+        assert heading in page
+    assert "6 topics, alphabetical." in page
+
+
+def test_topics_page_shows_every_status_and_links_each_topic_to_its_history():
     _write()
-    assert "Not connected to Zendesk." in _page(review_server._render_standup_page, tickets_error="Not connected to Zendesk.")
+    page = _page(review_server._render_standup_topics_page)
+    for label in ("Blocked", "Quiet", "Done"):
+        assert f">{label}</span>" in page
+    assert page.count('href="/standup/topic/') == 3
+    assert "raised at 2 standups, Jan 13 to" in page and "1 open action item" in page
+
+
+def test_topics_page_search_and_error():
+    _write()
+    assert "Old widget" in _page(review_server._render_standup_topics_page, q="paused")        # matches an update
+    out = _page(review_server._render_standup_topics_page, q="zzz")
+    assert "No topics match this search." in out and "0 topics, alphabetical." in out
+
+
+def test_topics_and_tracked_pages_error_when_data_is_missing():
+    for render in (review_server._render_standup_topics_page, review_server._render_standup_tracked_page):
+        assert "No standup data found" in render(_common.standup_snapshot()).decode()
+
+
+def test_topic_page_shows_history_newest_first_with_task_buttons_and_no_decisions():
+    _write()
+    page = _page(review_server._render_standup_topic_page, "Widgets|Widget rollout")
+    assert page.index("Jan 15") < page.index("Jan 13")
+    assert "&lt;b&gt;patch&lt;/b&gt;" in page and "<b>patch</b>" not in page
+    assert "Email the vendor" in page and 'action="/standup/add-task"' in page
+    assert 'href="/standup/topics">&larr; all topics</a>' in page
+    assert "/standup/decide" not in page and 'value="keep"' not in page
+    assert "raised at 2 standups, Jan 13 to Jan 15" in page
+
+
+def test_topic_page_for_an_unknown_topic_says_so():
+    _write()
+    assert "in the standup data" in _page(review_server._render_standup_topic_page, "Nope|Nope")
+
+
+# --- the tracked person's items, by date ----------------------------------------------
+
+def _tracked_view():
+    view = _view()
+    a = _topic("Widgets|Alpha", "Alpha topic", "active", [
+        _entry("a1", "2026-01-05", "Sam started alpha.", owner="Sam"),
+        _entry("a2", "2026-01-14", "Sam <i>finished</i> alpha.", owner="Sam", waiting_on="Vendor"),
+        _entry("a3", "2026-01-14", "Alex commented.", owner="Alex"),
+    ], owners=("Sam", "Alex"))
+    b = _topic("Widgets|Beta", "Beta topic", "blocked", [
+        _entry("b1", "2026-01-14", "Sam is stuck on beta.", owner="sam", status="blocked", owner_inferred=True, check="Guessed owner"),
+    ], owners=("Sam",))
+    view["topics"].update({"Widgets|Alpha": a, "Widgets|Beta": b})
+    return view
+
+
+def test_tracked_page_lists_only_that_persons_updates_grouped_by_date_newest_first():
+    _write(_tracked_view())
+    page = _page(review_server._render_standup_tracked_page)
+    assert "Sam started alpha." in page and "Sam is stuck on beta." in page and "Alex commented." not in page
+    assert page.index(">Jan 14</a> (2)") < page.index(">Jan 5</a> (1)") < page.index(">Jan 1</a> (1)")   # newest standup first
+    assert page.index("Alpha topic") < page.index("Beta topic")                      # same day: by topic name
+    assert "Paused." in page                                                          # Sam's earlier update on another topic
+    assert "4 items Sam raised across 3 standups, newest first." in page
+
+
+def test_tracked_page_escapes_text_and_shows_waiting_check_and_inferred_marks():
+    _write(_tracked_view())
+    page = _page(review_server._render_standup_tracked_page)
+    assert "&lt;i&gt;finished&lt;/i&gt;" in page and "<i>finished</i>" not in page
+    assert "Waiting on Vendor" in page and 'title="Guessed owner"' in page and "owner inferred" in page
+    assert ">Blocked</span>" in page and 'href="/standup/topic/' in page
+
+
+def test_tracked_page_label_follows_the_configured_person(monkeypatch):
+    monkeypatch.setattr(_common, "STANDUP_TRACKED_PERSON", "alex")
+    _write(_tracked_view())
+    page = _page(review_server._render_standup_tracked_page)
+    assert "Alex commented." in page and "Sam started alpha." not in page
+    assert ">Alex&#x27;s items</a>" in page or ">Alex's items</a>" in page
+    assert 'class="sla-range-btn active" href="/standup/tracked" aria-current="page"' in page
+
+
+def test_tracked_page_search_and_empty_states(monkeypatch):
+    _write(_tracked_view())
+    assert "Sam is stuck on beta." not in _page(review_server._render_standup_tracked_page, q="alpha")
+    assert "match this search." in _page(review_server._render_standup_tracked_page, q="zzz")
+    monkeypatch.setattr(_common, "STANDUP_TRACKED_PERSON", "Nobody")
+    assert "No standup items for Nobody in the notes." in _page(review_server._render_standup_tracked_page)
+
+
+def test_person_entries_helper_is_case_insensitive_and_sorted():
+    view = _tracked_view()
+    got = _common.standup_person_entries(view, "SAM")
+    assert [e["id"] for e in got] == ["a2", "b1", "a1", "2026-01-01-i1"]
+    assert all(e["topic_key"] and e["topic_name"] for e in got)
+    assert _common.standup_person_entries(view, "Sam", q="stuck")[0]["id"] == "b1"
+
+
+# --- chrome and routing ---------------------------------------------------------------
+
+def test_subnav_has_exactly_three_tabs_and_marks_the_current_one():
+    _write()
+    for render, path in ((review_server._render_standup_actions_page, "/standup"),
+                         (review_server._render_standup_topics_page, "/standup/topics"),
+                         (review_server._render_standup_tracked_page, "/standup/tracked")):
+        page = _page(render)
+        nav = page.split('class="standup-subnav"')[1].split("</nav>")[0]
+        assert nav.count("<a ") == 3
+        for label in ("Action items", "Topics", "Sam"):
+            assert label in nav
+        assert f'class="sla-range-btn active" href="{path}" aria-current="page"' in nav
+
+
+def test_return_path_only_allows_standup_pages():
+    ok = review_server._standup_return_path
+    assert ok("/standup?show=all&owner=Sam") == "/standup?show=all&owner=Sam"
+    assert ok(review_server._standup_topic_href("A, B & C|D")).startswith("/standup/topic/")
+    for bad in ("https://evil.example", "//evil.example", "/tasks", "/standup//evil.example", "/standup?x=<b>", ""):
+        assert ok(bad) == "/standup"
