@@ -1,7 +1,6 @@
 """The Discussion and Security columns on /overview (they used to be nav
 tabs) and the sideways-scrolling board they sit in. Fixtures are made up."""
 import review_server
-import _common
 
 SLA = {"items": [], "error": None, "capped": False}
 

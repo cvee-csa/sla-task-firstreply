@@ -4,7 +4,6 @@ reload_launchd.sh is run for real under zsh with a stub `launchctl` first on
 PATH and HOME pointed at a temp dir, so nothing touches the real
 ~/Library/LaunchAgents. Skipped where zsh is not installed.
 """
-import os
 import plistlib
 import re
 import shutil

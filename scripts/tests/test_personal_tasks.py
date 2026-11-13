@@ -117,7 +117,7 @@ def test_edit_personal_task_rejects_unknown_local_id():
 
 def test_move_personal_task_draft_swaps_with_its_neighbor():
     first = _common.add_personal_task("First", "")
-    second = _common.add_personal_task("Second", "")
+    _common.add_personal_task("Second", "")
     # Newest-first order right now: [Second, First].
     assert [d["subject"] for d in _common.draft_personal_tasks()] == ["Second", "First"]
 

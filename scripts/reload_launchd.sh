@@ -79,11 +79,6 @@ echo "zendesk-mcp-server: $MCP_DIR"
 echo "Services python:    $VENV_PY"
 echo "Watchdog python:    $WATCHDOG_PY"
 
-# Legacy: an older setup staged the file as env-for-dotenv.txt.
-if [[ -f env-for-dotenv.txt && ! -f .env ]]; then
-    mv env-for-dotenv.txt .env
-    echo "Renamed env-for-dotenv.txt -> .env"
-fi
 if [[ ! -f .env ]]; then
     echo "ERROR: $REPO_ROOT/.env not found. Create it first:"
     echo "  cp .env.example .env     # then fill in the values"

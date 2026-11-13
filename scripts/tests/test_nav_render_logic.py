@@ -12,7 +12,6 @@ browser and remains the ad hoc Playwright scripts' territory for now (see
 the README's "Running tests" section).
 """
 import review_server
-import _common
 
 
 def test_top_nav_has_no_badge_on_any_link_with_a_cold_cache():

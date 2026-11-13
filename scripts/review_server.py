@@ -223,14 +223,12 @@ _ICONS = {
     "external-link": '<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line>',
     "check-square": '<polyline points="9 11 12 14 22 4"></polyline><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path>',
     "flag": '<path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"></path><line x1="4" y1="22" x2="4" y2="15"></line>',
-    "shield": '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>',
     "check-circle": '<path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline>',
     "chevron-up": '<polyline points="18 15 12 9 6 15"></polyline>',
     "chevron-down": '<polyline points="6 9 12 15 18 9"></polyline>',
     # Icons for the icon-only theme toggle (see _page()'s brand-right): anchor
     # (Abyss), orbit (Galaxy), moon-star (Dark), terminal (Tomorrow Blue),
     # cloud-moon (Lesbian pride), ghost (Halloween), snowflake (Christmas).
-    "sun": '<circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>',
     "menu": '<line x1="4" y1="6" x2="20" y2="6"></line><line x1="4" y1="12" x2="20" y2="12"></line><line x1="4" y1="18" x2="20" y2="18"></line>',
     "panel-left-close": '<rect x="3" y="3" width="18" height="18" rx="2"></rect><path d="M9 3v18"></path><path d="m16 15-3-3 3-3"></path>',
     "anchor": '<path d="M12 22V8"></path><path d="M5 12H2a10 10 0 0 0 20 0h-3"></path><circle cx="12" cy="5" r="3"></circle>',
@@ -240,9 +238,7 @@ _ICONS = {
     "cloud-moon": '<path d="M13 16a3 3 0 0 1 0 6H7a5 5 0 1 1 4.9-6Z"></path><path d="M10.1 9A6 6 0 0 1 16 4a4.24 4.24 0 0 0 6 6 6 6 0 0 1-3 5.197"></path>',
     "ghost": '<path d="M9 10h.01"></path><path d="M15 10h.01"></path><path d="M12 2a8 8 0 0 0-8 8v12l3-3 2.5 2.5L12 19l2.5 2.5L17 19l3 3V10a8 8 0 0 0-8-8z"></path>',
     "snowflake": '<line x1="2" y1="12" x2="22" y2="12"></line><line x1="12" y1="2" x2="12" y2="22"></line><path d="m20 16-4-4 4-4"></path><path d="m4 8 4 4-4 4"></path><path d="m16 4-4 4-4-4"></path><path d="m8 20 4-4 4 4"></path>',
-    "monitor": '<rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line>',
-    # Seasonal-theme glyphs (Halloween / Christmas): the toggle buttons and
-    # the small header accent both use these, same line-icon style as above.
+    # Background-picker icon.
     "image": '<rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline>',
     # Added for the filter-as-you-type boxes (see _filter_box_html) on the
     # main queue, /flagged, /security, /solved, and the "Recently worked
@@ -320,16 +316,6 @@ def _avatar_html(name: str) -> str:
     hue_index = sum(ord(c) for c in name) % len(_AVATAR_HUES)
     initials = html.escape(_initials(name))
     return f'<span class="avatar avatar-hue-{hue_index}" title="{html.escape(name)}">{initials}</span>'
-
-
-def _short_date(iso: str) -> str:
-    """'2026-08-12' -> 'Aug 12', matching the date-label style already used
-    elsewhere on this page (see _render_worked_on_sidebar's clock-time format).
-    Falls back to the raw string if it's not a plain ISO date."""
-    try:
-        return datetime.strptime(iso, "%Y-%m-%d").strftime("%b %-d")
-    except Exception:
-        return iso
 
 
 def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh: bool = False, header_meta: str = "", current_path: str = "/firstreply", wide: bool = False, nav_path: str = "") -> bytes:

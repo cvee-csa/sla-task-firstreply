@@ -125,13 +125,9 @@ def test_snapshot_rejects_an_unexpected_schema_version():
 
 def test_snapshot_rereads_after_the_file_changes():
     _write()
-    assert _common.standup_open_action_count() == 1
+    assert len(_common.standup_snapshot()["view"]["my_open_actions"]) == 1
     _write(_view(my_open_actions=[], actions={}, extra_padding="x" * 10))
-    assert _common.standup_open_action_count() == 0
-
-
-def test_badge_count_is_zero_when_data_is_unavailable():
-    assert _common.standup_open_action_count() == 0
+    assert len(_common.standup_snapshot()["view"]["my_open_actions"]) == 0
 
 
 def test_nav_shows_standup_tab_without_a_count_badge():

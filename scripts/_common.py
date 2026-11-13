@@ -11,12 +11,9 @@ import fcntl
 import json
 import os
 import re
-import subprocess
 import sys
 import threading
 import time as time_module
-import urllib.error
-import urllib.request
 import uuid
 from datetime import datetime, time as dtime, timedelta, timezone
 from pathlib import Path
@@ -2153,35 +2150,6 @@ def fetch_recent_tickets(client, group_id, limit: int = 5, log_fn=print, force: 
         return {"items": [], "error": f"Could not load recent tickets ({exc})."}
 
 
-def cached_security_ticket_count(group_id) -> int:
-    """Best-effort item count from whatever's already sitting in
-    fetch_recent_tickets' own cache for this group, WITHOUT triggering a
-    fetch of its own -- unlike that function, this never calls Zendesk (no
-    client parameter, even). Returns 0 on a cold/expired cache, same as
-    "genuinely nothing to badge" -- there's no separate "unknown" state
-    worth distinguishing here the way fetch_recent_tickets' own {"error":
-    ...} does, since a header badge that's merely absent reads fine either
-    way (compare cached_flagged_ticket_count, which does the same
-    "unavailable means no badge" collapse for the Discussion nav badge).
-
-    This exists for review_server._top_nav_html's IT-Security nav badge,
-    which renders on EVERY page via _page() -- calling fetch_recent_tickets
-    itself from there would mean a page with nothing to do with
-    IT-Security (say, /tasks) could still trigger a live Zendesk call (plus
-    per-ticket requester/assignee name resolution) just because this
-    group's 120-second cache happened to expire. Reading the cache instead
-    keeps the badge free everywhere except the one real cost site
-    (visiting /security itself, which already pays for the fetch it needs
-    regardless): the badge shows the last real count for as long as that
-    visit's cache stays warm, and quietly disappears once it goes stale,
-    rather than forcing a fresh scan just to answer a header's badge."""
-    with _security_ticket_cache_lock:
-        cached = _security_ticket_cache.get(group_id)
-        if not cached or (datetime.now() - cached["fetched_at"]).total_seconds() >= SECURITY_CACHE_TTL_SECONDS:
-            return 0
-        return len(cached["items"])
-
-
 # "block"/"standup" tags mean something different from "needs a first
 # reply": a ticket can carry either tag regardless of its status, its
 # assignee, or whether this tool (or anyone) has already replied to it --
@@ -2345,22 +2313,6 @@ def fetch_flagged_tickets(client, log_fn=print, force: bool = False) -> dict:
         return {"items": [], "error": f"Could not load flagged tickets ({exc}).", "capped": False}
 
 
-def cached_flagged_ticket_count() -> int:
-    """Best-effort item count from whatever's already sitting in
-    fetch_flagged_tickets' own cache, WITHOUT triggering a fetch of its
-    own -- see cached_security_ticket_count just above fetch_recent_tickets
-    for the identical reasoning, doubly so here: fetch_flagged_tickets can
-    page through up to FLAGGED_TICKET_SCAN_PAGES pages (1000 tickets) of
-    the IT-Operations group on a cold cache, which is not a cost any page
-    render having nothing to do with Blocked/Standup should ever risk
-    paying just to draw a header badge. Returns 0 on a cold/expired cache."""
-    with _flagged_ticket_cache_lock:
-        cached = _flagged_ticket_cache
-        if not cached or (datetime.now() - cached["fetched_at"]).total_seconds() >= FLAGGED_CACHE_TTL_SECONDS:
-            return 0
-        return len(cached["items"])
-
-
 # A read-only "what have I already closed out" look-back, the same "no
 # drafting, no persistence" posture as fetch_recent_tickets/
 # fetch_flagged_tickets above -- just filtered by status+assignee instead
@@ -2504,7 +2456,6 @@ def fetch_recently_solved_tickets(client, limit: int = RECENTLY_SOLVED_LIMIT, lo
         if cached:
             return {"items": cached["items"], "error": None, "capped": cached["capped"]}
         return {"items": [], "error": f"Could not load recently solved tickets ({exc}).", "capped": False}
-
 
 
 # ---------------------------------------------------------------------------
@@ -2833,18 +2784,6 @@ def fetch_sla_tickets(client, log_fn=print, force: bool = False) -> dict:
         return {"items": [], "error": f"Could not load SLA data ({exc}).", "capped": False}
 
 
-def cached_sla_breach_count() -> int:
-    """Best-effort breach count from fetch_sla_tickets' own cache, WITHOUT
-    triggering a fetch of its own -- same reasoning as
-    cached_flagged_ticket_count/cached_security_ticket_count above, for the
-    nav badge. Returns 0 on a cold/expired cache."""
-    with _sla_ticket_cache_lock:
-        cached = _sla_ticket_cache
-        if not cached or (datetime.now() - cached["fetched_at"]).total_seconds() >= SLA_CACHE_TTL_SECONDS:
-            return 0
-        return sum(1 for item in cached["items"] if item.get("sla_status") == "breached")
-
-
 # People shown, in order, as cards on /overview. The first name is the person
 # running this tool ("you"): a ticket assigned to this tool's own Zendesk
 # account always lands on that card, even if its display name didn't resolve.
@@ -3046,14 +2985,6 @@ def standup_person_entries(view: dict, person: str, q: str = "") -> list:
     out.sort(key=lambda e: (e["topic_name"].casefold(), e.get("id") or ""))
     out.sort(key=lambda e: e.get("date") or "", reverse=True)
     return out
-
-
-def standup_open_action_count() -> int:
-    """Nav-badge count: your open standup action items. 0 (no badge) when the
-    standup data isn't available, same fail-quiet posture as the other
-    cache-backed badges."""
-    view = standup_view()["view"]
-    return len(view.get("my_open_actions") or []) if view else 0
 
 
 def standup_tasks_by_action() -> dict:
@@ -4142,92 +4073,3 @@ def archive_old_personal_tasks(after_days: int = ARCHIVE_AFTER_DAYS, log_fn=prin
     if count:
         log_fn(f"Archived {count} completed personal task(s) from personal_tasks.json (older than {after_days} days).")
     return count
-
-
-# --- Personal activity snapshot for /overview ------------------------------
-# Replaces the old /sla page's team-wide SLA-compliance metrics (and its
-# "Your activity" per-agent charts), both of which read the sibling
-# sla-report-slack repo's precomputed sla_history.json -- removed entirely
-# along with that page, rather than kept around unused. This is a much
-# smaller thing: a purely local "how did last week go" figure for the
-# Overview page, computed from data this tool already has on hand
-# (pending_drafts.json) and nothing else -- no sibling repo, no GitHub
-# Actions, no separate history file to keep fresh.
-
-
-def _previous_business_week_bounds(now: datetime | None = None) -> tuple[datetime, datetime]:
-    """The most recently completed Monday-through-Friday business week, as
-    a half-open [start, end) range -- start is last Monday at midnight, end
-    is last Saturday at midnight (i.e. the instant last week's business
-    days ended; whatever happened over that weekend is deliberately
-    excluded, same as it would be from a "last week at the office" figure).
-    A fixed calendar range rather than a trailing "last N days" window on
-    purpose: it reads the same all week long (doesn't creep forward a day
-    at a time the way a rolling window would) and always means the one
-    full business week just before whichever week `now` falls in, in a
-    "here's how last week went" sense. `now` is a parameter (defaulting to
-    datetime.now()) so tests can pin it instead of depending on the real
-    clock."""
-    now = now or datetime.now()
-    start_of_this_week = (now - timedelta(days=now.weekday())).replace(
-        hour=0, minute=0, second=0, microsecond=0
-    )
-    start_of_last_week = start_of_this_week - timedelta(days=7)
-    end_of_last_business_week = start_of_last_week + timedelta(days=5)  # last Saturday, 00:00
-    return start_of_last_week, end_of_last_business_week
-
-
-def personal_activity_summary(now: datetime | None = None) -> dict:
-    """How many replies (public or internal) this tool posted during last
-    business week (the most recently completed Monday-through-Friday
-    business week -- see _previous_business_week_bounds; whatever happened
-    over that weekend doesn't count), and how long they sat waiting on
-    average -- from posted_at minus created_at on each pending_drafts.json
-    entry with status "posted". created_at here is this tool's own "first
-    seen" timestamp (set in merge_candidates when a candidate is first
-    drafted), not the ticket's original Zendesk creation time, so this
-    measures "how long did it sit in MY queue," a genuinely different
-    (and, for a personal pace check, more useful) number than the SLA
-    page's old ticket-age-based compliance figures. Don't present
-    avg_hours as an SLA or compliance measurement -- it isn't one.
-
-    Returns {"count": int, "public_count": int, "internal_count": int,
-    "avg_hours": float|None, "week_start": date, "week_end": date}.
-    week_start/week_end are date objects for last Monday and last Friday
-    (inclusive on both ends), handy for labeling the figure with the
-    actual date range it covers. avg_hours is None when there's nothing
-    to average (zero posted items in the window, or every one of them is
-    missing a parseable created_at/posted_at pair -- old enough entries
-    predating one of those fields, in practice)."""
-    week_start, week_end_exclusive = _previous_business_week_bounds(now)
-    data = _cached_load_pending()
-    public_count = 0
-    internal_count = 0
-    wait_hours = []
-    for entry in data.values():
-        if entry.get("status") != "posted":
-            continue
-        try:
-            posted_dt = datetime.fromisoformat(entry.get("posted_at") or "")
-        except ValueError:
-            continue
-        if not (week_start <= posted_dt < week_end_exclusive):
-            continue
-        if entry.get("posted_public"):
-            public_count += 1
-        else:
-            internal_count += 1
-        try:
-            created_dt = datetime.fromisoformat(entry.get("created_at") or "")
-        except ValueError:
-            continue
-        wait_hours.append((posted_dt - created_dt).total_seconds() / 3600)
-
-    return {
-        "count": public_count + internal_count,
-        "public_count": public_count,
-        "internal_count": internal_count,
-        "avg_hours": (sum(wait_hours) / len(wait_hours)) if wait_hours else None,
-        "week_start": week_start.date(),
-        "week_end": (week_end_exclusive - timedelta(days=1)).date(),
-    }
