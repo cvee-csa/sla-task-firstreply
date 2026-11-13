@@ -17,8 +17,10 @@ import _common
 
 def test_top_nav_has_no_badge_on_any_link_with_a_cold_cache():
     html = review_server._top_nav_html(current_path="/")
-    assert 'href="/flagged"' in html
     assert 'href="/security"' in html
+    # Standup and Discussion are blocks on Overview now, not nav tabs.
+    assert 'href="/flagged"' not in html and 'href="/standup"' not in html
+    assert "Discussion" not in html and "Standup" not in html
     # No draft/open tasks, no SLA data, healthy auth, cold flagged/security
     # caches -- nothing here should be flagged as needing attention.
     assert "nav-badge" not in html
@@ -44,18 +46,6 @@ def _link_tag(html: str, href: str) -> str:
     return html[start:end]
 
 
-def test_top_nav_shows_the_flagged_badge_once_its_cache_is_warm():
-    _common._flagged_ticket_cache["items"] = [{"ticket_id": 1}, {"ticket_id": 2}]
-    import datetime
-    _common._flagged_ticket_cache["fetched_at"] = datetime.datetime.now()
-    _common._flagged_ticket_cache["capped"] = False
-
-    html = review_server._top_nav_html(current_path="/")
-    tag = _link_tag(html, "/flagged")
-    assert "nav-badge" in tag
-    assert ">2<" in tag
-
-
 def test_top_nav_shows_the_security_badge_once_its_cache_is_warm():
     import datetime
     _common._security_ticket_cache[_common.IT_SECURITY_GROUP_ID] = {
@@ -70,18 +60,14 @@ def test_top_nav_shows_the_security_badge_once_its_cache_is_warm():
 
 
 def test_top_nav_badges_are_neutral_not_warn():
-    """Blocked/Standup and IT-Security counts aren't inherently a problem
-    the way an SLA breach or a disconnected Zendesk OAuth token is -- their
-    badge should be the plain neutral style, not nav-badge-warn."""
+    """The IT-Security count isn't inherently a problem the way an SLA
+    breach or a disconnected Zendesk OAuth token is -- its badge should be
+    the plain neutral style, not nav-badge-warn."""
     import datetime
     now = datetime.datetime.now()
-    _common._flagged_ticket_cache["items"] = [{"ticket_id": 1}]
-    _common._flagged_ticket_cache["fetched_at"] = now
-    _common._flagged_ticket_cache["capped"] = False
     _common._security_ticket_cache[_common.IT_SECURITY_GROUP_ID] = {"items": [{"ticket_id": 1}], "fetched_at": now}
 
     html = review_server._top_nav_html(current_path="/")
-    assert "nav-badge-warn" not in _link_tag(html, "/flagged")
     assert "nav-badge-warn" not in _link_tag(html, "/security")
 
 

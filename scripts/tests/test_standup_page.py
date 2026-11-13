@@ -132,11 +132,14 @@ def test_badge_count_is_zero_when_data_is_unavailable():
     assert _common.standup_open_action_count() == 0
 
 
-def test_nav_shows_standup_badge_from_open_action_items():
+def test_standup_is_not_a_nav_tab_and_its_pages_keep_overview_highlighted():
     _write()
-    nav = review_server._top_nav_html("/standup")
-    assert 'href="/standup"' in nav and 'aria-current="page"' in nav
-    assert '<span class="nav-badge">1</span>' in nav
+    nav = review_server._top_nav_html("/overview")
+    assert 'href="/standup"' not in nav and 'href="/flagged"' not in nav
+    page = _page(review_server._render_standup_actions_page)
+    top = page.split('class="top-nav"')[1].split("</div>")[0]
+    assert 'class="top-nav-link active" href="/overview"' in top
+    assert '<a href="/overview">&larr; back to Overview</a>' in page
 
 
 # --- action items list (/standup) ------------------------------------------------
