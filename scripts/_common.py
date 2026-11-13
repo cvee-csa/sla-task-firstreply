@@ -2696,6 +2696,9 @@ SLA_REQUESTER_WAIT_HRS = 4
 SLA_NO_UPDATE_HRS = 8
 SLA_RESOLUTION_HRS = float(os.getenv("SLA_RESOLUTION_HRS", "40"))  # 5 business days x 8 hrs/day
 SLA_DUE_SOON_PCT = 0.75  # flag when 75% of a threshold has elapsed
+# Rule keys exactly as the sibling sla-report-slack history stores them in each
+# day's "rules" dict; the /sla page's "Breaches by rule" chart plots these.
+SLA_RULE_KEYS = ("initial_response", "requester_wait", "no_update", "resolution_age")
 
 # Non-terminal statuses worth evaluating at all -- solved/closed tickets
 # are excluded up front (rather than fetched, evaluated, and short-
@@ -3339,7 +3342,33 @@ def sla_chart_data(history: dict) -> dict:
             internal.append(activity.get("internal", 0) or 0)
         agents[name] = {"public": public, "internal": internal}
 
+    def _series(key):
+        # None (not 0) for a day lacking the field: 0 h is a real, common
+        # median, so a missing day must stay distinguishable from it.
+        return [e.get(key) for e in entries]
+
+    # Per-rule breach counts. A day with breaches but no "rules" key predates
+    # the sibling report recording them, so it stays None (a gap in the chart)
+    # rather than a misleading 0. Once recording started, a rule absent from a
+    # day's dict genuinely had no breaches that day; a day with no breaches at
+    # all is a real 0 for every rule.
+    rules_first_date = next((e.get("date") for e in entries if e.get("rules")), None)
+    rules = {
+        rule_key: [
+            (e.get("rules") or {}).get(rule_key, 0) if (e.get("rules") or not e.get("breached")) else None
+            for e in entries
+        ]
+        for rule_key in SLA_RULE_KEYS
+    }
+
     return {
+        "resp_avg": _series("avg_resp_hrs"),
+        "resp_med": _series("med_resp_hrs"),
+        "resp_p90": _series("resp_p90_hrs"),
+        "resp_sla_pct": _series("resp_sla_pct"),
+        "resp_threshold_hrs": SLA_INITIAL_RESPONSE_HRS,
+        "rules": rules,
+        "rules_first_date": rules_first_date,
         "labels": labels,
         "on_track": on_track,
         "due_soon": due_soon,

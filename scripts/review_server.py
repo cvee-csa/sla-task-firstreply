@@ -3544,12 +3544,15 @@ def _sla_charts_html(history: dict) -> str:
     that report's hardcoded brand hex -- consistent with the "match this
     tool's theme" decision made for the rest of the /sla page.
 
+    Also two more history-file charts: "First response time" (business-
+    hour median / average / p90 against the initial-response limit, p90
+    outliers clamped to the top of the axis) and "Breaches by rule" (daily
+    stacked bars per SLA rule; days before the sibling report recorded
+    rules are left blank, not zero).
+
     Deliberately narrower than the full email-report dashboard: no status
-    banner / streak badge / weekly-snapshot table / avg-response KPIs --
-    those need fields (median/percentile response times, per-ticket
-    response timing) this page has no live equivalent for, and would just
-    be redisplaying stale numbers. Just the two graphs the history file
-    already carries everything needed for.
+    banner / streak badge / weekly-snapshot table / KPI strip -- just the
+    graphs the history file already carries everything needed for.
 
     Colors are resolved via getComputedStyle(document.documentElement) at
     chart-build time rather than baked in here, so they automatically
@@ -3564,6 +3567,7 @@ def _sla_charts_html(history: dict) -> str:
 
     data = _common.sla_chart_data(history)
     data["labels"] = [_fmt_sla_history_date(d) for d in data["labels"]]
+    data["rules_first_label"] = _fmt_sla_history_date(data["rules_first_date"]) if data.get("rules_first_date") else ""
     # "</" -> "<\/" so a literal "</script>" inside e.g. an agent name or
     # ticket subject can never prematurely close this embedded JSON block.
     data_json = json.dumps(data).replace("</", "<\\/")
@@ -3599,6 +3603,23 @@ def _sla_charts_html(history: dict) -> str:
   <div id="sla-drilldown-tickets"></div>
 </div>
 
+<h2 class="column-heading">First response time <span class="meta">business hours, tickets first answered each day</span></h2>
+<div class="sla-chart-wrap">
+  <button type="button" class="sla-chart-dl-btn sla-chart-reset-btn" onclick="if(window._slaRespChart)window._slaRespChart.resetZoom()" title="Reset zoom">&#8635;</button>
+  <button type="button" class="sla-chart-dl-btn" onclick="_slaDownloadChart('sla-resp-chart','first-response-time')">&#8595; PNG</button>
+  <div style="position:relative;height:240px"><canvas id="sla-resp-chart"></canvas></div>
+</div>
+<p class="sla-history-note" id="sla-resp-note"></p>
+
+<h2 class="column-heading">Breaches by rule <span class="meta">tickets past each SLA limit, per day</span></h2>
+<div class="sla-chart-wrap">
+  <button type="button" class="sla-chart-dl-btn sla-chart-reset-btn" onclick="if(window._slaRuleChart)window._slaRuleChart.resetZoom()" title="Reset zoom">&#8635;</button>
+  <button type="button" class="sla-chart-dl-btn" onclick="_slaDownloadChart('sla-rule-chart','breaches-by-rule')">&#8595; PNG</button>
+  <div style="position:relative;height:220px"><canvas id="sla-rule-chart"></canvas></div>
+</div>
+<p id="sla-rule-empty" class="empty" style="display:none"></p>
+<p class="sla-history-note" id="sla-rule-note"></p>
+
 <h2 class="column-heading">Agent activity <span class="meta">public replies &amp; internal notes per agent</span></h2>
 <div class="sla-agent-filter-bar" id="sla-agent-filter-bar"></div>
 <div class="sla-chart-wrap">
@@ -3622,7 +3643,7 @@ def _sla_charts_html(history: dict) -> str:
   var zoomOpts = {{ pan: {{ enabled: true, mode: 'x' }}, zoom: {{ wheel: {{ enabled: true }}, pinch: {{ enabled: true }}, mode: 'x' }} }};
   var filterAgents = new Set(RAW.agent_names);
   var currentRange = 7;
-  var areaChart = null, agentChart = null;
+  var areaChart = null, agentChart = null, respChart = null, ruleChart = null;
 
   function slice(arr, n) {{ return (!n || n >= arr.length) ? arr : arr.slice(-n); }}
 
@@ -3779,8 +3800,134 @@ def _sla_charts_html(history: dict) -> str:
       }}
     }}
 
+    // ---- First response time ------------------------------------------
+    // Business-hour median / average / p90 against the initial-response
+    // limit. p90 is occasionally a huge outlier (one ticket left for days),
+    // which would flatten every other line, so the axis stops at 4x the
+    // limit; a value above it is drawn at the top edge as a triangle and
+    // the tooltip still reports its true figure.
+    if (respChart) respChart.destroy();
+    var respCanvas = document.getElementById('sla-resp-chart');
+    if (respCanvas) {{
+      var limit = RAW.resp_threshold_hrs || 2;
+      var realMed = slice(RAW.resp_med, n), realAvg = slice(RAW.resp_avg, n), realP90 = slice(RAW.resp_p90, n);
+      var respPct = slice(RAW.resp_sla_pct, n);
+      var visible = realMed.concat(realAvg, realP90).filter(function(v) {{ return v !== null && v !== undefined; }});
+      var vmax = visible.length ? Math.max.apply(null, visible) : 0;
+      var cap = limit * 4;
+      var yMax = vmax > cap ? cap : Math.max(limit * 1.5, Math.ceil(vmax * 1.15));
+      var clamp = function(arr) {{ return arr.map(function(v) {{ return (v === null || v === undefined) ? null : Math.min(v, yMax); }}); }};
+      var real = [realMed, realAvg, realP90];
+      var pointFor = function(i) {{ return function(ctx) {{ var v = real[i][ctx.dataIndex]; return (v !== null && v !== undefined && v > yMax) ? 'triangle' : 'circle'; }}; }};
+      var limitLabel = 'Limit (' + limit + ' h)';
+      respChart = new Chart(respCanvas, {{
+        type: 'line',
+        data: {{ labels: labels, datasets: [
+          {{ label: 'Median', data: clamp(realMed), borderColor: okColor, backgroundColor: okColor, borderWidth: 2, pointRadius: 3, pointStyle: pointFor(0), tension: 0, spanGaps: true }},
+          {{ label: 'Average', data: clamp(realAvg), borderColor: accent, backgroundColor: accent, borderWidth: 2, pointRadius: 3, pointStyle: pointFor(1), tension: 0, spanGaps: true }},
+          {{ label: 'P90', data: clamp(realP90), borderColor: dueColor, backgroundColor: 'transparent', pointBackgroundColor: dueColor, pointBorderColor: dueColor, borderWidth: 2, borderDash: [4, 3], pointRadius: 3, pointStyle: pointFor(2), tension: 0, spanGaps: true }},
+          {{ label: limitLabel, data: labels.map(function() {{ return limit; }}), borderColor: breachColor, backgroundColor: 'transparent', borderWidth: 1.5, borderDash: [2, 4], pointRadius: 0, pointHoverRadius: 0, tension: 0 }}
+        ] }},
+        options: {{
+          responsive: true, maintainAspectRatio: false,
+          interaction: {{ mode: 'index', intersect: false }},
+          plugins: {{
+            legend: {{ position: 'bottom', labels: {{ color: tickColor, font: {{ size: 11 }}, boxWidth: 12, padding: 10 }} }},
+            tooltip: {{
+              filter: function(item) {{ return item.datasetIndex < 3; }},
+              callbacks: {{
+                label: function(ctx) {{
+                  var v = real[ctx.datasetIndex][ctx.dataIndex];
+                  if (v === null || v === undefined) return ctx.dataset.label + ': no data';
+                  return ctx.dataset.label + ': ' + v + ' h' + (v > yMax ? ' (above chart scale)' : '');
+                }},
+                footer: function(items) {{
+                  var p = respPct[items[0].dataIndex];
+                  return (p === null || p === undefined) ? '' : 'Answered within ' + limit + ' h: ' + p + '%';
+                }}
+              }}
+            }},
+            zoom: zoomOpts
+          }},
+          scales: {{
+            x: {{ ticks: tickCfg, grid: {{ display: false }} }},
+            y: {{ min: 0, max: yMax, title: {{ display: true, text: 'hours', color: tickColor, font: {{ size: 11 }} }},
+                  ticks: {{ color: tickColor, font: {{ size: 11 }} }}, grid: {{ color: gridColor }} }}
+          }}
+        }}
+      }});
+      var respNote = document.getElementById('sla-resp-note');
+      if (respNote) {{
+        respNote.textContent = vmax > cap
+          ? 'P90 above ' + cap + ' h is drawn at the top edge as a triangle; hover for the exact value.'
+          : '';
+      }}
+    }}
+
+    // ---- Breaches by rule ---------------------------------------------
+    if (ruleChart) ruleChart.destroy();
+    var ruleCanvas = document.getElementById('sla-rule-chart');
+    var ruleEmpty = document.getElementById('sla-rule-empty');
+    var ruleNote = document.getElementById('sla-rule-note');
+    if (ruleCanvas) {{
+      var RULES = [
+        {{ key: 'initial_response', label: 'Initial response', color: breachColor }},
+        {{ key: 'requester_wait', label: 'Requester wait', color: dueColor }},
+        {{ key: 'no_update', label: 'No update', color: accent }},
+        {{ key: 'resolution_age', label: 'Resolution age', color: '#6c3fc5' }}
+      ];
+      var ruleSeries = RULES.map(function(r) {{ return slice(RAW.rules[r.key] || [], n); }});
+      var anyRecorded = ruleSeries.some(function(s) {{ return s.some(function(v) {{ return v !== null && v !== undefined; }}); }});
+      var anyBreach = ruleSeries.some(function(s) {{ return s.some(function(v) {{ return v > 0; }}); }});
+      var ruleWrap = ruleCanvas.closest('.sla-chart-wrap');
+      if (anyBreach) {{
+        if (ruleWrap) ruleWrap.style.display = '';
+        if (ruleEmpty) ruleEmpty.style.display = 'none';
+        ruleChart = new Chart(ruleCanvas, {{
+          type: 'bar',
+          data: {{ labels: labels, datasets: RULES.map(function(r, i) {{
+            return {{ label: r.label, data: ruleSeries[i], backgroundColor: r.color, borderRadius: 2, stack: 'r' }};
+          }}) }},
+          options: {{
+            responsive: true, maintainAspectRatio: false,
+            interaction: {{ mode: 'index', intersect: false }},
+            plugins: {{
+              legend: {{ position: 'bottom', labels: {{ color: tickColor, font: {{ size: 11 }}, boxWidth: 12, padding: 10 }} }},
+              tooltip: {{ filter: function(item) {{ return item.parsed.y > 0; }}, callbacks: {{
+                label: function(ctx) {{ return ctx.dataset.label + ': ' + ctx.parsed.y; }},
+                footer: function(items) {{
+                  var i = items[0].dataIndex;
+                  var recorded = ruleSeries.some(function(s) {{ return s[i] !== null && s[i] !== undefined; }});
+                  return recorded ? '' : 'Rule breakdown not recorded for this day';
+                }}
+              }} }},
+              zoom: zoomOpts
+            }},
+            scales: {{
+              x: {{ ticks: tickCfg, grid: {{ display: false }}, stacked: true }},
+              y: {{ ticks: {{ color: tickColor, font: {{ size: 11 }}, precision: 0 }}, grid: {{ color: gridColor }}, min: 0, stacked: true }}
+            }}
+          }}
+        }});
+      }} else {{
+        if (ruleWrap) ruleWrap.style.display = 'none';
+        if (ruleEmpty) {{
+          ruleEmpty.textContent = anyRecorded
+            ? 'No breaches recorded in this range.'
+            : 'The rule breakdown was not recorded for this range' + (RAW.rules_first_label ? ' (recorded from ' + RAW.rules_first_label + ').' : '.');
+          ruleEmpty.style.display = '';
+        }}
+      }}
+      if (ruleNote) {{
+        ruleNote.textContent = (RAW.rules_first_label ? 'Rule breakdown is recorded from ' + RAW.rules_first_label + '; earlier days are blank. ' : '')
+          + 'A ticket can breach more than one rule, so a day\\u2019s bars can add up to more than its breached count.';
+      }}
+    }}
+
     window._slaAreaChart = areaChart;
     window._slaAgentChart = agentChart;
+    window._slaRespChart = respChart;
+    window._slaRuleChart = ruleChart;
   }}
 
   window._slaSetRange = function(n) {{
