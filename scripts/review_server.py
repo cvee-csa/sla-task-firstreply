@@ -449,7 +449,7 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
     trick behind it) rather than just trailing the nav list.
 
     nav_path (optional) is the nav link to highlight when that differs from
-    current_path: the Standup and Discussion pages are no longer nav tabs but
+    current_path: the Discussion and Security pages are no longer nav tabs but
     blocks on /overview, so they keep their own current_path (Refresh returns
     to them) and pass nav_path="/overview" to keep Overview highlighted.
 
@@ -2206,7 +2206,6 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
   .overview-block-link {{ color: inherit; text-decoration: none; }}
   .overview-block-link:hover {{ text-decoration: underline; }}
   .overview-blocks {{ margin-top: 1.75rem; }}
-  .overview-blocks .standup-subnav {{ margin-top: 0.75rem; }}
   .standup-group-heading {{ font-size: 0.82rem; font-weight: 600; color: var(--muted); margin: 1rem 0 0.4rem; text-transform: uppercase; letter-spacing: 0.04em; }}
   /* Avatar-initials bubble next to a resolved person's name -- a stable
      per-name color (see _avatar_html) rather than a photo, for a quick
@@ -2705,7 +2704,9 @@ def _top_nav_html(current_path: str = "") -> str:
     Security counts described above -- riding at the end of the row rather
     than crowding the label."""
     tasks_count = len(_common.draft_personal_tasks())
-    security_count = _common.cached_security_ticket_count(_common.IT_SECURITY_GROUP_ID)
+    # A local file read (mtime-cached in _common.standup_snapshot), not a
+    # Zendesk call, so this count is always current, like Tasks' own.
+    standup_count = _common.standup_open_action_count()
     sla_breach_count = _common.cached_sla_breach_count()
 
     def _badge(count, warn=False):
@@ -2761,10 +2762,12 @@ def _top_nav_html(current_path: str = "") -> str:
         # that needs escalating, not just a to-do count.
         + _link("/sla", "clock", "SLA", _badge(sla_breach_count, warn=True))
         + _link("/tasks", "check-square", "Tasks", _badge(tasks_count))
-        # Standup and Discussion are not nav tabs any more: they are blocks
-        # on Overview (see _render_overview_page), each linking to its full
-        # page, whose own pages keep Overview highlighted here.
-        + _link("/security", "shield", "Security", _badge(security_count))
+        # Standup keeps its own tab (badge: your open standup action items,
+        # from the sibling meetingnotestool project). Discussion and Security
+        # are not tabs: they are blocks on Overview (see
+        # _render_overview_page), each linking to its full page, whose own
+        # pages keep Overview highlighted here.
+        + _link("/standup", "bar-chart", "Standup", _badge(standup_count))
         # No badge here on purpose, unlike the three above -- those counts
         # are all "does this need a look" signals (open tasks, blocked/
         # standup tickets, Security's recent activity). Recently Solved
@@ -4155,13 +4158,13 @@ def _render_security_page(items: list, error: str = "", banner: str = "") -> byt
     only the page it's placed inside is new."""
     filter_html = _filter_box_html(".mini-ticket") if items else ""
     body = f"""
-<p><a href="/firstreply">&larr; back to pending tickets</a></p>
+<p><a href="/overview">&larr; back to Overview</a></p>
 <h2>{_topic_icon("security")}Security</h2>
 <p class="meta">IT-Security queue, any status. Read-only, with Claim.</p>
 {filter_html}
 {_render_security_column(items, error)}
 """
-    return _page(body, banner=banner, current_path="/security", wide=True)
+    return _page(body, banner=banner, current_path="/security", wide=True, nav_path="/overview")
 
 
 def _render_flagged_page(items: list, error: str = "", capped: bool = False, banner: str = "") -> bytes:
@@ -4346,42 +4349,6 @@ def _person_card_html(title: str, items: list, accent: str, is_me: bool = False,
 _OVERVIEW_BLOCK_ROWS = 5     # rows each Overview block shows before linking to its full page
 
 
-def _overview_standup_block_html(snapshot: dict, tasks_by_action: dict | None) -> str:
-    """The Standup block on /overview: your open action items (oldest first,
-    at most _OVERVIEW_BLOCK_ROWS) plus links to the three full lists. A local
-    file read, no Zendesk call."""
-    heading = f'{_topic_icon("standup")}Standup'
-    view = snapshot.get("view")
-    if not view:
-        return f"""<div class="security-panel overview-section overview-block-standup">
-  <div class="overview-section-head"><h2 class="column-heading">{heading}</h2></div>
-  <p class="meta">{html.escape(snapshot.get("error") or "Standup data isn't available.")}</p>
-</div>"""
-    me = view.get("me") or ""
-    actions = view.get("actions") or {}
-    mine = sorted(
-        (a for a in actions.values() if not a.get("resolution") and me and (a.get("owner") or "").casefold() == me.casefold()),
-        key=lambda a: (a.get("date") or "", a.get("id") or ""),
-    )
-    ctx = _StandupCtx(view, "/overview", tasks_by_action)
-    shown = mine[:_OVERVIEW_BLOCK_ROWS]
-    rows = _standup_grid([ctx.action_row(a) for a in shown]) if shown else _standup_empty("No open action items for you.")
-    more = ""
-    if len(mine) > len(shown):
-        more = f'<p class="meta"><a href="{_standup_path("/standup", owner=me)}">All {len(mine)} of your open items &rarr;</a></p>'
-    latest = _standup_date(view.get("latest_standup"))
-    return f"""<div class="security-panel overview-section overview-block-standup">
-  <div class="overview-section-head">
-    <h2 class="column-heading"><a href="/standup" class="overview-block-link">{heading}</a> ({len(mine)})</h2>
-    <span class="person-chips"><span class="stat-chip" title="The latest standup in the notes">{html.escape(latest)}</span></span>
-  </div>
-  <p class="meta">Your open action items, oldest first.</p>
-  {rows}
-  {more}
-  <nav class="standup-subnav" aria-label="Standup pages">{_standup_subnav_html(view, "")}</nav>
-</div>"""
-
-
 def _overview_discussion_block_html(flagged: dict) -> str:
     """The Discussion block on /overview: IT-Operations tickets tagged
     "block" or "standup" (fetch_flagged_tickets, the cached read /flagged
@@ -4413,13 +4380,38 @@ def _overview_discussion_block_html(flagged: dict) -> str:
 </div>"""
 
 
+def _overview_security_block_html(security: dict) -> str:
+    """The Security block on /overview: the IT-Security group's most recent
+    tickets, any status (fetch_recent_tickets, the cached read /security
+    uses), at most _OVERVIEW_BLOCK_ROWS, with a link to the full page."""
+    heading = f'{_topic_icon("security")}Security'
+    if security.get("error") and not security.get("items"):
+        return f"""<div class="security-panel overview-section overview-block-security">
+  <div class="overview-section-head"><h2 class="column-heading">{heading}</h2></div>
+  <p class="flag-alert">{html.escape(security["error"])}</p>
+</div>"""
+    items = security.get("items") or []
+    shown = items[:_OVERVIEW_BLOCK_ROWS]
+    rows = (f'<div class="mini-ticket-grid">{"".join(_render_readonly_ticket_row(i, return_to="/overview") for i in shown)}</div>'
+            if shown else f'<p class="empty">{_topic_icon("security", "topic-icon-empty")}No recent tickets.</p>')
+    more = f'<p class="meta"><a href="/security">All {len(items)} &rarr;</a></p>' if len(items) > len(shown) else ""
+    return f"""<div class="security-panel overview-section overview-block-security">
+  <div class="overview-section-head">
+    <h2 class="column-heading"><a href="/security" class="overview-block-link">{heading}</a> ({len(items)})</h2>
+  </div>
+  <p class="meta">IT-Security queue, any status, most recent first. Read-only, with Claim.</p>
+  {rows}
+  {more}
+</div>"""
+
+
 def _render_overview_page(sla_result: dict, banner: str = "", flagged: dict | None = None,
-                          standup_snapshot: dict | None = None, tasks_by_action: dict | None = None) -> bytes:
+                          security: dict | None = None) -> bytes:
     """/overview: who holds which open IT-Operations tickets -- one card per
     person in _common.OVERVIEW_PEOPLE (you first), then Unassigned -- followed
-    by two blocks that used to be nav tabs of their own, Standup (your open
-    action items and the three standup lists) and Discussion (tickets tagged
-    block or standup). A block is left out when its data isn't passed in.
+    by two blocks that used to be nav tabs of their own, Discussion (tickets
+    tagged block or standup) and Security (the IT-Security group's most
+    recent tickets). A block is left out when its data isn't passed in.
 
     The tickets are exactly fetch_sla_tickets' result (new/open/pending/hold,
     personal tasks excluded; the same 2-minute cache the /sla page and the
@@ -4445,10 +4437,10 @@ def _render_overview_page(sla_result: dict, banner: str = "", flagged: dict | No
         if sla_result.get("capped") else ""
     )
     blocks = []
-    if standup_snapshot is not None:
-        blocks.append(_overview_standup_block_html(standup_snapshot, tasks_by_action))
     if flagged is not None:
         blocks.append(_overview_discussion_block_html(flagged))
+    if security is not None:
+        blocks.append(_overview_security_block_html(security))
     blocks_html = f'<div class="two-panel overview-blocks">{"".join(blocks)}</div>' if blocks else ""
     body = f"""
 <h2>{_topic_icon("overview")}Overview</h2>
@@ -4483,8 +4475,6 @@ def _b64url_decode(token: str) -> str:
 
 
 def _standup_return_path(value: str) -> str:
-    if value == "/overview":
-        return value          # the Standup block on Overview
     return value if value and _STANDUP_RETURN_RE.match(value) and "//" not in value else "/standup"
 
 
@@ -4705,29 +4695,26 @@ def _standup_subnav_html(view: dict, current: str) -> str:
 def _standup_frame(ctx_view: dict, current: str, body: str, banner: str, banner_undo_path: str = "") -> bytes:
     """Shared /standup chrome: heading, freshness line, and the sub-nav
     between the three lists. Every page passes current_path="/standup"
-    (so Refresh returns here) and nav_path="/overview", since Standup is a
-    block on Overview rather than a nav tab."""
+    so the top nav keeps Standup highlighted."""
     subnav = _standup_subnav_html(ctx_view, current)
     latest = _standup_date(ctx_view.get("latest_standup"))
     page = f"""
-<p><a href="/overview">&larr; back to Overview</a></p>
 <h2>{_topic_icon("standup")}Standup</h2>
 <p class="meta" title="Built by the separate meetingnotestool project. These pages only read it; the one thing they write is a local My tasks draft.">Built from {ctx_view.get("standup_count", 0)} Operations Standup notes (built {html.escape(str(ctx_view.get("generated_at", ""))[:16].replace("T", " "))}; {_standup_notes_link(ctx_view.get("latest_doc_url"), f"latest notes, {latest}")}).</p>
 <nav class="standup-subnav" aria-label="Standup pages">{subnav}</nav>
 {body}
 <p class="meta" title="Owners with a dotted underline were inferred rather than stated in the notes. A check tag marks a guessed name or detail (hover it for why). Statuses, resolutions and waiting-on are AI judgments from the notes.">Dotted-underline owners were inferred; &quot;check&quot; marks a guess. Statuses are AI judgments, so confirm in the linked notes.</p>
 """
-    return _page(page, banner=banner, banner_undo_path=banner_undo_path, current_path="/standup", wide=True, nav_path="/overview")
+    return _page(page, banner=banner, banner_undo_path=banner_undo_path, current_path="/standup", wide=True)
 
 
 def _standup_error_page(snapshot: dict, banner: str = "") -> bytes:
     body = f"""
-<p><a href="/overview">&larr; back to Overview</a></p>
 <h2>{_topic_icon("standup")}Standup</h2>
 <p class="flag-alert">{html.escape(snapshot.get("error") or "Standup data isn't available.")}</p>
 <p class="meta">These pages read the standup view built by the separate meetingnotestool project. Set <code>STANDUP_DATA_FILE</code> if that checkout isn't at the default path.</p>
 """
-    return _page(body, banner=banner, current_path="/standup", wide=True, nav_path="/overview")
+    return _page(body, banner=banner, current_path="/standup", wide=True)
 
 
 def _render_standup_actions_page(snapshot: dict, show: str = "open", owner: str = "", q: str = "", banner: str = "",
@@ -5439,15 +5426,13 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/overview":
             # Same cached scan as /sla and the SLA nav badge
             # (_common.fetch_sla_tickets), grouped by assignee in
-            # _render_overview_page, plus the Discussion block's own cached
-            # read (fetch_flagged_tickets) and the Standup block's local file.
+            # _render_overview_page, plus the Discussion and Security blocks' own
+            # cached reads (fetch_flagged_tickets, fetch_recent_tickets).
             client = _common.make_client()
             sla_result = _common.fetch_sla_tickets(client, log_fn=_log)
             flagged = _common.fetch_flagged_tickets(client, log_fn=_log)
-            self._send_html(_render_overview_page(
-                sla_result, banner=banner, flagged=flagged, standup_snapshot=_common.standup_view(),
-                tasks_by_action=_common.standup_tasks_by_action(),
-            ))
+            security = _common.fetch_recent_tickets(client, _common.IT_SECURITY_GROUP_ID, limit=_common.IT_SECURITY_COLUMN_LIMIT, log_fn=_log)
+            self._send_html(_render_overview_page(sla_result, banner=banner, flagged=flagged, security=security))
             return
 
         if parsed.path == "/standup" or parsed.path.startswith("/standup/"):
@@ -5479,7 +5464,7 @@ class Handler(BaseHTTPRequestHandler):
                 page = _render_standup_topic_page(snap, _b64url_decode(sub[1]), banner=banner, banner_undo_path=banner_undo_path,
                                                   tasks_by_action=_common.standup_tasks_by_action())
             else:
-                self._send_html(_page('<p class="empty">Not found.</p>', current_path="/standup", nav_path="/overview"), status=404)
+                self._send_html(_page('<p class="empty">Not found.</p>', current_path="/standup"), status=404)
                 return
             self._send_html(page)
             return

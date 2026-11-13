@@ -252,18 +252,19 @@ def test_http_progress_unknown_then_measured(server):
     first = _load_and_watch(port, DAY1, PID)
     assert all(s["pct"] is None for s in first[:-1] if not s["finished"])   # no baseline yet: no made-up number
     assert first[-1]["finished"] and first[-1]["pct"] == 1.0
-    # 14 = the SLA scan (1 listing + 12 comment fetches) plus the Discussion block's flagged-ticket listing.
-    assert _common._progress_history["GET /overview"] == clients[0].total_calls == 14
+    # 15 = the SLA scan (1 listing + 12 comment fetches) plus the Discussion and Security blocks' one listing each.
+    assert _common._progress_history["GET /overview"] == clients[0].total_calls == 15
 
     _common.clear_comment_cache()   # unchanged tickets' comments are cached now; this test measures a full-cost load
     _common._sla_ticket_cache = {}  # (restored by the fixture) so /overview scans again instead of serving its cache
     _common._flagged_ticket_cache = {}
+    _common._security_ticket_cache.clear()
     second = _load_and_watch(port, DAY2, "fedcba9876543210")
     pcts = [s["pct"] for s in second if s["known"] and not s["finished"] and s["pct"] is not None]
     assert len(set(pcts)) >= 3, pcts                     # real, advancing values
     assert pcts == sorted(pcts) and max(pcts) <= 0.95    # monotone, never claims done early
     assert second[-1]["finished"] and second[-1]["pct"] == 1.0
-    assert second[-1]["done"] == clients[1].total_calls == 14
+    assert second[-1]["done"] == clients[1].total_calls == 15
 
 
 def test_http_untracked_requests_and_bad_ids(server):

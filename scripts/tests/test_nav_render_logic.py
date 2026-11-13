@@ -17,10 +17,10 @@ import _common
 
 def test_top_nav_has_no_badge_on_any_link_with_a_cold_cache():
     html = review_server._top_nav_html(current_path="/")
-    assert 'href="/security"' in html
-    # Standup and Discussion are blocks on Overview now, not nav tabs.
-    assert 'href="/flagged"' not in html and 'href="/standup"' not in html
-    assert "Discussion" not in html and "Standup" not in html
+    assert 'href="/standup"' in html and 'href="/overview"' in html
+    # Discussion and Security are blocks on Overview now, not nav tabs.
+    assert 'href="/flagged"' not in html and 'href="/security"' not in html
+    assert "Discussion" not in html and "Security" not in html
     # No draft/open tasks, no SLA data, healthy auth, cold flagged/security
     # caches -- nothing here should be flagged as needing attention.
     assert "nav-badge" not in html
@@ -44,31 +44,6 @@ def _link_tag(html: str, href: str) -> str:
     start = html.index(f'href="{href}"')
     end = html.index("</a>", start)
     return html[start:end]
-
-
-def test_top_nav_shows_the_security_badge_once_its_cache_is_warm():
-    import datetime
-    _common._security_ticket_cache[_common.IT_SECURITY_GROUP_ID] = {
-        "items": [{"ticket_id": 1}, {"ticket_id": 2}, {"ticket_id": 3}],
-        "fetched_at": datetime.datetime.now(),
-    }
-
-    html = review_server._top_nav_html(current_path="/")
-    tag = _link_tag(html, "/security")
-    assert "nav-badge" in tag
-    assert ">3<" in tag
-
-
-def test_top_nav_badges_are_neutral_not_warn():
-    """The IT-Security count isn't inherently a problem the way an SLA
-    breach or a disconnected Zendesk OAuth token is -- its badge should be
-    the plain neutral style, not nav-badge-warn."""
-    import datetime
-    now = datetime.datetime.now()
-    _common._security_ticket_cache[_common.IT_SECURITY_GROUP_ID] = {"items": [{"ticket_id": 1}], "fetched_at": now}
-
-    html = review_server._top_nav_html(current_path="/")
-    assert "nav-badge-warn" not in _link_tag(html, "/security")
 
 
 # --- _category_select_html ----------------------------------------------------
