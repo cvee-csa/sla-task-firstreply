@@ -45,7 +45,7 @@ def test_galaxy_palette_matches_the_dark_variable_set_plus_on_accent():
 
 def test_galaxy_is_a_dark_scheme_with_a_themed_meta_color():
     out = _page()
-    assert out.count("'galaxy'") >= 8
+    assert out.count("'galaxy'") >= 3
     assert "'#f09a7a'" in out
 
 

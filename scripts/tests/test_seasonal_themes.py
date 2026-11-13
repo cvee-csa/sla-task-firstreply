@@ -6,7 +6,7 @@ import re
 import review_server
 
 SEASONAL = ("halloween", "christmas")
-# Every variable the b68fbf palette defines must also be defined by each new
+# Every variable the dark palette defines must also be defined by each new
 # palette, or the mode would silently inherit the wrong :root values.
 _BLOCK = r"html\.theme-%s \{\s*(.*?)\n  \}"
 
@@ -29,7 +29,7 @@ def test_toggle_has_a_button_per_seasonal_theme():
 
 def test_palettes_define_the_full_variable_set():
     out = _page()
-    reference = _vars(out, "b68fbf")
+    reference = _vars(out, "dark")
     for t in SEASONAL:
         assert _vars(out, t) == reference | {"--on-accent"}, t
 
@@ -42,8 +42,9 @@ def test_scripts_know_the_new_modes():
 
 def test_seasonal_themes_force_dark_color_scheme():
     out = _page()
-    assert "colorScheme = (t === 'dark' || t === 'halloween' || t === 'christmas' || t === 'galaxy') ? 'dark'" in out
-    assert "colorScheme = (mode === 'dark' || mode === 'halloween' || mode === 'christmas' || mode === 'galaxy') ? 'dark'" in out
+    # every named theme is a dark scheme except the soft lesbian-pride one
+    assert "colorScheme = t === 'lesbian' ? 'light' : 'dark'" in out
+    assert "colorScheme = mode === 'lesbian' ? 'light' : 'dark'" in out
 
 
 def test_header_glyphs_present_and_hidden_by_default():

@@ -65,25 +65,7 @@ def _load_logo_data_uri() -> str:
 
 LOGO_DATA_URI = _load_logo_data_uri()
 
-# A second, alternate logo swapped in ONLY while the B68FBF theme is active
-# (see .logo-default/.logo-b68fbf's CSS below) -- B68FBF started as a
-# literal-hex-color easter egg theme, so its own easter-egg logo fits the
-# same spirit rather than looking like an oversight. Loaded the same
-# graceful-degradation way as LOGO_DATA_URI above: a missing file just means
-# this second <img> never renders, not a broken page.
 GALAXY_BG_PATH = Path(__file__).resolve().parent / "assets" / "galaxy-bg.jpg"
-LOGO_B68FBF_PATH = Path(__file__).resolve().parent / "assets" / "b68fbf-logo.png"
-
-
-def _load_logo_b68fbf_data_uri() -> str:
-    try:
-        data = LOGO_B68FBF_PATH.read_bytes()
-    except Exception:
-        return ""
-    return f"data:image/png;base64,{base64.b64encode(data).decode('ascii')}"
-
-
-LOGO_B68FBF_DATA_URI = _load_logo_b68fbf_data_uri()
 
 # Topic icons -- pulled from the CSA Asset Repository's own icon library
 # (the same Airtable base other CSA teams draw brand icons from), used as
@@ -104,8 +86,7 @@ LOGO_B68FBF_DATA_URI = _load_logo_b68fbf_data_uri()
 # just degrades to no icon there, same graceful-degradation pattern as
 # LOGO_DATA_URI above.
 #
-# B68FBF is the one exception to "reads the same in every theme" -- see
-# _TOPIC_ICON_FILES_B68FBF right below.
+# These badges read the same in every theme (their colour is baked into the file).
 _TOPIC_ICON_FILES = {
     "tasks": "checklist-csa-blue.png",
     "security": "shield-checkmark-csa-blue.png",
@@ -131,35 +112,11 @@ _TOPIC_ICON_FILES = {
     "standup": "conversation-csa-blue.png",
 }
 
-# B68FBF-only recolor of the same badges (see recolor_topic_icons.py) -- each
-# "-csa-blue" badge's baked-in background was hue-rotated to B68FBF's own hue
-# (288.75 degrees) while preserving its original saturation/value, the same
-# fixed-hue-varying-shade idea the theme's CSS custom properties already use
-# for button colors, just applied per-pixel to a raster badge instead of to
-# a handful of named CSS variables. "priority-alert" has no entry here on
-# purpose: error-white.png has no colored badge background to recolor in the
-# first place (it's a plain white glyph already sitting on .badge-priority's
-# own themed fill), so it always falls back to rendering just its one
-# default image -- see _topic_icon below.
-_TOPIC_ICON_FILES_B68FBF = {
-    "tasks": "checklist-b68fbf.png",
-    "security": "shield-checkmark-b68fbf.png",
-    "flagged": "conversation-b68fbf.png",
-    "reconnect": "key-b68fbf.png",
-    "breach": "error-b68fbf.png",
-    "breach-clear": "checkmark-b68fbf.png",
-    "solved": "checkmark-b68fbf.png",
-    "sla": "stopwatch-b68fbf.png",
-    "standup": "conversation-b68fbf.png",
-}
-
-
 def _load_icon_data_uris(file_map: dict) -> dict:
-    """Shared loader for both the default and the B68FBF-only topic-icon
-    file maps above -- a file missing from either just means its key is
-    absent from the returned dict, so a caller checking `.get(key)` sees the
-    same graceful "nothing rendered" degradation LOGO_DATA_URI already
-    established, whichever map it came from."""
+    """Loads a topic-icon file map -- a file missing from it just means its
+    key is absent from the returned dict, so a caller checking `.get(key)`
+    sees the same graceful "nothing rendered" degradation LOGO_DATA_URI
+    already established."""
     uris = {}
     for key, filename in file_map.items():
         try:
@@ -171,7 +128,6 @@ def _load_icon_data_uris(file_map: dict) -> dict:
 
 
 TOPIC_ICON_DATA_URIS = _load_icon_data_uris(_TOPIC_ICON_FILES)
-TOPIC_ICON_DATA_URIS_B68FBF = _load_icon_data_uris(_TOPIC_ICON_FILES_B68FBF)
 
 
 def _topic_icon(key: str, css_class: str = "topic-icon", alt: str = "") -> str:
@@ -180,28 +136,11 @@ def _topic_icon(key: str, css_class: str = "topic-icon", alt: str = "") -> str:
     file didn't make it into this checkout. alt defaults to "" (purely
     decorative, redundant with the visible heading/label text right next
     to it) rather than describing the icon itself, so a screen reader
-    doesn't announce e.g. "checklist" immediately before "Tasks".
-
-    When a B68FBF-recolored variant exists for this key, BOTH the default
-    and the B68FBF <img> are rendered (classes `topic-icon-default` /
-    `topic-icon-b68fbf` alongside the caller's own sizing class), and a
-    pure-CSS toggle picks the one matching the active theme -- the exact
-    same two-`<img>`-tags-plus-CSS-toggle trick the header logo swap
-    already established (see LOGO_B68FBF_DATA_URI/.logo-b68fbf), so this
-    rides the same no-flash, no-extra-JS path. A key with no B68FBF variant
-    (just "priority-alert" today) renders its single default image
-    unmodified, in every theme -- never wrapped in a class that could hide
-    it with nothing to fall back to."""
+    doesn't announce e.g. "checklist" immediately before "Tasks"."""
     uri = TOPIC_ICON_DATA_URIS.get(key, "")
     if not uri:
         return ""
-    b68fbf_uri = TOPIC_ICON_DATA_URIS_B68FBF.get(key, "")
-    if not b68fbf_uri:
-        return f'<img src="{uri}" alt="{html.escape(alt)}" class="{css_class}">'
-    return (
-        f'<img src="{uri}" alt="{html.escape(alt)}" class="{css_class} topic-icon-default">'
-        f'<img src="{b68fbf_uri}" alt="{html.escape(alt)}" class="{css_class} topic-icon-b68fbf">'
-    )
+    return f'<img src="{uri}" alt="{html.escape(alt)}" class="{css_class}">'
 
 
 def _log(msg: str) -> None:
@@ -288,13 +227,11 @@ _ICONS = {
     "check-circle": '<path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline>',
     "chevron-up": '<polyline points="18 15 12 9 6 15"></polyline>',
     "chevron-down": '<polyline points="6 9 12 15 18 9"></polyline>',
-    # Added for the icon-only theme toggle (see _page()'s brand-right) --
-    # "Auto" reads as a monitor (matches whatever the OS/browser prefers),
-    # "Light"/"Dark" are the obvious sun/moon pair. The fourth option,
-    # B68FBF, deliberately has no icon here -- it's a literal custom hex
-    # color, not a concept, so it renders as an actual color swatch (see
-    # .theme-swatch) instead of a line-icon standing in for one.
+    # Added for the icon-only theme toggle (see _page()'s brand-right). Named
+    # palettes (Tomorrow Blue, the lesbian-pride theme) have no icon here --
+    # they render as an actual color swatch (see .theme-swatch) instead.
     "sun": '<circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>',
+    "waves": '<path d="M2 6c.6.5 1.2 1 2.5 1C7 7 7 5 9.5 5c2.6 0 2.4 2 5 2 2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1"></path><path d="M2 12c.6.5 1.2 1 2.5 1 2.5 0 2.5-2 5-2 2.6 0 2.4 2 5 2 2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1"></path><path d="M2 18c.6.5 1.2 1 2.5 1 2.5 0 2.5-2 5-2 2.6 0 2.4 2 5 2 2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1"></path>',
     "galaxy": '<path d="M12 12.4c-.5-.9.2-1.9 1.2-1.9 1.4 0 2.2 1.6 1.5 2.9-1 1.9-3.6 2.3-5.4 1-2.3-1.6-2.5-5-.5-7 2.6-2.6 7-2 9 1.1"></path><path d="M12 12.4c.5.9-.2 1.9-1.2 1.9-1.4 0-2.2-1.6-1.5-2.9"></path><path d="M16.2 17.9c-3.3 2.6-8.3 1.8-10.8-1.7"></path><path d="M3.4 8.3C4.6 5.2 7.4 3.1 10.6 2.7"></path>',
     "moon": '<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>',
     "monitor": '<rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line>',
@@ -339,33 +276,16 @@ _AVATAR_HUES = ["#0e7490", "#6d4aa8", "#b4530e", "#1a56c4", "#7d5a0a", "#3f7a3f"
 # button's hue is.
 #
 # _AVATAR_HUES's own index (not the hex value) is what actually reaches the
-# page now -- see _avatar_html below -- specifically so a B68FBF-only
-# variant of this palette (right here) can exist without _avatar_html itself
-# needing to know which theme is active. Each entry was produced by taking
-# the matching index above and rotating it to one of B68FBF's two
-# established theme hues (288.75 degrees / its 9E8FBF complementary,
-# alternating -- the same two-hue split the button palette's own B68FBF CSS
-# block already uses) while preserving that color's original saturation/
-# value, so the seven stay just as distinguishable from each other as the
-# default palette is, not seven shades of one single hue.
-_AVATAR_HUES_B68FBF = ["#780e90", "#674aa8", "#950eb4", "#4f1ac4", "#670a7d", "#513f7a", "#9338a8"]
+# page -- see _avatar_html below -- so the palette lives in the stylesheet as
+# one `.avatar-hue-N` rule per entry.
 
 
 def _avatar_hue_css() -> str:
-    """Generates the `.avatar-hue-N` / `html.theme-b68fbf .avatar-hue-N`
-    rules straight from _AVATAR_HUES/_AVATAR_HUES_B68FBF above, rather than
-    a second, hand-typed copy of the same seven-plus-seven hex values living
-    in the stylesheet -- exactly the "one predicate, not two copies that
-    happen to currently agree" principle this project already applies
-    elsewhere (see README), just for a CSS palette instead of a Python
-    function. Changing either list automatically keeps the rendered page in
+    """Generates the `.avatar-hue-N` rules straight from _AVATAR_HUES, rather
+    than a second, hand-typed copy of the same hex values living in the
+    stylesheet -- changing the list automatically keeps the rendered page in
     sync with no separate edit to remember."""
-    lines = []
-    for i, hue in enumerate(_AVATAR_HUES):
-        lines.append(f"  .avatar-hue-{i} {{ background: {hue}; }}")
-    for i, hue in enumerate(_AVATAR_HUES_B68FBF):
-        lines.append(f"  html.theme-b68fbf .avatar-hue-{i} {{ background: {hue}; }}")
-    return "\n".join(lines)
+    return "\n".join(f"  .avatar-hue-{i} {{ background: {hue}; }}" for i, hue in enumerate(_AVATAR_HUES))
 
 
 AVATAR_HUE_CSS = _avatar_hue_css()
@@ -390,15 +310,7 @@ def _avatar_html(name: str) -> str:
     it a false sense of certainty.
 
     Renders the hue as a CSS class (`avatar-hue-N`), not an inline
-    `style="background:..."`, specifically so B68FBF can override it --
-    an inline style baked in at render time can't be swapped by the same
-    pure-CSS `html.theme-b68fbf` trick every other theme-conditional swap on
-    this page uses (the logo, the topic-icon badges), since there'd be
-    nothing for a CSS selector to override. A CSS class has no such
-    problem: the default hue lives in `.avatar-hue-N`, B68FBF's own hue
-    lives in `html.theme-b68fbf .avatar-hue-N`, and the browser picks
-    whichever applies at paint time with no server-side or JS theme
-    detection needed."""
+    `style="background:..."`, so a theme can restyle it from the stylesheet."""
     if not name:
         return ""
     hue_index = sum(ord(c) for c in name) % len(_AVATAR_HUES)
@@ -506,29 +418,10 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
         f'{_linkify(html.escape(banner))}{banner_undo_html}</div>'
         if banner else ""
     )
-    # Two <img> tags, not one whose src gets swapped by JS -- theme_init_script
-    # (see below) already applies html.theme-b68fbf as early as possible via a
-    # plain class, and a pure-CSS show/hide (.logo-default/.logo-b68fbf) keeps
-    # the swap in that same no-flash-of-wrong-logo path rather than adding a
-    # second, JS-driven mechanism that could race with it.
-    logo_html = f'<img src="{LOGO_DATA_URI}" alt="Cloud Security Alliance" class="logo logo-default">' if LOGO_DATA_URI else ""
-    if LOGO_B68FBF_DATA_URI:
-        logo_html += f'<img src="{LOGO_B68FBF_DATA_URI}" alt="Cloud Security Alliance" class="logo logo-b68fbf">'
-    # id + data-href-b68fbf let both inline scripts below swap the favicon
-    # for B68FBF without embedding LOGO_B68FBF_DATA_URI a second time just
-    # for JS to read back -- the tag itself carries the one extra copy
-    # already needed (same duplication factor the default logo already has,
-    # split between this href and the header <img>'s own src), and each
-    # script lazily caches this tag's *original* href into data-href-default
-    # itself the first time it runs, rather than the server embedding that
-    # (already-duplicated-once) string a third time just to save JS one property read.
-    favicon_html = (
-        f'<link rel="icon" id="favicon" type="image/png" href="{LOGO_DATA_URI}"'
-        f' data-href-b68fbf="{LOGO_B68FBF_DATA_URI}">'
-        if LOGO_DATA_URI else ""
-    )
+    logo_html = f'<img src="{LOGO_DATA_URI}" alt="Cloud Security Alliance" class="logo">' if LOGO_DATA_URI else ""
+    favicon_html = f'<link rel="icon" id="favicon" type="image/png" href="{LOGO_DATA_URI}">' if LOGO_DATA_URI else ""
     # A single JS-maintained theme-color meta rather than static per-scheme
-    # tags -- covers all four modes (system/light/dark/b68fbf) including the
+    # tags -- covers every mode (system and each named theme) including the
     # OS-preference case (checked live via matchMedia) with one code path in
     # each of the two inline scripts below, instead of duplicating a set of
     # `media="(prefers-color-scheme: ...)"` tags that would still need a
@@ -545,19 +438,14 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
 (function() {
   try {
     var t = localStorage.getItem('csa-theme');
-    if (t === 'dark' || t === 'b68fbf' || t === 'halloween' || t === 'christmas' || t === 'galaxy') {
+    if (t === 'abyss' || t === 'tomorrow' || t === 'lesbian' || t === 'dark' || t === 'halloween' || t === 'christmas' || t === 'galaxy') {
       document.documentElement.classList.add('theme-' + t);
-      document.documentElement.style.colorScheme = (t === 'dark' || t === 'halloween' || t === 'christmas' || t === 'galaxy') ? 'dark' : 'light';
-    }
-    var favicon = document.getElementById('favicon');
-    if (favicon) {
-      if (!favicon.dataset.hrefDefault) { favicon.dataset.hrefDefault = favicon.href; }
-      favicon.href = (t === 'b68fbf' && favicon.dataset.hrefB68fbf) ? favicon.dataset.hrefB68fbf : favicon.dataset.hrefDefault;
+      document.documentElement.style.colorScheme = t === 'lesbian' ? 'light' : 'dark';
     }
     var themeColorMeta = document.getElementById('theme-color-meta');
     if (themeColorMeta) {
       var isDark = t === 'dark' || (!t && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
-      themeColorMeta.content = t === 'b68fbf' ? '#865392' : t === 'halloween' ? '#ff8a3d' : t === 'christmas' ? '#4fd17f' : t === 'galaxy' ? '#f09a7a' : (isDark ? '#6fa3ef' : '#1a56c4');
+      themeColorMeta.content = t === 'abyss' ? '#000c18' : t === 'tomorrow' ? '#002451' : t === 'lesbian' ? '#d162a4' : t === 'halloween' ? '#ff8a3d' : t === 'christmas' ? '#4fd17f' : t === 'galaxy' ? '#f09a7a' : (isDark ? '#6fa3ef' : '#1a56c4');
     }
   } catch (e) {}
 })();
@@ -694,25 +582,20 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
 <script>
 (function() {
   function applyTheme(mode) {
-    document.documentElement.classList.remove('theme-dark', 'theme-b68fbf', 'theme-halloween', 'theme-christmas', 'theme-galaxy');
-    if (mode === 'dark' || mode === 'b68fbf' || mode === 'halloween' || mode === 'christmas' || mode === 'galaxy') {
+    document.documentElement.classList.remove('theme-abyss', 'theme-tomorrow', 'theme-lesbian', 'theme-dark', 'theme-halloween', 'theme-christmas', 'theme-galaxy');
+    if (mode === 'abyss' || mode === 'tomorrow' || mode === 'lesbian' || mode === 'dark' || mode === 'halloween' || mode === 'christmas' || mode === 'galaxy') {
       document.documentElement.classList.add('theme-' + mode);
-      document.documentElement.style.colorScheme = (mode === 'dark' || mode === 'halloween' || mode === 'christmas' || mode === 'galaxy') ? 'dark' : 'light';
+      document.documentElement.style.colorScheme = mode === 'lesbian' ? 'light' : 'dark';
     } else {
       document.documentElement.style.colorScheme = '';
     }
     document.querySelectorAll('.theme-toggle button').forEach(function(btn) {
       btn.classList.toggle('active', btn.dataset.theme === mode);
     });
-    var favicon = document.getElementById('favicon');
-    if (favicon) {
-      if (!favicon.dataset.hrefDefault) { favicon.dataset.hrefDefault = favicon.href; }
-      favicon.href = (mode === 'b68fbf' && favicon.dataset.hrefB68fbf) ? favicon.dataset.hrefB68fbf : favicon.dataset.hrefDefault;
-    }
     var themeColorMeta = document.getElementById('theme-color-meta');
     if (themeColorMeta) {
       var isDark = mode === 'dark' || (mode === 'system' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
-      themeColorMeta.content = mode === 'b68fbf' ? '#865392' : mode === 'halloween' ? '#ff8a3d' : mode === 'christmas' ? '#4fd17f' : mode === 'galaxy' ? '#f09a7a' : (isDark ? '#6fa3ef' : '#1a56c4');
+      themeColorMeta.content = mode === 'abyss' ? '#000c18' : mode === 'tomorrow' ? '#002451' : mode === 'lesbian' ? '#d162a4' : mode === 'halloween' ? '#ff8a3d' : mode === 'christmas' ? '#4fd17f' : mode === 'galaxy' ? '#f09a7a' : (isDark ? '#6fa3ef' : '#1a56c4');
     }
   }
   window.setTheme = function(mode) {
@@ -724,7 +607,7 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
   };
   var stored = null;
   try { stored = localStorage.getItem('csa-theme'); } catch (e) {}
-  applyTheme(['dark', 'b68fbf', 'halloween', 'christmas', 'galaxy'].indexOf(stored) >= 0 ? stored : 'system');
+  applyTheme(['abyss', 'tomorrow', 'lesbian', 'dark', 'halloween', 'christmas', 'galaxy'].indexOf(stored) >= 0 ? stored : 'system');
 })();
 </script>
 <script>
@@ -1287,7 +1170,7 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
        everywhere for buttons/links) and --flag-alert-color (already means
        "warning/priority" elsewhere on this page); dedicated tokens rather
        than reusing an existing --btn-* hue so a theme that collapses
-       several button hues into one family (see html.theme-b68fbf below)
+       several button hues into one family
        can't accidentally make two of these three sections look the same
        color. */
     --overview-accent-tasks: #0e7490;
@@ -1403,75 +1286,158 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
     --sla-ok-bg: rgba(34,197,94,0.14);
     --sla-ok-border: rgba(34,197,94,0.4);
   }}
-  /* "B68FBF" theme: a fourth manual option alongside Auto/Light/Dark, built
-     entirely from the literal hex color B68FBF and shades/tints of it
-     (H=288.75 deg in HSL), rather than the CSA-blue accent used everywhere
-     else in this file. Same variable set, same override mechanism as
-     html.theme-dark above -- just a different source
-     palette. Backgrounds/text/borders/links/focus-ring are all derived from
-     B68FBF itself (H=288.75). The six buttons use a complementary two-hue
-     pair instead of pure single-hue monochrome: three (Remove, Approve,
-     Refresh) stay on B68FBF's own hue (288.75 deg), and the other three
-     (Reject, Internal, Claim) shift 30 deg to 9E8FBF's hue (258.75 deg) --
-     9E8FBF shares B68FBF's exact lightness/saturation (L=0.655, S=0.273),
-     so the pair reads as one deliberate family rather than an arbitrary
-     second color. This replaces the six-distinct-hues convention used
-     elsewhere in the file (see the plain :root block above) with "two
-     complementary shades of B68FBF," per this theme's whole premise.
-     --warning-bg/--warning-border/--flag-color/--flag-alert-color/
-     --flag-alert-color-urgent are left as the same amber/orange/red used in
-     the other three themes on purpose: those are functional caution/alert
-     signal colors, not CSA branding, and folding them into the purple
-     family would make them blend in instead of standing out. */
-  html.theme-b68fbf {{
-    --bg: #faf7fb;
-    --bg-translucent: rgba(250,247,251,0.82);
-    --glass-border: rgba(36,22,39,0.08);
-    --glass-shine: rgba(255,255,255,0.55);
-    --glass-shadow: rgba(36,22,39,0.10);
-    --glass-chip-bg: rgba(255,255,255,0.5);
-    --text: #241627;
-    --muted: #684172;
-    --muted-2: #a06dac;
-    --divider: #eadeed;
-    --card-bg: #fdfcfd;
-    --card-border: #dcc6e2;
-    --card-shadow: 0 1px 3px rgba(36,22,39,0.08), 0 1px 2px rgba(36,22,39,0.04);
-    --input-bg: #fdfcfd;
-    --input-border: #dcc6e2;
-    --excerpt-bg: #f4edf5;
-    --excerpt-border: #dcc6e2;
-    --link: #865392;
-    --accent: #865392;
-    --focus-ring: rgba(135,62,152,0.35);
-    --btn-approve: #a14ab5;       --btn-approve-hover: #8a409c;  /* B68FBF hue */
-    --btn-internal: #452f74;      --btn-internal-hover: #36255b; /* 9E8FBF hue */
-    --btn-remove: #b067c1;        --btn-remove-hover: #a34eb7;   /* B68FBF hue */
-    --btn-reject: #52388a;        --btn-reject-hover: #432e70;   /* 9E8FBF hue */
-    --btn-refresh: #8e419f;       --btn-refresh-hover: #773786;  /* B68FBF hue */
-    --btn-claim: #38265e;         --btn-claim-hover: #291c45;    /* 9E8FBF hue */
-    --banner-bg: rgba(135,62,152,0.10);
-    --banner-border: rgba(135,62,152,0.35);
+  /* VS Code "Abyss" theme: deep navy (#000c18) editor ground, #060621 panels,
+     the editor's #6688cc blue as the muted text color (body text is a lighter tint
+     of it for contrast), and Abyss's gold (#ddbb88) as the accent. Button hues
+     are darkened Abyss token colors (blue badge, purple, slate, rose, gold) so
+     white button text stays readable. Dark scheme; alert/SLA tokens follow
+     html.theme-dark. */
+  html.theme-abyss {{
+    --bg: #000c18;
+    --bg-translucent: rgba(0,12,24,0.80);
+    --glass-border: rgba(102,136,204,0.20);
+    --glass-shine: rgba(150,180,235,0.09);
+    --glass-shadow: rgba(0,0,0,0.6);
+    --glass-chip-bg: rgba(102,136,204,0.08);
+    --text: #9db4e4;
+    --muted: #6688cc;
+    --muted-2: #5573b5;
+    --divider: rgba(102,136,204,0.16);
+    --card-bg: #060621;
+    --card-border: rgba(102,136,204,0.20);
+    --card-shadow: 0 1px 3px rgba(0,0,0,0.6), 0 1px 2px rgba(0,0,0,0.4);
+    --input-bg: #10192c;
+    --input-border: rgba(102,136,204,0.32);
+    --excerpt-bg: #0a1228;
+    --excerpt-border: rgba(102,136,204,0.22);
+    --link: #ddbb88;
+    --accent: #ddbb88;
+    --on-accent: #1a1204;
+    --focus-ring: rgba(102,136,204,0.55);
+    --btn-approve: #0063a5;     --btn-approve-hover: #004f84;  /* badge blue */
+    --btn-internal: #7d4fa0;    --btn-internal-hover: #663f85; /* purple */
+    --btn-remove: #3f5278;      --btn-remove-hover: #32415f;   /* slate blue */
+    --btn-reject: #b3414a;      --btn-reject-hover: #92343c;   /* rose */
+    --btn-refresh: #2b5fb8;     --btn-refresh-hover: #224b94;  /* blue */
+    --btn-claim: #8a6a2a;       --btn-claim-hover: #70561f;    /* dark gold */
+    --banner-bg: rgba(221,187,136,0.10);
+    --banner-border: rgba(221,187,136,0.32);
+    --warning-bg: rgba(201,106,52,0.14);
+    --warning-border: rgba(201,106,52,0.4);
+    --flag-color: #dba15a;
+    --flag-alert-color: #e28a5e;
+    --flag-alert-color-urgent: #e2604a;
+    --badge-bg: #1e2f5a;
+    --overview-accent-tasks: #6ea8ff;
+    --overview-accent-discussion: #b78ae0;
+    --overview-accent-security: #ddbb88;
+    --sla-ok-color: #4ade80;
+    --sla-ok-bg: rgba(34,197,94,0.14);
+    --sla-ok-border: rgba(34,197,94,0.4);
+  }}
+  /* VS Code "Tomorrow Night Blue" theme (the built-in one): #002451 ground,
+     #003f8e selection blue, and the Tomorrow palette (#bbdaff blue, #ebbbff
+     purple, #99ffff aqua, #ff9da4 red, #ffc58f orange) -- those pastel hues are
+     darkened for the buttons so white text stays readable. Dark scheme. */
+  html.theme-tomorrow {{
+    --bg: #002451;
+    --bg-translucent: rgba(0,36,81,0.82);
+    --glass-border: rgba(187,218,255,0.20);
+    --glass-shine: rgba(187,218,255,0.10);
+    --glass-shadow: rgba(0,10,32,0.55);
+    --glass-chip-bg: rgba(187,218,255,0.08);
+    --text: #f4f7ff;
+    --muted: #a9bfe8;
+    --muted-2: #7a8fc2;
+    --divider: rgba(187,218,255,0.14);
+    --card-bg: #001b42;
+    --card-border: rgba(187,218,255,0.16);
+    --card-shadow: 0 1px 3px rgba(0,10,32,0.6), 0 1px 2px rgba(0,10,32,0.4);
+    --input-bg: #002a62;
+    --input-border: rgba(187,218,255,0.28);
+    --excerpt-bg: #00204a;
+    --excerpt-border: rgba(187,218,255,0.20);
+    --link: #bbdaff;
+    --accent: #bbdaff;
+    --on-accent: #00122e;
+    --focus-ring: rgba(187,218,255,0.5);
+    --btn-approve: #1d7f8a;     --btn-approve-hover: #17666f;  /* aqua */
+    --btn-internal: #8a5fb0;    --btn-internal-hover: #704b91; /* purple */
+    --btn-remove: #4a6296;      --btn-remove-hover: #3b4f7a;   /* comment blue */
+    --btn-reject: #c24e5c;      --btn-reject-hover: #a03e4a;   /* red */
+    --btn-refresh: #2f6fd0;     --btn-refresh-hover: #2459a8;  /* blue */
+    --btn-claim: #9a5f18;       --btn-claim-hover: #7d4c12;    /* orange */
+    --banner-bg: rgba(187,218,255,0.10);
+    --banner-border: rgba(187,218,255,0.32);
+    --warning-bg: rgba(201,106,52,0.14);
+    --warning-border: rgba(201,106,52,0.4);
+    --flag-color: #ffc58f;
+    --flag-alert-color: #ffa98f;
+    --flag-alert-color-urgent: #ff9da4;
+    --badge-bg: #1b3b73;
+    --overview-accent-tasks: #99ffff;
+    --overview-accent-discussion: #ebbbff;
+    --overview-accent-security: #ffeead;
+    --sla-ok-color: #d1f1a9;
+    --sla-ok-bg: rgba(209,241,169,0.12);
+    --sla-ok-border: rgba(209,241,169,0.38);
+  }}
+  /* Soft lesbian-pride theme: a LIGHT palette. The page background is a soft
+     wash of the flag's seven bands (orange tints at the top through white to
+     rose and magenta tints at the bottom); surfaces are warm white. The flag's
+     own colors (#d52d00 #ef7627 #ff9a56 #ffffff #d162a4 #b55690 #a30262) appear as
+     tints on surfaces and as deepened shades on text and buttons so contrast
+     stays readable. Light scheme (the JS sets color-scheme: light). */
+  html.theme-lesbian {{
+    --bg: #fffaf7;
+    --bg-translucent: rgba(255,250,247,0.82);
+    --glass-border: rgba(163,2,98,0.14);
+    --glass-shine: rgba(255,255,255,0.6);
+    --glass-shadow: rgba(163,2,98,0.12);
+    --glass-chip-bg: rgba(255,255,255,0.55);
+    --text: #3b2230;
+    --muted: #7a5a6c;
+    --muted-2: #94758a;
+    --divider: rgba(163,2,98,0.12);
+    --card-bg: #fffdfc;
+    --card-border: #f1d3e0;
+    --card-shadow: 0 1px 3px rgba(163,2,98,0.10), 0 1px 2px rgba(239,118,39,0.08);
+    --input-bg: #ffffff;
+    --input-border: #e3bfd2;
+    --excerpt-bg: #fff3ec;
+    --excerpt-border: #f0d2c4;
+    --link: #a30262;
+    --accent: #b04a85;
+    --focus-ring: rgba(176,74,133,0.35);
+    --btn-approve: #a84c85;     --btn-approve-hover: #8d3d6e;  /* rose */
+    --btn-internal: #8a4d9b;    --btn-internal-hover: #723e81; /* orchid */
+    --btn-remove: #7d6577;      --btn-remove-hover: #665062;   /* mauve grey */
+    --btn-reject: #c0391a;      --btn-reject-hover: #9e2d13;   /* flag red-orange */
+    --btn-refresh: #a30262;     --btn-refresh-hover: #82014e;  /* flag magenta */
+    --btn-claim: #a85a15;       --btn-claim-hover: #8a4a10;    /* flag orange, deepened */
+    --banner-bg: #fff0e6;
+    --banner-border: #ffc9a3;
     --warning-bg: #fdf3e8;
     --warning-border: #eac48a;
     --flag-color: #b45309;
     --flag-alert-color: #9a3412;
     --flag-alert-color-urgent: #b91c1c;
-    --badge-bg: #755b7b;
-    /* Left as the same functional colors as the other three themes, same
-       reasoning as --flag-alert-color/--warning-bg above: these are
-       "which section is this" signal colors, not CSA branding, so folding
-       them into the B68FBF/9E8FBF family would make them blend together
-       instead of staying distinct from each other. */
+    --badge-bg: #8b6b7e;
     --overview-accent-tasks: #0e7490;
-    --overview-accent-discussion: #6d4aa8;
+    --overview-accent-discussion: #8a4d9b;
     --overview-accent-security: #8a6d1a;
     --sla-ok-color: #1a6e2e;
     --sla-ok-bg: #e6f5ec;
     --sla-ok-border: #90d0a0;
   }}
+  html.theme-lesbian {{
+    background-color: var(--bg);
+    background-image: linear-gradient(180deg, #ffe0cc 0%, #ffeee3 22%, #fffaf7 46%, #fdeaf3 70%, #f5cfe3 100%);
+    background-attachment: fixed;
+  }}
+  html.theme-lesbian body {{ background: transparent; }}
   /* Seasonal themes -- same variable set and override mechanism as
-     html.theme-b68fbf above, plus --on-accent (the text color for the
+     html.theme-dark above, plus --on-accent (the text color for the
      filled-accent "active" pills, since a bright dark-theme accent needs
      dark text on it). Both are DARK palettes (color-scheme is set to dark
      by the JS above). Functional signal colors (--warning-*, --flag-*,
@@ -1630,10 +1596,10 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
   html.theme-galaxy:not(.has-bg-image) .galaxy-credit {{ display: block; }}
   /* Filled-accent "active" pills use the seasonal themes' dark --on-accent
      text instead of white (bright accents on dark backgrounds). */
-  html.theme-halloween .sla-range-btn.active, html.theme-christmas .sla-range-btn.active, html.theme-galaxy .sla-range-btn.active,
-  html.theme-halloween .theme-toggle button.active, html.theme-christmas .theme-toggle button.active, html.theme-galaxy .theme-toggle button.active,
-  html.theme-halloween .top-nav-link.active, html.theme-christmas .top-nav-link.active, html.theme-galaxy .top-nav-link.active,
-  html.theme-halloween .top-nav-link.active:hover, html.theme-christmas .top-nav-link.active:hover, html.theme-galaxy .top-nav-link.active:hover {{ color: var(--on-accent); }}
+  html.theme-halloween .sla-range-btn.active, html.theme-christmas .sla-range-btn.active, html.theme-galaxy .sla-range-btn.active, html.theme-abyss .sla-range-btn.active, html.theme-tomorrow .sla-range-btn.active,
+  html.theme-halloween .theme-toggle button.active, html.theme-christmas .theme-toggle button.active, html.theme-galaxy .theme-toggle button.active, html.theme-abyss .theme-toggle button.active, html.theme-tomorrow .theme-toggle button.active,
+  html.theme-halloween .top-nav-link.active, html.theme-christmas .top-nav-link.active, html.theme-galaxy .top-nav-link.active, html.theme-abyss .top-nav-link.active, html.theme-tomorrow .top-nav-link.active,
+  html.theme-halloween .top-nav-link.active:hover, html.theme-christmas .top-nav-link.active:hover, html.theme-galaxy .top-nav-link.active:hover, html.theme-abyss .top-nav-link.active:hover, html.theme-tomorrow .top-nav-link.active:hover {{ color: var(--on-accent); }}
   html {{ background: var(--bg); }}
   body {{ font-family: -apple-system, system-ui, sans-serif; max-width: 1180px; margin: 2rem auto; padding: 0 1rem; color: var(--text); background: var(--bg); }}
   /* Wider content column for the card-grid pages (/security, /flagged,
@@ -2167,13 +2133,15 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
   .theme-toggle button:hover {{ background: var(--divider); }}
   .theme-toggle button.active {{ background: var(--accent); color: white; }}
   .theme-toggle button.active:hover {{ background: var(--accent); }}
-  /* The B68FBF button is a literal custom hex color, not a concept a line-
-     icon could stand in for (unlike Auto/Light/Dark's monitor/sun/moon) --
-     so it gets an actual swatch of that color instead. */
+  /* Theme buttons for a named palette (rather than a concept a line-icon
+     could stand in for) get an actual swatch of that palette instead. */
   .theme-swatch {{
     display: inline-block; width: 12px; height: 12px; border-radius: 50%;
-    background: #B68FBF; border: 1px solid rgba(0, 0, 0, 0.15);
+    border: 1px solid rgba(128, 128, 128, 0.45);
   }}
+  .theme-swatch-tomorrow {{ background: linear-gradient(135deg, #002451 0 50%, #bbdaff 50% 100%); }}
+  /* The seven horizontal bands of the lesbian pride flag, top to bottom. */
+  .theme-swatch-lesbian {{ background: linear-gradient(180deg, #d52d00 0 14.3%, #ef7627 0 28.6%, #ff9a56 0 42.9%, #ffffff 0 57.1%, #d162a4 0 71.4%, #b55690 0 85.7%, #a30262 0 100%); }}
   /* Nav list of actual working pages (Overview / Tasks / Discussion /
      Security / Recently Solved) -- its own dedicated
      stack (see .brand-nav-row) instead of as middot-separated text down
@@ -2383,7 +2351,7 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
     border-radius: 999px; margin-right: 0.4rem;
   }}
   /* /standup (see _render_standup_actions_page) -- status is an outlined pill in
-     an existing theme token's color, so every theme (B68FBF included)
+     an existing theme token's color, so every theme
      picks it up without its own rules. Blocked borrows --flag-alert-color
      because it already means "needs attention" everywhere else here. */
   .standup-task-chip {{ text-decoration: none; align-self: center; }}
@@ -2422,22 +2390,11 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
     margin-right: 0.35rem; vertical-align: -0.25em;
   }}
   /* One rule per _AVATAR_HUES index (see _avatar_html), generated by
-     AVATAR_HUE_CSS from _AVATAR_HUES/_AVATAR_HUES_B68FBF -- the default
-     palette, then B68FBF's own hue-rotated palette keyed off the same
-     html.theme-b68fbf class every other theme-conditional swap on this
-     page uses. */
+     AVATAR_HUE_CSS from _AVATAR_HUES. */
 {AVATAR_HUE_CSS}
   .icon {{ width: 14px; height: 14px; flex-shrink: 0; }}
   .icon-sm {{ width: 12px; height: 12px; flex-shrink: 0; }}
   .logo {{ height: 36px; width: auto; }}
-  /* B68FBF gets its own logo (see LOGO_B68FBF_DATA_URI/_page()) -- both
-     <img> tags are always in the DOM, CSS just shows the one matching the
-     current theme, so the swap rides the exact same html.theme-b68fbf class
-     theme_init_script already sets before first paint (no flash of the
-     wrong logo, no extra JS needed just for this). */
-  .logo-b68fbf {{ display: none; }}
-  html.theme-b68fbf .logo-default {{ display: none; }}
-  html.theme-b68fbf .logo-b68fbf {{ display: inline; }}
   /* Small seasonal glyph beside the header title -- hidden unless the
      matching seasonal theme is active. */
   .theme-deco {{ display: none; color: var(--accent); margin-left: 0.4rem; vertical-align: -0.1em; }}
@@ -2451,17 +2408,6 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
   .topic-icon {{ width: 24px; height: 24px; flex-shrink: 0; vertical-align: middle; margin-right: 0.45rem; border-radius: 6px; }}
   .topic-icon-empty {{ display: block; width: 26px; height: 26px; margin: 0 auto 0.6rem auto; border-radius: 6px; opacity: 0.9; }}
   .badge-priority .topic-icon-inline {{ width: 11px; height: 11px; margin-right: 0.3rem; vertical-align: -1px; border-radius: 0; }}
-  /* B68FBF-only recolor of the topic-icon badges (see _topic_icon()) -- same
-     always-both-in-the-DOM, pure-CSS show/hide trick the header logo swap
-     uses (.logo-default/.logo-b68fbf). Each of the three concrete sizing
-     contexts these badges render in gets its own explicit "shown" rule
-     below, since a bare "display: inline" here would otherwise clobber
-     .topic-icon-empty's own "display: block" centering. */
-  .topic-icon-b68fbf {{ display: none; }}
-  html.theme-b68fbf .topic-icon-default {{ display: none; }}
-  html.theme-b68fbf .topic-icon-b68fbf.topic-icon {{ display: inline; }}
-  html.theme-b68fbf .topic-icon-b68fbf.topic-icon-empty {{ display: block; }}
-  html.theme-b68fbf .topic-icon-b68fbf.topic-icon-inline {{ display: inline; }}
   /* Confirmation "banner" now renders as a toast: fixed to the corner of
      the viewport instead of docked above the page content, so it doesn't
      shove the queue down or require scrolling back up to notice. Still a
@@ -2764,10 +2710,11 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
 <div class="brand">
   <div class="brand-controls-row">
     <div class="theme-toggle" role="group" aria-label="Theme">
-      <button type="button" data-theme="system" title="Auto (match system)" onclick="setTheme('system')">{_icon("monitor", "icon-sm")}</button>
+      <button type="button" data-theme="abyss" title="Abyss (VS Code)" onclick="setTheme('abyss')">{_icon("waves", "icon-sm")}</button>
       <button type="button" data-theme="galaxy" title="Galaxy" onclick="setTheme('galaxy')">{_icon("galaxy", "icon-sm")}</button>
       <button type="button" data-theme="dark" title="Dark" onclick="setTheme('dark')">{_icon("moon", "icon-sm")}</button>
-      <button type="button" data-theme="b68fbf" title="B68FBF" onclick="setTheme('b68fbf')"><span class="theme-swatch"></span></button>
+      <button type="button" data-theme="tomorrow" title="Tomorrow Blue (VS Code)" onclick="setTheme('tomorrow')"><span class="theme-swatch theme-swatch-tomorrow"></span></button>
+      <button type="button" data-theme="lesbian" title="Lesbian pride (soft)" onclick="setTheme('lesbian')"><span class="theme-swatch theme-swatch-lesbian"></span></button>
       <button type="button" data-theme="halloween" title="Halloween" onclick="setTheme('halloween')">{_icon("pumpkin", "icon-sm")}</button>
       <button type="button" data-theme="christmas" title="Christmas" onclick="setTheme('christmas')">{_icon("tree", "icon-sm")}</button>
     </div>
