@@ -298,6 +298,7 @@ _ICONS = {
     "monitor": '<rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line>',
     # Seasonal-theme glyphs (Halloween / Christmas): the toggle buttons and
     # the small header accent both use these, same line-icon style as above.
+    "image": '<rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline>',
     "pumpkin": '<ellipse cx="12" cy="14" rx="9.5" ry="7"></ellipse><path d="M12 7c-3.2 2.4-3.2 11.6 0 14"></path><path d="M12 7c3.2 2.4 3.2 11.6 0 14"></path><path d="M12 7c0-1.8.8-3.2 2.4-4"></path>',
     "tree": '<polyline points="12 3 17 10 14.5 10 18.5 16 14 16 16.5 20 7.5 20 10 16 5.5 16 9.5 10 7 10 12 3"></polyline><line x1="12" y1="20" x2="12" y2="22"></line>',
     # Added for the filter-as-you-type boxes (see _filter_box_html) on the
@@ -559,6 +560,24 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
   } catch (e) {}
 })();
 </script>"""
+    # Page background image, chosen from the picker in the sidebar and kept in
+    # this browser only (a downscaled JPEG data URL in localStorage; nothing
+    # is sent to or stored by the server). Applied here in <head>, before the
+    # stylesheet paints, so a saved image never flashes in late.
+    bg_init_script = """<script>
+(function() {
+  try {
+    var img = localStorage.getItem('csa-bg-image');
+    if (img && img.indexOf('data:image/') === 0) {
+      var veil = parseInt(localStorage.getItem('csa-bg-veil'), 10);
+      var root = document.documentElement;
+      root.style.setProperty('--csa-bg-image', 'url("' + img + '")');
+      root.style.setProperty('--csa-bg-veil', String(isNaN(veil) ? 60 : Math.max(0, Math.min(95, veil))));
+      root.classList.add('has-bg-image');
+    }
+  } catch (e) {}
+})();
+</script>"""
     # Skips the reload while a textarea has an unsaved edit in it (tracked via
     # a plain 'input' listener), so auto-refresh can't silently blow away
     # something you're in the middle of writing. Also skips it while
@@ -704,6 +723,73 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
   var stored = null;
   try { stored = localStorage.getItem('csa-theme'); } catch (e) {}
   applyTheme(['light', 'dark', 'b68fbf', 'halloween', 'christmas'].indexOf(stored) >= 0 ? stored : 'system');
+})();
+</script>
+<script>
+(function() {
+  // Background-image picker (see bg_init_script in <head> for the apply-on-load half).
+  var root = document.documentElement;
+  var file = document.getElementById('bg-file');
+  var veil = document.getElementById('bg-veil');
+  var status = document.getElementById('bg-status');
+  var removeBtn = document.getElementById('bg-remove');
+  if (!file || !veil || !removeBtn) { return; }
+  var MAX_EDGE = 1920;
+  function say(text) { if (status) { status.textContent = text; } }
+  function has() { return root.classList.contains('has-bg-image'); }
+  function sync() {
+    removeBtn.disabled = !has();
+    veil.disabled = !has();
+    var v = parseInt(root.style.getPropertyValue('--csa-bg-veil'), 10);
+    veil.value = isNaN(v) ? 60 : v;
+  }
+  function apply(dataUrl, v) {
+    root.style.setProperty('--csa-bg-image', 'url("' + dataUrl + '")');
+    root.style.setProperty('--csa-bg-veil', String(v));
+    root.classList.add('has-bg-image');
+    sync();
+  }
+  file.addEventListener('change', function() {
+    var f = file.files && file.files[0];
+    file.value = '';
+    if (!f) { return; }
+    if (f.type.indexOf('image/') !== 0) { say('That file is not an image.'); return; }
+    var url = URL.createObjectURL(f);
+    var im = new Image();
+    im.onload = function() {
+      var scale = Math.min(1, MAX_EDGE / Math.max(im.naturalWidth, im.naturalHeight));
+      var canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.round(im.naturalWidth * scale));
+      canvas.height = Math.max(1, Math.round(im.naturalHeight * scale));
+      canvas.getContext('2d').drawImage(im, 0, 0, canvas.width, canvas.height);
+      URL.revokeObjectURL(url);
+      var dataUrl = canvas.toDataURL('image/jpeg', 0.82);
+      var v = parseInt(veil.value, 10); if (isNaN(v)) { v = 60; }
+      try {
+        localStorage.setItem('csa-bg-image', dataUrl);
+        localStorage.setItem('csa-bg-veil', String(v));
+        say('Background set. It is remembered in this browser.');
+      } catch (e) {
+        say('Background set for this page only: the image is too large for this browser to remember. Try a smaller one.');
+      }
+      apply(dataUrl, v);
+    };
+    im.onerror = function() { URL.revokeObjectURL(url); say('That image could not be read.'); };
+    im.src = url;
+  });
+  veil.addEventListener('input', function() {
+    root.style.setProperty('--csa-bg-veil', veil.value);
+    try { localStorage.setItem('csa-bg-veil', veil.value); } catch (e) {}
+  });
+  removeBtn.addEventListener('click', function() {
+    try { localStorage.removeItem('csa-bg-image'); localStorage.removeItem('csa-bg-veil'); } catch (e) {}
+    root.classList.remove('has-bg-image');
+    root.style.removeProperty('--csa-bg-image');
+    root.style.removeProperty('--csa-bg-veil');
+    say('Background removed.');
+    sync();
+  });
+  sync();
 })();
 </script>"""
     # Three small, independent behaviors bundled into one script rather than
@@ -1110,6 +1196,7 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
 {favicon_html}
 {theme_color_meta_html}
 {theme_init_script}
+{bg_init_script}
 <style>
   /* Light theme (default). Every color used below is a variable specifically
      so the dark-mode block right after this one only has to override
@@ -1936,6 +2023,70 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
      shorter/thinner than row 1 used to be on its own, with that last one
      pushed down to anchor at the sidebar's bottom on wide viewports
      (see .brand-status-row's own rule below). */
+  /* Page background image (see bg_init_script / the picker in the sidebar). The
+     theme's own color shows through as a veil whose strength is --csa-bg-veil
+     (percent), so text stays readable in every theme. The first background-image
+     line is the fallback for browsers without color-mix(). */
+  html.has-bg-image {{
+    background-color: var(--bg);
+    background-image: var(--csa-bg-image);
+    background-image: linear-gradient(color-mix(in srgb, var(--bg) calc(var(--csa-bg-veil, 60) * 1%), transparent), color-mix(in srgb, var(--bg) calc(var(--csa-bg-veil, 60) * 1%), transparent)), var(--csa-bg-image);
+    background-size: cover; background-position: center; background-attachment: fixed;
+  }}
+  html.has-bg-image body {{ background: transparent; }}
+  /* Liquid glass: while a background image is set, cards, columns, filter
+     boxes and inputs turn into translucent, blurred panels with a specular
+     top edge, larger radii and a soft shadow, so the image reads through
+     them. Every color comes from the active theme's own tokens (so all six
+     themes work), and the whole block needs backdrop-filter; without it the
+     panels stay the solid theme cards and only the veiled image changes. */
+  @supports (backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px)) {{
+    html.has-bg-image {{
+      --lg-card: color-mix(in srgb, var(--card-bg) 46%, transparent);
+      --lg-input: color-mix(in srgb, var(--input-bg) 50%, transparent);
+      --lg-sheen: linear-gradient(135deg, var(--glass-shine) 0%, transparent 42%);
+      --lg-blur: blur(22px) saturate(180%) brightness(1.04);
+    }}
+    html.has-bg-image :is(.security-panel, .ticket, .sla-chart-wrap, .sla-drilldown, .bg-picker-panel) {{
+      background: var(--lg-sheen), var(--lg-card);
+      -webkit-backdrop-filter: var(--lg-blur); backdrop-filter: var(--lg-blur);
+      border-top-color: var(--glass-border); border-right-color: var(--glass-border); border-bottom-color: var(--glass-border);
+      border-radius: 22px;
+      box-shadow: inset 0 1px 0 var(--glass-shine), inset 1px 0 0 var(--glass-shine), 0 10px 36px var(--glass-shadow);
+    }}
+    html.has-bg-image :is(.filter-box, .stat-chip, .sla-range-btn, .bg-picker summary, .bg-picker-file) {{
+      background: var(--lg-sheen), var(--lg-input);
+      -webkit-backdrop-filter: blur(12px) saturate(160%); backdrop-filter: blur(12px) saturate(160%);
+      border-color: var(--glass-border);
+      box-shadow: inset 0 1px 0 var(--glass-shine);
+    }}
+    html.has-bg-image :is(input[type=search], input[type=text], input[type=number], select, textarea) {{
+      background: var(--lg-input);
+      -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
+      border-color: var(--glass-border);
+    }}
+    html.has-bg-image .sla-range-btn.active {{ background: var(--accent); }}
+    html.has-bg-image .mini-ticket {{ border-bottom-color: var(--glass-border); }}
+    html.has-bg-image .mini-ticket:hover {{ background: var(--glass-chip-bg); }}
+    /* Loose text sits straight on the image: a soft halo in the theme's own
+       background color keeps it readable, and is switched off inside panels. */
+    html.has-bg-image :is(h2, p.meta, .sla-history-note) {{ text-shadow: 0 0 10px var(--bg), 0 0 3px var(--bg); }}
+    html.has-bg-image :is(.security-panel, .ticket, .sla-chart-wrap, .sla-drilldown, .bg-picker-panel) :is(h2, h3, p.meta, .sla-history-note) {{ text-shadow: none; }}
+  }}
+  .bg-picker {{ font-size: 0.78rem; color: var(--muted); }}
+  .brand-footer .bg-picker {{ margin-top: 0.6rem; }}
+  .brand-footer .bg-picker summary {{ display: flex; justify-content: center; }}
+  .bg-picker summary {{ cursor: pointer; display: inline-flex; align-items: center; gap: 0.35rem; list-style: none; padding: 0.2rem 0.5rem; border: 1px solid var(--input-border); border-radius: 999px; background: var(--glass-chip-bg); }}
+  .bg-picker summary::-webkit-details-marker {{ display: none; }}
+  .bg-picker[open] summary {{ border-color: var(--accent); }}
+  .bg-picker-panel {{ display: flex; flex-direction: column; gap: 0.5rem; margin-top: 0.5rem; padding: 0.6rem; border: 1px solid var(--card-border); border-radius: 10px; background: var(--card-bg); color: var(--text); }}
+  .bg-picker-file {{ cursor: pointer; padding: 0.3rem 0.5rem; border: 1px solid var(--input-border); border-radius: 8px; text-align: center; }}
+  .bg-picker-file input {{ position: absolute; width: 1px; height: 1px; opacity: 0; overflow: hidden; }}
+  .bg-picker-file:focus-within {{ outline: 2px solid var(--accent); }}
+  .bg-picker-veil {{ display: flex; align-items: center; gap: 0.5rem; }}
+  .bg-picker-veil input {{ flex: 1; min-width: 0; }}
+  .bg-picker-remove:disabled {{ opacity: 0.5; cursor: default; }}
+  .bg-picker-panel .meta {{ margin: 0; }}
   .brand-controls-row {{
     display: flex; align-items: center; justify-content: flex-end;
     flex-wrap: wrap; gap: 0.5rem 0.75rem; margin-top: 0.35rem;
@@ -2583,6 +2734,15 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
       {_zendesk_status_control_html()}
       {_refresh_button_html(current_path)}
     </div>
+    <details class="bg-picker">
+      <summary title="Choose a background image">{_icon("image", "icon-sm")}<span>Background</span></summary>
+      <div class="bg-picker-panel">
+        <label class="bg-picker-file">Choose image&hellip;<input type="file" id="bg-file" accept="image/*"></label>
+        <label class="bg-picker-veil">Fade <input type="range" id="bg-veil" min="0" max="95" step="5" value="60" aria-label="How much the theme color covers the image"></label>
+        <button type="button" id="bg-remove" class="bg-picker-remove">Remove</button>
+        <p class="meta" id="bg-status" role="status">Stays in this browser only.</p>
+      </div>
+    </details>
   </div>
 </div>
 {banner_html}
