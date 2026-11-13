@@ -4510,6 +4510,8 @@ class _StandupCtx:
             label = _STANDUP_TASK_STATUS_LABELS.get(task.get("status"), task.get("status") or "")
             ticket = f" #{task['ticket_id']}" if task.get("ticket_id") else ""
             return f'<a class="stat-chip standup-task-chip" href="/tasks#task-{html.escape(str(task.get("local_id", "")))}">In My tasks ({html.escape(label)}{ticket})</a>'
+        if not _common.standup_owner_allowed((self.actions.get(aid) or {}).get("owner")):
+            return ""
         return (
             f'<form method="post" action="/standup/add-task"><input type="hidden" name="id" value="{html.escape(aid)}">'
             f'<input type="hidden" name="return_to" value="{html.escape(self.return_to)}">'
@@ -4558,9 +4560,9 @@ class _StandupCtx:
 
 def _standup_owner_options(view: dict) -> list:
     """Owner filter choices: only the people in _common.STANDUP_PEOPLE (in
-    that order, spelled as the notes spell them), then the Group / Unassigned
-    buckets when the notes use them. Other names in the notes are not
-    offered, though their items still show under Everyone."""
+    that order, spelled as the notes spell them) and nothing else -- no Group
+    or Unassigned bucket. Other names in the notes are not offered, though
+    their items still show under Everyone."""
     names = set()
     for t in (view.get("topics") or {}).values():
         names.update(o for o in t.get("owners") or [] if o)
@@ -4569,8 +4571,7 @@ def _standup_owner_options(view: dict) -> list:
             names.add(a["owner"])
     spelled = {n.casefold(): n for n in names}
     people = [spelled.get(p.casefold(), p) for p in _common.STANDUP_PEOPLE]
-    special = [n for n in ("Group", "Unassigned") if n in names]
-    return people + special
+    return people
 
 
 def _standup_clean_owner(view: dict, owner: str) -> str:
@@ -4793,15 +4794,14 @@ def _render_standup_tracked_page(snapshot: dict, q: str = "", banner: str = "", 
 
 
 def _identity_select_html(field_name: str) -> str:
-    """The Assignee/Requester <select> on a draft's promote form -- same
-    two options (PERSONAL_TASK_IDENTITY_LABELS) either way, resolved
-    independently server-side per field name (see
-    _common.resolve_personal_task_identity), defaulting to "self"
-    (Catherine Vee) -- the only option that existed before this choice
-    did, so an untouched form still behaves exactly as before."""
+    """The Assignee/Requester <select> on a draft's promote form: only the
+    people in _common.personal_task_identity_labels() (you, Jesstin,
+    Nekoashi and Ryan by default), each resolved independently server-side
+    (see _common.resolve_personal_task_identity) per field name, defaulting
+    to "self" (you) so an untouched form behaves as it always did."""
     options = "".join(
-        f'<option value="{value}"{" selected" if value == _common.PERSONAL_TASK_IDENTITY_SELF else ""}>{html.escape(label)}</option>'
-        for value, label in _common.PERSONAL_TASK_IDENTITY_LABELS.items()
+        f'<option value="{html.escape(value)}"{" selected" if value == _common.PERSONAL_TASK_IDENTITY_SELF else ""}>{html.escape(label)}</option>'
+        for value, label in _common.personal_task_identity_labels().items()
     )
     return f'<select name="{field_name}" class="task-identity-select">{options}</select>'
 

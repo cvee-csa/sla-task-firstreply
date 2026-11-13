@@ -59,6 +59,7 @@ def isolated_output_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(_common, "PERSONAL_TASKS_ARCHIVE_FILE", tmp_path / "personal_tasks_archive.json")
     # In-memory caches -- fresh dict per test, not just a fresh file on disk.
     monkeypatch.setattr(_common, "_agent_id_cache", {})
+    monkeypatch.setattr(_common, "_agent_name_id_cache", {})
     monkeypatch.setattr(_common, "_security_ticket_cache", {})
     monkeypatch.setattr(_common, "_flagged_ticket_cache", {})
     monkeypatch.setattr(_common, "_pending_ticket_actions_in_progress", set())

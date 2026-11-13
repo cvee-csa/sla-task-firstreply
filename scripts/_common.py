@@ -747,23 +747,36 @@ PERSONAL_TASK_ALLOCATION_LABELS = {
 PERSONAL_TASK_RECEIVED_NOTE = "Ticket has been received"
 PERSONAL_TASK_RECEIVED_REPLY = "Ticket has been received for processing."
 
-# Assignee/Requester on the promote form are now a choice too, between
-# this tool's own account ("self" -- Catherine Vee, resolved via
-# ZENDESK_EMAIL, exactly as before this choice existed) and a shared
-# "IT-Operations" Zendesk account, resolved via a NEW env var,
-# ZENDESK_IT_OPERATIONS_EMAIL (see resolve_it_operations_agent_id below).
-# That env var isn't set by this tool -- add it to this project's own
-# .env with the shared account's email for the "IT-Operations" choice to
-# actually resolve to something; left unset, choosing it fails clearly
-# (see resolve_personal_task_identity) rather than silently falling back
-# to self.
+# Assignee/Requester on the promote form are a choice between the people in
+# OVERVIEW_PEOPLE -- by default you (Catherine Vee), Jesstin, Nekoashi and
+# Ryan, and nobody else. "self" is the first person (this tool's own account,
+# resolved via ZENDESK_EMAIL); each other person is looked up in Zendesk by
+# their exact display name (see _resolve_agent_id_by_name), so a name that
+# doesn't match a Zendesk agent fails with a clear on-page error rather than
+# falling back to self. The stored value is "self" or the person's lowercase
+# first name.
 PERSONAL_TASK_IDENTITY_SELF = "self"
-PERSONAL_TASK_IDENTITY_IT_OPERATIONS = "it_operations"
-PERSONAL_TASK_IDENTITY_CHOICES = (PERSONAL_TASK_IDENTITY_SELF, PERSONAL_TASK_IDENTITY_IT_OPERATIONS)
-PERSONAL_TASK_IDENTITY_LABELS = {
-    PERSONAL_TASK_IDENTITY_SELF: "Catherine Vee",
-    PERSONAL_TASK_IDENTITY_IT_OPERATIONS: "IT-Operations",
-}
+
+
+def personal_task_identity_people() -> dict:
+    """{choice value: full Zendesk display name}, in order, you first.
+    The only people the Assignee/Requester selects offer or accept."""
+    people: dict = {}
+    for index, name in enumerate(OVERVIEW_PEOPLE):
+        if index == 0:
+            key = PERSONAL_TASK_IDENTITY_SELF
+        else:
+            key = name.split()[0].casefold()
+            while key in people or key == PERSONAL_TASK_IDENTITY_SELF:
+                key += "_"
+        people[key] = name
+    return people
+
+
+def personal_task_identity_labels() -> dict:
+    """{choice value: label shown in the select}."""
+    return {k: (f"Me ({n})" if k == PERSONAL_TASK_IDENTITY_SELF else n) for k, n in personal_task_identity_people().items()}
+
 
 # Category on a personal task used to be free text -- it's now a closed
 # choice of two, since the whole point of picking one is that it gets
@@ -796,7 +809,7 @@ def _personal_task_custom_fields(est_mins, allocation=None) -> list:
     return fields
 
 
-# Both resolve_own_agent_id and resolve_it_operations_agent_id (below) used
+# Both resolve_own_agent_id and _resolve_agent_id_by_name (below) used
 # to make a live search_users() call on every single invocation -- once per
 # scan, once per post, once per /tasks page load, even once per
 # fetch_recent_tickets() call for the IT-Security column -- with no caching
@@ -855,44 +868,53 @@ def _resolve_agent_id_by_email(client, email: str, log_fn=print):
     return resolved_id
 
 
-def resolve_it_operations_agent_id(client, log_fn=print):
-    """Resolves the shared "IT-Operations" Zendesk account -- the
-    Assignee/Requester identity choice that isn't "Catherine Vee" --
-    from the ZENDESK_IT_OPERATIONS_EMAIL env var, via the same cached
-    _resolve_agent_id_by_email lookup resolve_own_agent_id uses for
-    ZENDESK_EMAIL. Returns None (not an exception) if that env var is
-    unset, search_users is unreachable, or no matching user is found --
-    resolve_personal_task_identity turns a None here into a clear
-    "add this to your .env" error rather than silently falling back to
-    self."""
-    email = os.getenv("ZENDESK_IT_OPERATIONS_EMAIL", "")
-    if not email:
+_agent_name_id_cache: dict = {}
+
+
+def _resolve_agent_id_by_name(client, name: str, log_fn=print):
+    """The Zendesk user id whose display name is exactly `name`
+    (case-insensitive), via search_users. Agents and admins are preferred
+    over other roles when several users share the name. Cached like
+    _resolve_agent_id_by_email (a failed lookup is not cached; "no such
+    user" is). Returns None when nothing matches."""
+    now = datetime.now()
+    key = name.casefold()
+    with _agent_id_cache_lock:
+        cached = _agent_name_id_cache.get(key)
+        if cached and (now - cached["resolved_at"]).total_seconds() < AGENT_ID_CACHE_TTL_SECONDS:
+            return cached["id"]
+    try:
+        matches = client.search_users(name)
+    except Exception as exc:
+        log_fn(f"_resolve_agent_id_by_name({name}): search_users failed ({exc})")
         return None
-    return _resolve_agent_id_by_email(client, email, log_fn=log_fn)
+    exact = [u for u in matches if (u.get("name") or "").strip().casefold() == key and u.get("id") is not None]
+    exact.sort(key=lambda u: 0 if u.get("role") in ("agent", "admin") else 1)
+    resolved_id = exact[0]["id"] if exact else None
+    with _agent_id_cache_lock:
+        _agent_name_id_cache[key] = {"id": resolved_id, "resolved_at": now}
+    return resolved_id
 
 
 def resolve_personal_task_identity(client, choice: str, own_agent_id, log_fn=print):
-    """Resolves a promote form's Assignee/Requester choice ("self" or
-    "it_operations") to an actual Zendesk user id -- both requester_id
-    and assignee_id must be real Zendesk users (not a group), so
-    "IT-Operations" resolves to the shared account above rather than the
-    IT-Operations Zendesk *group* this tool already tracks elsewhere
-    (IT_OPERATIONS_GROUP_ID) -- that's a ticket's queue, not a person,
-    and can't stand in for a requester or assignee id.
+    """Resolves a promote form's Assignee/Requester choice ("self" or one of
+    personal_task_identity_people()) to an actual Zendesk user id.
 
     Returns (user_id, error) -- error is None on success, or a
     human-readable string explaining what to fix (an unresolved
-    ZENDESK_EMAIL for "self", or an unset/unresolved
-    ZENDESK_IT_OPERATIONS_EMAIL for "it_operations") when user_id is
-    None."""
-    if choice == PERSONAL_TASK_IDENTITY_IT_OPERATIONS:
-        it_ops_id = resolve_it_operations_agent_id(client, log_fn=log_fn)
-        if it_ops_id is None:
-            return None, "Could not resolve the IT-Operations account -- add ZENDESK_IT_OPERATIONS_EMAIL to your .env."
-        return it_ops_id, None
-    if own_agent_id is None:
-        return None, "Could not resolve your own Zendesk account from ZENDESK_EMAIL -- check that .env value."
-    return own_agent_id, None
+    ZENDESK_EMAIL for "self", or a person whose name matches no Zendesk
+    user) when user_id is None."""
+    people = personal_task_identity_people()
+    if choice not in people:
+        return None, "Invalid Assignee/Requester choice."
+    if choice == PERSONAL_TASK_IDENTITY_SELF:
+        if own_agent_id is None:
+            return None, "Could not resolve your own Zendesk account from ZENDESK_EMAIL -- check that .env value."
+        return own_agent_id, None
+    user_id = _resolve_agent_id_by_name(client, people[choice], log_fn=log_fn)
+    if user_id is None:
+        return None, f"Could not find a Zendesk user named {people[choice]}."
+    return user_id, None
 
 # How far back each scan looks for candidate tickets. Widened from the
 # original 24h: a ticket that arrives and ages past this window before this
@@ -1091,7 +1113,7 @@ def guess_requester_name(client, requester_id: int, description: str, log_fn=pri
 
 # resolve_requester_name and resolve_assignee_name (below) each used to make
 # a live get_user() call on every single invocation, with no caching at all
-# -- unlike resolve_own_agent_id/resolve_it_operations_agent_id just above,
+# -- unlike resolve_own_agent_id/_resolve_agent_id_by_name just above,
 # which already got this same treatment via _agent_id_cache once the
 # identical problem was noticed there. In practice that meant: once per
 # ticket in build_drafts() during every scan, once per matched ticket on
@@ -1263,7 +1285,7 @@ def resolve_own_agent_id(client, log_fn=print):
     degrade to the plain author_id != requester_id check, which is exactly
     this tool's original (imperfect, but not new) behavior rather than a
     new failure mode. Resolved via the cached _resolve_agent_id_by_email
-    lookup (see its docstring, above resolve_it_operations_agent_id) --
+    lookup (see its docstring, above _resolve_agent_id_by_name) --
     this used to be a live search_users() call on every single
     invocation."""
     email = os.getenv("ZENDESK_EMAIL", "")
@@ -3049,8 +3071,15 @@ def standup_tasks_by_action() -> dict:
     return out
 
 
+def standup_owner_allowed(owner) -> bool:
+    """True when an item's owner is one of STANDUP_PEOPLE (case-insensitive).
+    Only those people's items can become tasks or be picked as a filter."""
+    return bool(owner) and str(owner).casefold() in {p.casefold() for p in STANDUP_PEOPLE}
+
+
 def add_standup_action_to_tasks(action_id: str, log_fn=print) -> dict:
-    """/standup's "Add to My tasks": saves one open standup action item (anyone's)
+    """/standup's "Add to My tasks": saves one open standup action item (one of
+    STANDUP_PEOPLE's)
     as a local My tasks draft (add_personal_task -- no Zendesk call; promoting
     it to a real ticket stays a separate click on /tasks).
 
@@ -3068,6 +3097,8 @@ def add_standup_action_to_tasks(action_id: str, log_fn=print) -> dict:
         return {"ok": False, "error": "That action item isn't open any more. No task was added."}
     if action_id in standup_tasks_by_action():
         return {"ok": False, "error": "That standup action item is already in My tasks."}
+    if not standup_owner_allowed(action.get("owner")):
+        return {"ok": False, "error": "Only items owned by the standup people can be added to My tasks."}
     try:
         raised = datetime.strptime(action.get("date", ""), "%Y-%m-%d")
         when = f"{raised.strftime('%b')} {raised.day}"
@@ -3666,7 +3697,7 @@ def promote_personal_task(
     in Zendesk, the same group/agent pairing its own UI shows.
 
     identity_assignee/identity_requester (each PERSONAL_TASK_IDENTITY_SELF
-    or PERSONAL_TASK_IDENTITY_IT_OPERATIONS, defaulting to SELF -- the
+    or another key of personal_task_identity_people(), defaulting to SELF -- the
     only option that existed before this choice did) are resolved
     independently via resolve_personal_task_identity, so Assignee and
     Requester don't have to match each other. allocation
@@ -3729,7 +3760,8 @@ def promote_personal_task(
                 return {"ok": False, "error": f"This task already has a Zendesk ticket (#{entry['ticket_id']})."}
             return {"ok": False, "error": "This task can't be promoted from its current state."}
 
-        if identity_assignee not in PERSONAL_TASK_IDENTITY_CHOICES or identity_requester not in PERSONAL_TASK_IDENTITY_CHOICES:
+        people = personal_task_identity_people()
+        if identity_assignee not in people or identity_requester not in people:
             return {"ok": False, "error": "Invalid Assignee/Requester choice."}
         if allocation not in PERSONAL_TASK_ALLOCATION_CHOICES:
             return {"ok": False, "error": "Invalid Ticket Allocation choice."}
