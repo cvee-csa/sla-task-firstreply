@@ -1571,6 +1571,18 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
   .overview-section-head {{ display: flex; align-items: baseline; justify-content: space-between; gap: 0.75rem; margin-bottom: 0.75rem; }}
   .overview-section-head .column-heading {{ margin: 0; }}
   .overview-see-all {{ font-size: 0.82rem; font-weight: 600; white-space: nowrap; }}
+  /* /overview: one card per person. Auto-fit columns, so four people sit in a
+     row on a wide screen and stack on a narrow one. */
+  .person-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(270px, 1fr)); gap: 1.25rem; align-items: start; }}
+  .person-card .overview-section-head {{ flex-wrap: wrap; row-gap: 0.35rem; }}
+  .sla-history-note.person-others-note {{ margin-top: 1.5rem; }}
+  .person-card {{ min-width: 0; margin-bottom: 0; }}
+  .security-panel.person-card-person {{ border-left-color: var(--accent); }}
+  .security-panel.person-card-unassigned {{ border-left-color: var(--flag-color); }}
+  .person-chips {{ display: inline-flex; gap: 0.35rem; flex-wrap: wrap; justify-content: flex-end; }}
+  .sla-chip {{ display: inline-block; font-size: 0.72rem; font-weight: 600; padding: 0 0.45rem; border-radius: 999px; border: 1px solid currentColor; white-space: nowrap; }}
+  .sla-chip-breached {{ color: var(--flag-alert-color-urgent); }}
+  .sla-chip-due {{ color: var(--flag-color); }}
 
   /* /sla page -- just the two Chart.js trend charts (queue health +
      agent activity) now; the KPI strip, four rule cards, and
@@ -1589,6 +1601,14 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
   .sla-chart-legend span {{ display: inline-flex; align-items: center; gap: 0.35rem; }}
   .sla-chart-swatch {{ width: 10px; height: 10px; border-radius: 2px; display: inline-block; }}
   .sla-chart-swatch-line {{ width: 16px; height: 3px; display: inline-block; border-radius: 1px; }}
+  /* Notes from sla_history.json: the list above the charts. The matching band on the
+     charts is drawn in JS (see the slaNotes plugin in _sla_charts_html). */
+  .sla-notes {{ font-size: 0.82rem; color: var(--muted); margin: 0 0 0.75rem; }}
+  .sla-notes-title {{ display: inline-flex; align-items: center; gap: 0.35rem; font-weight: 600; margin-bottom: 0.2rem; }}
+  .sla-notes-swatch {{ width: 10px; height: 10px; border-radius: 2px; display: inline-block; background: var(--accent); opacity: 0.45; }}
+  .sla-notes ul {{ list-style: none; margin: 0; padding: 0; }}
+  .sla-notes li {{ padding: 0.1rem 0; }}
+  .sla-notes-dates {{ font-weight: 600; color: var(--text); margin-right: 0.4rem; white-space: nowrap; }}
   .sla-history-note {{ font-size: 0.78rem; color: var(--muted-2); margin: -0.5rem 0 1rem; }}
   /* Chart.js trend charts (queue health + agent activity) -- range filter
      bar, drill-down panel, download/reset-zoom buttons, agent checkbox
@@ -1729,6 +1749,9 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
      that tie (equal specificity, later wins) and every grid item gets a
      real border on all sides, last one included. */
   .mini-ticket-grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 0.75rem; align-items: start; }}
+  /* /tasks drafts: exactly two columns (not auto-fill), one on a narrow screen. */
+  .mini-ticket-grid.mini-ticket-grid-2 {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
+  @media (max-width: 720px) {{ .mini-ticket-grid.mini-ticket-grid-2 {{ grid-template-columns: 1fr; }} }}
   .mini-ticket-grid .mini-ticket {{
     border: 1px solid var(--card-border); border-radius: 10px; margin: 0; padding: 0.75rem 0.85rem;
   }}
@@ -2315,8 +2338,8 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
      same Zendesk link the number does -- fixing a common miss-click
      aimed at the (much larger) title instead of the small number beside
      it. A personal task's title (draft or open -- _task_title_link_html,
-     used by _render_draft_task_row/_render_open_task_row/
-     _render_overview_draft_task_row) shares this same .ticket-title-link
+     used by _render_draft_task_row/_render_open_task_row)
+     shares this same .ticket-title-link
      class/look but points somewhere different: back to that task's own
      row on /tasks, not out to Zendesk -- see that helper's docstring.
      Either way, kept looking like plain text rather than a normal blue/
@@ -2674,10 +2697,10 @@ def _top_nav_html(current_path: str = "") -> str:
     whichever link matches current_path, so it's obvious at a glance which
     page you're already on (mirroring the theme toggle's own .active
     treatment); and a small count badge per link -- the number of
-    not-yet-done personal tasks on Tasks, and the cache-only Discussion and
+    personal tasks not yet in Zendesk on Tasks, and the cache-only Discussion and
     Security counts described above -- riding at the end of the row rather
     than crowding the label."""
-    tasks_count = len(_common.draft_personal_tasks()) + len(_common.open_personal_tasks())
+    tasks_count = len(_common.draft_personal_tasks())
     flagged_count = _common.cached_flagged_ticket_count()
     security_count = _common.cached_security_ticket_count(_common.IT_SECURITY_GROUP_ID)
     sla_breach_count = _common.cached_sla_breach_count()
@@ -3411,7 +3434,7 @@ def _render_ticket(item: dict) -> str:
 </div>"""
 
 
-def _render_readonly_ticket_row(item: dict, return_to: str = "/firstreply", extra_html: str = "") -> str:
+def _render_readonly_ticket_row(item: dict, return_to: str = "/firstreply", extra_html: str = "", show_assignee: bool = True) -> str:
     """One read-only ticket row: link, subject, status, requester,
     assignee, and a Claim button when it isn't already ours -- shared by
     the IT-Security page (_render_security_page/_render_security_column)
@@ -3432,7 +3455,11 @@ def _render_readonly_ticket_row(item: dict, return_to: str = "/firstreply", extr
     else about the row (including "Assignee: You" and no Claim button,
     since every /solved item is already_ours=True) falls out of the exact
     same fields /security and /flagged already populate, no special case
-    needed beyond this one optional segment."""
+    needed beyond this one optional segment.
+
+    show_assignee=False drops the "Assignee: ..." segment, for a list already
+    grouped by assignee (/overview's per-person cards) where it would only
+    repeat the card's own heading."""
     tid = item.get("ticket_id")
     subject = html.escape(item.get("subject", ""))
     url = item.get("url") or ""
@@ -3474,11 +3501,12 @@ def _render_readonly_ticket_row(item: dict, return_to: str = "/firstreply", extr
         )
 
     solved_meta = f" &middot; {html.escape(_solved_age(item['solved_at']))}" if item.get("solved_at") else ""
+    assignee_meta = f" &middot; Assignee: {assignee_label_html}" if show_assignee else ""
 
     return f"""
 <div class="mini-ticket">
   <div class="mini-ticket-head">{link} — {subject}</div>
-  <div class="mini-ticket-meta">{status} &middot; Requester: {requester} &middot; Assignee: {assignee_label_html}{solved_meta}</div>
+  <div class="mini-ticket-meta">{status} &middot; Requester: {requester}{assignee_meta}{solved_meta}</div>
   {extra_html}
   {claim_html}
 </div>"""
@@ -3582,6 +3610,7 @@ def _sla_charts_html(history: dict) -> str:
   <span class="sla-zoom-hint">scroll to zoom &middot; drag to pan</span>
   <span class="sla-range-label" id="sla-range-label"></span>
 </div>
+<div class="sla-notes" id="sla-notes" style="display:none"></div>
 
 <div class="sla-chart-legend">
   <span><span class="sla-chart-swatch" style="background:var(--sla-ok-color)"></span>Meeting SLA</span>
@@ -3658,6 +3687,89 @@ def _sla_charts_html(history: dict) -> str:
     return 'rgba(' + r + ',' + g + ',' + b + ',' + alpha + ')';
   }}
 
+  // Consecutive days (in the visible range) carrying the same note text become one
+  // band: [{{start, end, text}}] as indexes into the sliced arrays.
+  function buildNoteBands(notes) {{
+    var bands = [];
+    for (var i = 0; i < notes.length; i++) {{
+      if (!notes[i]) continue;
+      var last = bands[bands.length - 1];
+      if (last && last.end === i - 1 && last.text === notes[i]) {{ last.end = i; }}
+      else {{ bands.push({{ start: i, end: i, text: notes[i] }}); }}
+    }}
+    return bands;
+  }}
+
+  // Shades each band behind the data and labels it at the top. Same plugin on all
+  // four charts, so a note reads the same everywhere. Options carry the bands.
+  var notesPlugin = {{
+    id: 'slaNotes',
+    beforeDatasetsDraw: function(chart, args, opts) {{
+      var bands = opts && opts.bands;
+      var xs = chart.scales.x, area = chart.chartArea;
+      if (!bands || !bands.length || !xs || !area) return;
+      var n = chart.data.labels.length;
+      var step = n > 1 ? Math.abs(xs.getPixelForValue(1) - xs.getPixelForValue(0)) : (area.right - area.left);
+      var ctx = chart.ctx;
+      ctx.save();
+      bands.forEach(function(b) {{
+        var left = Math.max(area.left, xs.getPixelForValue(b.start) - step / 2);
+        var right = Math.min(area.right, xs.getPixelForValue(b.end) + step / 2);
+        if (right <= left) return;
+        ctx.fillStyle = opts.fill;
+        ctx.fillRect(left, area.top, right - left, area.bottom - area.top);
+        ctx.fillStyle = opts.edge;
+        ctx.fillRect(left, area.top, right - left, 3);
+        if (right - left >= 48) {{
+          ctx.font = '10px sans-serif';
+          ctx.fillStyle = opts.text;
+          ctx.textBaseline = 'top';
+          var label = b.text, maxW = right - left - 8;
+          while (label.length > 1 && ctx.measureText(label).width > maxW) label = label.slice(0, -2);
+          if (label !== b.text) label = label.replace(/\\s+$/, '') + '\\u2026';
+          ctx.fillText(label, left + 4, area.top + 6);
+        }}
+      }});
+      ctx.restore();
+    }}
+  }};
+
+  function noteOptions(bands) {{
+    var accent = themeColor('--accent') || '#1a56c4';
+    var fill = hexToRgba(accent, 0.12);
+    var edge = hexToRgba(accent, 0.55);
+    return {{
+      bands: bands,
+      fill: /^rgba/.test(fill) ? fill : 'rgba(128,128,128,0.12)',
+      edge: /^rgba/.test(edge) ? edge : 'rgba(128,128,128,0.5)',
+      text: themeColor('--muted') || '#666'
+    }};
+  }}
+
+  function renderNotesList(bands, labels) {{
+    var box = document.getElementById('sla-notes');
+    if (!box) return;
+    box.textContent = '';
+    if (!bands.length) {{ box.style.display = 'none'; return; }}
+    var title = document.createElement('div');
+    title.className = 'sla-notes-title';
+    var sw = document.createElement('span'); sw.className = 'sla-notes-swatch';
+    title.appendChild(sw);
+    title.appendChild(document.createTextNode('Notes in this range'));
+    box.appendChild(title);
+    var ul = document.createElement('ul');
+    bands.forEach(function(b) {{
+      var li = document.createElement('li');
+      var dates = document.createElement('span'); dates.className = 'sla-notes-dates';
+      dates.textContent = b.start === b.end ? labels[b.start] : labels[b.start] + ' \\u2013 ' + labels[b.end];
+      li.appendChild(dates);
+      li.appendChild(document.createTextNode(b.text));
+      ul.appendChild(li);
+    }});
+    box.appendChild(ul);
+    box.style.display = '';
+  }}
+
   function buildAgentFilterBar() {{
     var bar = document.getElementById('sla-agent-filter-bar');
     if (!bar) return;
@@ -3685,6 +3797,9 @@ def _sla_charts_html(history: dict) -> str:
     var breached = slice(RAW.breached, n);
     var totals = slice(RAW.totals, n);
     var breachedIds = slice(RAW.breached_ids, n);
+    var notesSlice = slice(RAW.notes || [], n);
+    var noteBands = buildNoteBands(notesSlice);
+    var noteLine = function(i) {{ return notesSlice[i] ? 'Note: ' + notesSlice[i] : ''; }};
     var compliance = slice(RAW.compliance_pct, n).map(function(v, i) {{
       if (v !== null && v !== undefined) return v;
       var t = totals[i];
@@ -3705,12 +3820,15 @@ def _sla_charts_html(history: dict) -> str:
     var gridColor = themeColor('--card-border') || '#e2e2e5';
     var tickColor = themeColor('--muted') || '#666';
     var tickCfg = {{ color: tickColor, font: {{ size: 11 }}, maxRotation: 45, autoSkip: true, maxTicksLimit: 10 }};
+    var noteOpts = noteOptions(noteBands);
+    renderNotesList(noteBands, labels);
 
     if (areaChart) areaChart.destroy();
     var drillPanel = document.getElementById('sla-drilldown');
     var areaCanvas = document.getElementById('sla-area-chart');
     if (areaCanvas) {{
       areaChart = new Chart(areaCanvas, {{
+        plugins: [notesPlugin],
         type: 'line',
         data: {{ labels: labels, datasets: [
           {{ label: 'SLA not met', data: breached, borderColor: breachColor, backgroundColor: hexToRgba(breachColor, 0.7), borderWidth: 1.5, pointRadius: 3, tension: 0, fill: true, stack: 'q', order: 1, yAxisID: 'y' }},
@@ -3725,7 +3843,8 @@ def _sla_charts_html(history: dict) -> str:
             tooltip: {{ mode: 'index', intersect: false, callbacks: {{ label: function(ctx) {{
               if (ctx.dataset.yAxisID === 'yPct') return 'Compliance: ' + ctx.parsed.y + '%';
               return ctx.dataset.label + ': ' + ctx.parsed.y;
-            }} }} }},
+            }}, footer: function(items) {{ return noteLine(items[0].dataIndex); }} }} }},
+            slaNotes: noteOpts,
             zoom: zoomOpts
           }},
           scales: {{
@@ -3765,6 +3884,7 @@ def _sla_charts_html(history: dict) -> str:
         if (wrap) wrap.style.display = '';
         if (agentEmpty) agentEmpty.style.display = 'none';
         agentChart = new Chart(agentCanvas, {{
+          plugins: [notesPlugin],
           type: 'bar',
           data: {{ labels: labels, datasets: activeAgents.map(function(name, i) {{
             var pub = slice(RAW.agents[name].public, n), internal = slice(RAW.agents[name].internal, n);
@@ -3785,7 +3905,8 @@ def _sla_charts_html(history: dict) -> str:
                 var pub = slice(RAW.agents[name].public, n)[i] || 0;
                 var internal = slice(RAW.agents[name].internal, n)[i] || 0;
                 return name + ': ' + ctx.parsed.y + ' (' + pub + ' pub / ' + internal + ' int)';
-              }} }} }},
+              }}, footer: function(items) {{ return noteLine(items[0].dataIndex); }} }} }},
+              slaNotes: noteOpts,
               zoom: zoomOpts
             }},
             scales: {{
@@ -3821,6 +3942,7 @@ def _sla_charts_html(history: dict) -> str:
       var pointFor = function(i) {{ return function(ctx) {{ var v = real[i][ctx.dataIndex]; return (v !== null && v !== undefined && v > yMax) ? 'triangle' : 'circle'; }}; }};
       var limitLabel = 'Limit (' + limit + ' h)';
       respChart = new Chart(respCanvas, {{
+        plugins: [notesPlugin],
         type: 'line',
         data: {{ labels: labels, datasets: [
           {{ label: 'Median', data: clamp(realMed), borderColor: okColor, backgroundColor: okColor, borderWidth: 2, pointRadius: 3, pointStyle: pointFor(0), tension: 0, spanGaps: true }},
@@ -3842,11 +3964,14 @@ def _sla_charts_html(history: dict) -> str:
                   return ctx.dataset.label + ': ' + v + ' h' + (v > yMax ? ' (above chart scale)' : '');
                 }},
                 footer: function(items) {{
-                  var p = respPct[items[0].dataIndex];
-                  return (p === null || p === undefined) ? '' : 'Answered within ' + limit + ' h: ' + p + '%';
+                  var i = items[0].dataIndex, p = respPct[i], lines = [];
+                  if (p !== null && p !== undefined) lines.push('Answered within ' + limit + ' h: ' + p + '%');
+                  if (noteLine(i)) lines.push(noteLine(i));
+                  return lines;
                 }}
               }}
             }},
+            slaNotes: noteOpts,
             zoom: zoomOpts
           }},
           scales: {{
@@ -3884,6 +4009,7 @@ def _sla_charts_html(history: dict) -> str:
         if (ruleWrap) ruleWrap.style.display = '';
         if (ruleEmpty) ruleEmpty.style.display = 'none';
         ruleChart = new Chart(ruleCanvas, {{
+          plugins: [notesPlugin],
           type: 'bar',
           data: {{ labels: labels, datasets: RULES.map(function(r, i) {{
             return {{ label: r.label, data: ruleSeries[i], backgroundColor: r.color, borderRadius: 2, stack: 'r' }};
@@ -3898,9 +4024,13 @@ def _sla_charts_html(history: dict) -> str:
                 footer: function(items) {{
                   var i = items[0].dataIndex;
                   var recorded = ruleSeries.some(function(s) {{ return s[i] !== null && s[i] !== undefined; }});
-                  return recorded ? '' : 'Rule breakdown not recorded for this day';
+                  var lines = [];
+                  if (!recorded) lines.push('Rule breakdown not recorded for this day');
+                  if (noteLine(i)) lines.push(noteLine(i));
+                  return lines;
                 }}
               }} }},
+              slaNotes: noteOpts,
               zoom: zoomOpts
             }},
             scales: {{
@@ -3995,7 +4125,7 @@ def _render_sla_page(sla_result: dict, history: dict, banner: str = "") -> bytes
     )
     as_of = history.get("as_of")
     history_note = (
-        f'<p class="sla-history-note" title="Only as fresh as the last git pull of the sla-report-slack repo on this machine. This page never writes to that file.">'
+        f'<p class="sla-history-note" title="Only as fresh as the last git pull of the sla-report-slack repo on this machine. This page never writes to that file. A &quot;note&quot; field on a day&#x27;s entry there is shown on the charts.">'
         f"Trend history as of {html.escape(as_of)}.</p>"
         if as_of
         else ""
@@ -4155,212 +4285,100 @@ def _render_solved_page(items: list, error: str = "", capped: bool = False, bann
     return _page(body, banner=banner, current_path="/solved", wide=True)
 
 
-_OVERVIEW_SECTION_CAP = 5
+_SLA_RULE_LABELS = {
+    "initial_response": "initial response",
+    "requester_wait": "requester wait",
+    "no_update": "no update",
+    "resolution_age": "resolution age",
+}
 
 
-def _render_overview_draft_task_row(item: dict) -> str:
-    """Compact, read-only row for /overview's "Tasks" section covering
-    a not-yet-promoted draft (see _common.draft_personal_tasks). Mirrors
-    the other overview rows' glanceable shape (the same .mini-ticket
-    layout _render_readonly_ticket_row uses for Discussion/Security) --
-    just enough (subject, category tag, added date) to tell whether it's
-    worth clicking through to /tasks -- rather than reusing
-    _render_draft_task_row's full Estimated-minutes/Assignee/Requester/
-    Allocation/Promote/Discard/reorder/Edit form, which would turn this
-    snapshot page into a second workflow. That's exactly what this page's
-    own docstring says it deliberately avoids for the other sections, and
-    a draft needs the same restraint: nothing here can promote or discard
-    it, only /tasks itself can. Its title links to that exact draft's row
-    on /tasks (see _task_title_link_html) -- "clicking through to /tasks"
-    used to mean landing at the top of a possibly-long list; now it
-    scrolls straight to the row in question."""
-    local_id = item.get("local_id")
-    raw_subject = item.get("subject", "")
-    subject = _task_title_link_html(html.escape(raw_subject), local_id)
-    category = item.get("category", "")
-    # Same "skip the chip when the subject already carries the category as
-    # its own leading tag" rule _render_draft_task_row/_render_open_task_row
-    # use, so a row here looks identical in style to its /tasks counterpart.
-    category_html = (
-        f'<span class="stat-chip task-category-chip">{html.escape(category)}</span>'
-        if category and not raw_subject.strip().startswith(category)
-        else ""
+def _ticket_opened_label(iso_ts: str) -> str:
+    """'Opened 3d ago' from a ticket's created_at ('' when unparseable)."""
+    if not iso_ts:
+        return ""
+    try:
+        then_local = datetime.fromisoformat(iso_ts.replace("Z", "+00:00")).astimezone().replace(tzinfo=None)
+    except Exception:
+        return ""
+    duration = _duration_bucket(then_local)
+    return "Opened just now" if duration == "just now" else f"Opened {duration} ago"
+
+
+def _person_ticket_extra_html(item: dict) -> str:
+    """Age and SLA state line under one /overview ticket row."""
+    parts = []
+    opened = _ticket_opened_label(item.get("created_at") or "")
+    if opened:
+        parts.append(html.escape(opened))
+    state = item.get("sla_status")
+    if state == "breached":
+        rules = ", ".join(_SLA_RULE_LABELS.get(k, k) for k, _ in item.get("breached_rules") or [])
+        parts.append(f'<span class="sla-chip sla-chip-breached">SLA not met{": " + html.escape(rules) if rules else ""}</span>')
+    elif state == "due_soon":
+        rules = ", ".join(_SLA_RULE_LABELS.get(k, k) for k, _ in item.get("due_soon_rules") or [])
+        parts.append(f'<span class="sla-chip sla-chip-due">Due soon{": " + html.escape(rules) if rules else ""}</span>')
+    return f'<div class="mini-ticket-meta">{" &middot; ".join(parts)}</div>' if parts else ""
+
+
+def _person_card_html(title: str, items: list, accent: str, is_me: bool = False, avatar: bool = True) -> str:
+    breached = sum(1 for i in items if i.get("sla_status") == "breached")
+    due_soon = sum(1 for i in items if i.get("sla_status") == "due_soon")
+    chips = ""
+    if is_me:
+        chips += '<span class="stat-chip">you</span>'
+    if breached:
+        chips += f'<span class="sla-chip sla-chip-breached">{breached} not met</span>'
+    if due_soon:
+        chips += f'<span class="sla-chip sla-chip-due">{due_soon} due soon</span>'
+    rows = "".join(
+        _render_readonly_ticket_row(i, return_to="/overview", extra_html=_person_ticket_extra_html(i), show_assignee=False)
+        for i in items
     )
-    added = html.escape(_task_added_label(item.get("created_at", "")))
-    return f"""<div class="mini-ticket">
-  <div class="mini-ticket-head">{category_html}{subject}</div>
-  <div class="mini-ticket-meta">Added {added} &middot; not yet in Zendesk</div>
-</div>"""
-
-
-def _render_overview_page(
-    open_tasks: list,
-    draft_tasks: list,
-    flagged_items: list,
-    security_items: list,
-    flagged_error: str = "",
-    security_error: str = "",
-    activity_summary: dict | None = None,
-    banner: str = "",
-) -> bytes:
-    """/overview page: a single glanceable "what needs me" snapshot
-    pulling together three otherwise-separate places a ticket or task can
-    be waiting on you -- Tasks (both not-yet-promoted drafts and
-    already-promoted open tasks), Discussion, and Security's own recent
-    activity -- since checking each of those pages individually just to
-    answer "is there anything I'm missing right now" was the exact
-    fragmented-view complaint this page exists to fix.
-
-    First replies used to be a fourth section here ("Needs a first
-    reply"), but that queue is now its own real page at /firstreply
-    (linked first in the top nav) rather than a tile duplicated onto
-    Overview too -- see the activity_summary paragraph below for the one
-    thing about first replies that's still surfaced here.
-
-    activity_summary (see _common.personal_activity_summary) adds a small
-    "Last week" personal-pace line above the sections -- replies posted
-    through this tool during the most recently completed business week
-    (Monday-Friday; the weekend doesn't count) and their average wait,
-    purely local and read-only. This is what replaced the old /sla page's
-    team-wide compliance dashboard: a much smaller, personal-only figure
-    rather than a second team metrics page, per the removal decision.
-    Optional (defaults to None/omitted) so existing callers/tests that
-    don't pass it still render a page, just without that line.
-
-    Deliberately NOT a second workflow layered on top of the other pages:
-    every section here is read-only or lightly actionable (open tasks keep
-    their Quick Solve/Mark done buttons via _render_open_task_row, drafts
-    are shown read-only via _render_overview_draft_task_row rather than
-    reusing _render_draft_task_row's full promote/discard/reorder/edit
-    form; Discussion and Security keep their Claim buttons via
-    _render_readonly_ticket_row -- reused as-is, not reimplemented), each
-    capped to _OVERVIEW_SECTION_CAP items, with a "See all" link through
-    to that section's own full page for anything past the cap or the real
-    per-ticket workflow the destination page itself has. This page
-    answers "where do I need to look first"; the destination pages answer
-    "now what."
-
-    All four inputs are the exact same cached/local reads those pages
-    already make on their own (see do_GET's "/overview" branch) --
-    nothing here triggers an extra live Zendesk scan beyond what visiting
-    each page individually would already do. flagged_error/security_error
-    surface the same "couldn't be served at all, not even from cache"
-    signal /flagged and /security show standalone, in place of that one
-    section rather than silently rendering it as an empty (and
-    misleadingly reassuring) "nothing here.\""""
-    # Drafts first, then open tasks -- same order the /tasks page itself
-    # uses for its two lists ("Not yet in Zendesk" above "Open"). Combined
-    # and capped together (not each capped separately then concatenated)
-    # so the cap reflects the section as a whole, matching how the other
-    # three sections cap their one underlying list.
-    tasks_combined = [("draft", i) for i in draft_tasks] + [("open", i) for i in open_tasks]
-    tasks_capped = tasks_combined[:_OVERVIEW_SECTION_CAP]
-    tasks_body = (
-        '<div class="mini-ticket-grid">'
-        + "".join(
-            _render_overview_draft_task_row(i) if kind == "draft" else _render_open_task_row(i)
-            for kind, i in tasks_capped
-        )
-        + "</div>"
-        if tasks_capped
-        else f'<p class="empty">{_topic_icon("tasks", "topic-icon-empty")}No tasks.</p>'
-    )
-    tasks_total = len(draft_tasks) + len(open_tasks)
-
-    flagged_capped = flagged_items[:_OVERVIEW_SECTION_CAP]
-    if flagged_error:
-        flagged_body = f'<p class="flag-alert">{html.escape(flagged_error)}</p>'
-    elif flagged_capped:
-        flagged_body = f'<div class="mini-ticket-grid">{"".join(_render_readonly_ticket_row(i, return_to="/overview") for i in flagged_capped)}</div>'
-    else:
-        flagged_body = f'<p class="empty">{_topic_icon("flagged", "topic-icon-empty")}No blocked or standup tickets.</p>'
-
-    security_capped = security_items[:_OVERVIEW_SECTION_CAP]
-    if security_error:
-        security_body = f'<p class="flag-alert">{html.escape(security_error)}</p>'
-    elif security_capped:
-        security_body = f'<div class="mini-ticket-grid">{"".join(_render_readonly_ticket_row(i, return_to="/overview") for i in security_capped)}</div>'
-    else:
-        security_body = f'<p class="empty">{_topic_icon("security", "topic-icon-empty")}No recent tickets.</p>'
-
-    def _last_week_range_label(summary: dict) -> str:
-        """'Aug 17-21' for a business week within one month, 'Aug 31 - Sep
-        4' when it spans a month boundary (or, rarer still, New Year's,
-        where %b already disambiguates the year change). Always a Mon-Fri
-        span (week_start/week_end -- see _common.personal_activity_summary)
-        since the weekend is deliberately excluded from what "last week"
-        counts here."""
-        start, end = summary["week_start"], summary["week_end"]
-        if start.month == end.month:
-            return f'{start.strftime("%b")} {start.day}–{end.day}'
-        return f'{start.strftime("%b")} {start.day} – {end.strftime("%b")} {end.day}'
-
-    def _activity_line_html(summary: dict | None) -> str:
-        """Small 'Last week' personal-pace line -- see
-        _common.personal_activity_summary's docstring for exactly what's
-        being measured (the most recently completed Monday-through-Friday
-        business week, not a rolling trailing window and not counting the
-        weekend) and why it's deliberately not framed as an SLA/compliance
-        figure. Renders nothing at all (not even an empty-state message)
-        when there's no summary or nothing posted in the window, since an
-        always-present-but-usually-zero line would just be noise on a
-        quiet week."""
-        if not summary or not summary.get("count"):
-            return ""
-        count = summary["count"]
-        reply_word = "reply" if count == 1 else "replies"
-        breakdown = f'{summary["public_count"]} public, {summary["internal_count"]} internal'
-        avg_hours = summary.get("avg_hours")
-        avg_html = (
-            f", averaging {avg_hours:.1f}h from first seen to reply" if avg_hours is not None else ""
-        )
-        range_label = _last_week_range_label(summary)
-        # data-count-target carries the real number for count_up_script
-        # (see _page()) to animate up from 0 on load -- the span's own
-        # text content is ALSO the real, correct count from the start, not
-        # "0", so nothing here depends on that script actually running:
-        # with JS disabled, or under prefers-reduced-motion (which the
-        # script itself checks before touching this), the number simply
-        # sits there fully resolved, exactly as it always did before this.
-        return (
-            f'<p class="meta overview-activity-line">Last week ({range_label}): '
-            f'<span class="stat-chip"><span class="count-up" data-count-target="{count}">{count}</span> {reply_word} posted</span> '
-            f"({breakdown}){avg_html}.</p>"
-        )
-
-    activity_html = _activity_line_html(activity_summary)
-
-    # topic_key drives a per-section left-edge accent stripe (see
-    # .overview-section-<key>'s CSS) -- purely a color-coded "which of the
-    # three sources is this" cue for a page that deliberately blends all
-    # three together (see this function's own docstring); Tasks/Discussion/
-    # Security recent each get their own hue, distinct from --accent (the
-    # general brand blue already used everywhere for buttons/links) and
-    # from --flag-alert-color (already means "warning/priority" elsewhere
-    # on this page), so this doesn't accidentally borrow meaning from
-    # either of those.
-    def _section(title: str, icon_html: str, count: int, body_html: str, see_all_href: str, topic_key: str) -> str:
-        return f"""<div class="security-panel overview-section overview-section-{topic_key}">
+    body = rows or f'<p class="empty">{_topic_icon("overview", "topic-icon-empty")}No open tickets.</p>'
+    avatar_html = _avatar_html(title) if avatar else ""
+    return f"""<div class="security-panel overview-section person-card person-card-{accent}">
   <div class="overview-section-head">
-    <h2 class="column-heading">{icon_html}{html.escape(title)} ({count})</h2>
-    <a class="overview-see-all" href="{see_all_href}">See all &rarr;</a>
+    <h2 class="column-heading">{avatar_html}{html.escape(title)} ({len(items)})</h2>
+    <span class="person-chips">{chips}</span>
   </div>
-  {body_html}
+  {body}
 </div>"""
 
-    sections_html = (
-        _section("Tasks", _topic_icon("tasks"), tasks_total, tasks_body, "/tasks", "tasks")
-        + _section("Discussion", _topic_icon("flagged"), len(flagged_items), flagged_body, "/flagged", "discussion")
-        + _section("Security recent", _topic_icon("security"), len(security_items), security_body, "/security", "security")
-    )
 
+def _render_overview_page(sla_result: dict, banner: str = "") -> bytes:
+    """/overview: who holds which open IT-Operations tickets -- one card per
+    person in _common.OVERVIEW_PEOPLE (you first), then Unassigned.
+
+    The tickets are exactly fetch_sla_tickets' result (new/open/pending/hold,
+    personal tasks excluded; the same 2-minute cache the /sla page and the
+    nav badge use), so this page adds no Zendesk scan of its own. Tickets held
+    by anyone outside the list are only counted, in a note. Each card keeps
+    the Claim button on tickets that aren't yours."""
+    if sla_result.get("error") and not sla_result.get("items"):
+        cards_html = f'<p class="flag-alert">{html.escape(sla_result["error"])}</p>'
+        others_note = ""
+    else:
+        groups = _common.group_tickets_by_person(sla_result.get("items") or [])
+        cards_html = '<div class="person-grid">' + "".join(
+            _person_card_html(c["name"], c["items"], "person", is_me=c["is_me"]) for c in groups["people"]
+        ) + _person_card_html("Unassigned", groups["unassigned"], "unassigned", avatar=False) + "</div>"
+        n = groups["others"]
+        others_note = (
+            f'<p class="sla-history-note person-others-note">{n} more open ticket{"s are" if n != 1 else " is"} assigned to someone else and not shown.</p>'
+            if n else ""
+        )
+    capped_note = (
+        '<p class="sla-history-note" title="Raise SLA_TICKET_SCAN_PAGES to scan deeper (see the README).">'
+        "Some tickets may be missing: the queue exceeds the scan limit.</p>"
+        if sla_result.get("capped") else ""
+    )
     body = f"""
 <h2>{_topic_icon("overview")}Overview</h2>
-<p class="meta">Everything that may need you, from Tasks, Discussion and Security. Each section shows the top {_OVERVIEW_SECTION_CAP}; follow its link for the full list.</p>
-{activity_html}
-<div class="overview-grid">
-{sections_html}
-</div>
+<p class="meta">Open IT-Operations tickets by assignee (new, open, pending and hold; personal tasks excluded), oldest first.</p>
+{capped_note}
+{cards_html}
+{others_note}
 """
     return _page(body, banner=banner, current_path="/overview", wide=True)
 
@@ -4615,14 +4633,27 @@ class _StandupCtx:
 
 
 def _standup_owner_options(view: dict) -> list:
+    """Owner filter choices: only the people in _common.STANDUP_PEOPLE (in
+    that order, spelled as the notes spell them), then the Group / Unassigned
+    buckets when the notes use them. Other names in the notes are not
+    offered, though their items still show under Everyone."""
     names = set()
     for t in (view.get("topics") or {}).values():
         names.update(o for o in t.get("owners") or [] if o)
     for a in (view.get("actions") or {}).values():
         if a.get("owner"):
             names.add(a["owner"])
+    spelled = {n.casefold(): n for n in names}
+    people = [spelled.get(p.casefold(), p) for p in _common.STANDUP_PEOPLE]
     special = [n for n in ("Group", "Unassigned") if n in names]
-    return sorted(n for n in names if n not in ("Group", "Unassigned")) + special
+    return people + special
+
+
+def _standup_clean_owner(view: dict, owner: str) -> str:
+    """An ?owner= value that isn't one of the filter choices is ignored (shows
+    Everyone), so a stale or hand-edited link can't filter by someone the
+    filter doesn't offer."""
+    return owner if owner in _standup_owner_options(view) else ""
 
 
 def _standup_filter_form(action: str, view: dict, q: str, owner: str, extra_select: str = "") -> str:
@@ -4975,6 +5006,7 @@ def _render_standup_workstreams_page(snapshot: dict, q: str = "", owner: str = "
     view = snapshot.get("view")
     if not view:
         return _standup_error_page(snapshot, banner)
+    owner = _standup_clean_owner(view, owner)
     qs = "&".join(f"{k}={quote(v)}" for k, v in (("q", q), ("owner", owner)) if v)
     ctx = _StandupCtx(view, "/standup/workstreams" + (f"?{qs}" if qs else ""))
     rank = {"blocked": 0, "active": 1, "decided": 2}
@@ -4999,6 +5031,7 @@ def _render_standup_closed_page(snapshot: dict, q: str = "", owner: str = "", ba
     view = snapshot.get("view")
     if not view:
         return _standup_error_page(snapshot, banner)
+    owner = _standup_clean_owner(view, owner)
     ctx = _StandupCtx(view, "/standup/closed")
     closed = [t for t in ctx.topics.values() if t.get("status") in ("done", "dropped") and _standup_topic_matches(t, q, owner)]
     closed.sort(key=lambda t: t.get("last_date") or "", reverse=True)
@@ -5015,6 +5048,7 @@ def _render_standup_actions_page(snapshot: dict, show: str = "open", owner: str 
     view = snapshot.get("view")
     if not view:
         return _standup_error_page(snapshot, banner)
+    owner = _standup_clean_owner(view, owner)
     show = show if show in ("open", "resolved", "all") else "open"
     qs = "&".join(f"{k}={quote(v)}" for k, v in (("show", show if show != "open" else ""), ("owner", owner), ("q", q)) if v)
     ctx = _StandupCtx(view, "/standup/actions" + (f"?{qs}" if qs else ""), tasks_by_action)
@@ -5034,7 +5068,8 @@ def _render_standup_actions_page(snapshot: dict, show: str = "open", owner: str 
 
 
 def _standup_people(view: dict) -> list:
-    """Real owner names in the notes (not the Group / Unassigned buckets)."""
+    """The people offered on By person: _common.STANDUP_PEOPLE (not the Group /
+    Unassigned buckets)."""
     return [n for n in _standup_owner_options(view) if n not in ("Group", "Unassigned")]
 
 
@@ -5043,7 +5078,7 @@ def _render_standup_people_page(snapshot: dict, person: str = "", q: str = "", b
     """/standup/people: one person's action items from the notes -- what the
     notes say they will do. Open items first (oldest first, with how long
     each has been open), then done / dropped ones newest first. Opens on
-    STANDUP_DEFAULT_PERSON; any owner in the notes can be picked."""
+    STANDUP_DEFAULT_PERSON; the picker offers only _common.STANDUP_PEOPLE."""
     view = snapshot.get("view")
     if not view:
         return _standup_error_page(snapshot, banner)
@@ -5415,18 +5450,13 @@ def _render_recently_completed_tasks() -> str:
 </details>"""
 
 
-def _render_tasks_page(draft_tasks: list, open_tasks: list, banner: str = "") -> bytes:
+def _render_tasks_page(draft_tasks: list, banner: str = "") -> bytes:
     """Native /tasks page: a quick-add form that saves a personal to-do as
     a LOCAL DRAFT ONLY (see _common.add_personal_task -- no Zendesk call
     happens just from typing a task in), a "Not yet in Zendesk" list of
     those drafts each with a "Make Zendesk Ticket from Task" button (see
     _common.promote_personal_task -- this is the one moment a real ticket
-    gets created) or a Discard option, and an "Open" list of tasks that
-    HAVE been promoted, each with a one-click "Quick Solve" (see
-    _common.quick_solve_personal_task -- posts the intake note/reply,
-    deferred here from ticket-creation time, then solves it) or "Mark
-    done" (see _common.complete_personal_task -- solves it with no
-    comments). Deliberately its own page rather than
+    gets created) or a Discard option. Deliberately its own page rather than
     a panel on the main queue -- these are your own tickets, not a
     customer's, so this keeps the main page focused purely on ticket
     triage the way /flagged and /security already keep their own
@@ -5438,17 +5468,13 @@ def _render_tasks_page(draft_tasks: list, open_tasks: list, banner: str = "") ->
     worth tracking as an actual ticket -- see the README for the full
     rationale.
 
-    Not yet in Zendesk / Open render as two side-by-side panels in the
-    same `.two-panel` grid /flagged already uses for its Blocked/Standup
-    split -- previously these were two full-width sections stacked one
-    above the other, so seeing an open task meant scrolling past every
-    draft first even though the two lists have nothing to do with each
-    other. Side by side, both are visible together without scrolling (on
-    a wide enough viewport); .two-panel collapses back to stacked panels
-    on narrow ones, same breakpoint as everywhere else it's used. The
-    #tasks-drafts/#tasks-open anchors (and the "Jump to" links in the meta
-    paragraph below) move onto each panel's own wrapper now instead of a
-    heading, so they still work the same on a stacked/narrow layout."""
+    Only the not-yet-promoted drafts are listed, full width in a two-column
+    grid (one column on a narrow screen). Tasks already promoted to Zendesk
+    tickets are no longer listed here at all -- the old "Open" panel, and its
+    Quick Solve / Mark done buttons, were removed on request; solve those in
+    Zendesk (reconcile_personal_tasks still moves a solved one into
+    "Recently completed"). Their POST routes and _render_open_task_row are
+    left in place, just not reachable from this page."""
     # .mini-ticket-grid (shared with /security's read-only list) lets these
     # compact rows flow into however many columns fit instead of one
     # full-width row each -- each row's own content (a title line plus one
@@ -5458,7 +5484,7 @@ def _render_tasks_page(draft_tasks: list, open_tasks: list, banner: str = "") ->
     # _render_security_column.
     last_idx = len(draft_tasks) - 1
     draft_html = (
-        '<div class="mini-ticket-grid">'
+        '<div class="mini-ticket-grid mini-ticket-grid-2">'
         + "\n".join(
             _render_draft_task_row(item, is_first=(i == 0), is_last=(i == last_idx))
             for i, item in enumerate(draft_tasks)
@@ -5467,18 +5493,12 @@ def _render_tasks_page(draft_tasks: list, open_tasks: list, banner: str = "") ->
         if draft_tasks
         else f'<p class="empty">{_topic_icon("tasks", "topic-icon-empty")}Nothing here yet.</p>'
     )
-    open_html = (
-        '<div class="mini-ticket-grid">' + "\n".join(_render_open_task_row(i) for i in open_tasks) + "</div>"
-        if open_tasks
-        else f'<p class="empty">{_topic_icon("tasks", "topic-icon-empty")}Nothing open.</p>'
-    )
-
     completed_html = _render_recently_completed_tasks()
 
     body = f"""
 <p><a href="/firstreply">&larr; back to pending tickets</a></p>
 <h2>{_topic_icon("tasks")}Tasks</h2>
-<p class="meta" title="Once promoted, each is a self-requested, self-assigned Zendesk ticket tagged &quot;{html.escape(_common.PERSONAL_TASK_TAG)}&quot;.">Personal to-do tickets, separate from the reply queue. Jump to: <a href="#tasks-drafts">Not yet in Zendesk ({len(draft_tasks)})</a> &middot; <a href="#tasks-open">Open ({len(open_tasks)})</a></p>
+<p class="meta" title="Once promoted, each is a self-requested, self-assigned Zendesk ticket tagged &quot;{html.escape(_common.PERSONAL_TASK_TAG)}&quot;.">Personal to-do tickets, separate from the reply queue.</p>
 <div class="ticket">
   <p class="ticket-eyebrow">New task</p>
   <form method="post" action="/tasks/new">
@@ -5495,10 +5515,7 @@ def _render_tasks_page(draft_tasks: list, open_tasks: list, banner: str = "") ->
     <div class="kbd-hint">Saved here only until you make a Zendesk ticket from it.</div>
   </form>
 </div>
-<div class="two-panel">
-  <div class="security-panel" id="tasks-drafts"><h2 class="column-heading">Not yet in Zendesk ({len(draft_tasks)})</h2>{draft_html}</div>
-  <div class="security-panel" id="tasks-open"><h2 class="column-heading">Open ({len(open_tasks)})</h2>{open_html}</div>
-</div>
+<div class="security-panel" id="tasks-drafts"><h2 class="column-heading">Not yet in Zendesk ({len(draft_tasks)})</h2>{draft_html}</div>
 {completed_html}
 """
     return _page(body, banner=banner, current_path="/tasks", wide=True)
@@ -5678,14 +5695,13 @@ class Handler(BaseHTTPRequestHandler):
             # solved/closed directly in Zendesk rather than via this page's
             # own "Mark done" button) -- skipped when Zendesk isn't
             # authenticated right now, same fail-open posture as the rest
-            # of this page, since open_personal_tasks() below is a pure
+            # of this page, since draft_personal_tasks() below is a pure
             # local read either way.
             client = _common.make_client()
             if client.client is not None:
                 _common.reconcile_personal_tasks(client, log_fn=_log)
             draft_tasks = _common.draft_personal_tasks()
-            open_tasks = _common.open_personal_tasks()
-            self._send_html(_render_tasks_page(draft_tasks, open_tasks, banner=banner))
+            self._send_html(_render_tasks_page(draft_tasks, banner=banner))
             return
 
         if parsed.path == "/flagged":
@@ -5735,32 +5751,12 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/overview":
-            # Every one of these three is the exact same cached/local read
-            # its own dedicated page already makes -- see
-            # _render_overview_page's docstring for why that's true even
-            # though this route calls all three at once (nothing here adds
-            # a new Zendesk scan beyond what visiting each page
-            # individually would already trigger). First replies used to
-            # be a fourth read here (_common.pending_items()) but that
-            # queue is now /firstreply's own page, not a tile duplicated
-            # onto Overview too.
+            # Same cached scan as /sla and the SLA nav badge
+            # (_common.fetch_sla_tickets), grouped by assignee in
+            # _render_overview_page -- no extra Zendesk scan.
             client = _common.make_client()
-            open_tasks = _common.open_personal_tasks()
-            draft_tasks = _common.draft_personal_tasks()
-            flagged = _common.fetch_flagged_tickets(client, log_fn=_log)
-            security = _common.fetch_recent_tickets(
-                client, _common.IT_SECURITY_GROUP_ID, limit=_common.IT_SECURITY_COLUMN_LIMIT, log_fn=_log
-            )
-            # Purely local (pending_drafts.json only, see
-            # _common.personal_activity_summary's docstring) -- costs
-            # nothing extra beyond the reads above, no Zendesk call.
-            activity_summary = _common.personal_activity_summary()
-            self._send_html(_render_overview_page(
-                open_tasks, draft_tasks, flagged["items"], security["items"],
-                flagged_error=flagged["error"] or "", security_error=security["error"] or "",
-                activity_summary=activity_summary,
-                banner=banner,
-            ))
+            sla_result = _common.fetch_sla_tickets(client, log_fn=_log)
+            self._send_html(_render_overview_page(sla_result, banner=banner))
             return
 
         if parsed.path == "/standup" or parsed.path.startswith("/standup/"):
