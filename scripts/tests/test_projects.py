@@ -43,7 +43,7 @@ def _records():
 
 
 class FakeAirtable:
-    """Just enough of the REST API: list (with offset paging), get, patch."""
+    """Just enough of the REST API: list (with offset paging), get, patch, create, delete."""
 
     def __init__(self, records=None, page_size=100):
         self.records = records if records is not None else _records()
@@ -51,6 +51,7 @@ class FakeAirtable:
         self.fail = None
         self.page_size = page_size
         self.drop_writes = False      # simulate Airtable accepting a PATCH but returning stale values
+        self.drop_creates = False     # simulate a POST whose reply holds no record
 
     def __call__(self, method, path, params=None, body=None):
         self.calls.append((method, path, params, body))
@@ -66,6 +67,21 @@ class FakeAirtable:
             if start + self.page_size < len(ids):
                 data["offset"] = ids[start + self.page_size]
             return data
+        if method == "POST" and len(parts) == 2:
+            assert body["typecast"] is False
+            self.created = getattr(self, "created", 0) + 1
+            rid = "rec" + f"{self.created:014d}".replace("0", "N")[:14]
+            fields = {}
+            for name, value in body["fields"].items():
+                if name == "Assigned to":
+                    who = {"alex@example.com": "Alex Example", "sam@example.com": "Sam Example"}[value["email"]]
+                    fields[name] = {"id": "usrX", "email": value["email"], "name": who}
+                else:
+                    fields[name] = value
+            self.records[rid] = {"id": rid, "createdTime": "2026-01-01T00:00:00.000Z", "fields": fields}
+            return {} if self.drop_creates else self.records[rid]
+        if method == "DELETE" and len(parts) == 3:
+            return {"id": parts[2], "deleted": True} if self.records.pop(parts[2], None) else {}
         rec = self.records[parts[2]]
         if method == "GET":
             return rec
@@ -84,6 +100,9 @@ class FakeAirtable:
 
     def patches(self):
         return [c for c in self.calls if c[0] == "PATCH"]
+
+    def posts(self):
+        return [c for c in self.calls if c[0] == "POST"]
 
 
 @pytest.fixture
@@ -804,3 +823,271 @@ def test_panel_script_is_valid_javascript():
     src = review_server._PROJECT_PANEL_SCRIPT.removeprefix("<script>").removesuffix("</script>")
     result = subprocess.run([node, "--check", "-"], input=src, text=True, capture_output=True)
     assert result.returncode == 0, result.stderr
+
+
+# --- creating a project ----------------------------------------------------------------
+
+def _new_form(**values):
+    base = {"name": "Vendor onboarding", "status": "INTAKE", "assignee": "", "requester": "",
+            "urgency": "", "end": "", "description": ""}
+    base.update(values)
+    return {k: [v] for k, v in base.items()}
+
+
+def test_plan_create_sends_only_filled_allowlisted_fields(airtable):
+    form = _new_form(requester="Dana Example", urgency="2 - Soft Deadline", assignee="Sam Example",
+                     end="2026-12-01", description="Line one\nLine two")
+    form["blockers"] = ["forged"]                      # not a create field: ignored
+    form["Project name"] = ["forged"]                  # an Airtable name, never a slug: ignored
+    plan = _projects.plan_create(form)
+    assert plan["errors"] == []
+    assert plan["fields"] == {"Project name": "Vendor onboarding", "Status": "INTAKE", "Requester": "Dana Example",
+                              "Urgency Rating": "2 - Soft Deadline", "Assigned to": {"email": "sam@example.com"},
+                              "End date": "2026-12-01", "Description": "Line one\nLine two"}
+
+
+def test_plan_create_leaves_empty_fields_out(airtable):
+    plan = _projects.plan_create(_new_form(status=""))
+    assert plan["fields"] == {"Project name": "Vendor onboarding"}
+
+
+@pytest.mark.parametrize("changes,fragment", [
+    ({"name": ""}, "cannot be empty"),
+    ({"name": "a\nb"}, "single line"),
+    ({"name": "x" * (_projects.LINE_LIMIT + 1)}, "longer than"),
+    ({"status": "DONE"}, "is not one of"),
+    ({"urgency": "9 - Whenever"}, "Urgency Rating options"),
+    ({"assignee": "Mallory Example"}, "not in the list"),
+    ({"end": "01/12/2026"}, "not a date"),
+    ({"description": "x" * (_projects.TEXT_LIMIT + 1)}, "longer than"),
+])
+def test_plan_create_rejects_bad_values(airtable, changes, fragment):
+    plan = _projects.plan_create(_new_form(**changes))
+    assert any(fragment in e for e in plan["errors"])
+
+
+def test_plan_create_refuses_a_duplicate_name_ignoring_case(airtable):
+    plan = _projects.plan_create(_new_form(name="  laptop REFRESH "), existing_names=["Laptop refresh"])
+    assert any("already exists" in e for e in plan["errors"])
+
+
+def test_commit_create_posts_reads_back_and_logs(airtable):
+    _projects.fetch_projects()
+    plan = _projects.plan_create(_new_form(requester="Dana Example", urgency="1 - No Deadline"))
+    result = _projects.commit_create(plan)
+    assert result["ok"] and "(confirmed)" in result["message"] and _projects.valid_record_id(result["record_id"])
+    method, path, _params, body = airtable.posts()[0]
+    assert path == "appTESTBASE/tblTESTTABLE"
+    assert body == {"fields": {"Project name": "Vendor onboarding", "Status": "INTAKE", "Requester": "Dana Example",
+                               "Urgency Rating": "1 - No Deadline"}, "typecast": False}
+    assert _projects.fetch_projects()["items"][0]["id"] == result["record_id"]            # shown without a reload
+    log = [json.loads(line) for line in (_common.OUTPUT_DIR / "projects_edits.jsonl").read_text().splitlines()]
+    assert log[-1]["kind"] == "create" and log[-1]["record"] == result["record_id"]
+    assert "pat-test-token" not in json.dumps(log)
+    assert "not in the local log" in _projects.undo_edit(log[-1]["id"])                   # a create cannot be undone here
+    assert not [c for c in airtable.calls if c[0] == "DELETE"]
+
+
+def test_commit_create_failure_logs_nothing(airtable):
+    airtable.fail = "Airtable returned 422 (INVALID_VALUE_FOR_COLUMN)"
+    result = _projects.commit_create(_projects.plan_create(_new_form()))
+    assert result["ok"] is False and "Nothing was created" in result["message"] and result["record_id"] == ""
+    assert not (_common.OUTPUT_DIR / "projects_edits.jsonl").exists()
+
+
+def test_commit_create_without_a_record_in_the_reply_is_not_ok(airtable):
+    airtable.drop_creates = True
+    result = _projects.commit_create(_projects.plan_create(_new_form()))
+    assert result["ok"] is False and "held no new record" in result["message"]
+
+
+def test_commit_create_refuses_a_plan_with_errors(airtable):
+    result = _projects.commit_create(_projects.plan_create(_new_form(name="")))
+    assert result["ok"] is False and airtable.posts() == []
+
+
+def test_new_project_page_and_link(airtable, server):
+    status, _loc, body = _http(server, "GET", "/projects/new")
+    assert status == 200 and 'action="/projects/new"' in body and 'name="name"' in body and 'name="description"' in body
+    assert '<option value="INTAKE" selected>' in body
+    _s, _l, board = _http(server, "GET", "/projects")
+    assert 'href="/projects/new"' in board and "+ New project" in board
+
+
+def test_new_project_review_step_sends_nothing(airtable, server):
+    status, _loc, body = _http(server, "POST", "/projects/new", _new_form(name="Review <me>"))
+    assert status == 200 and "Create in Airtable?" in body and "Review &lt;me&gt;" in body and "Review <me>" not in body
+    assert 'name="confirm" value="yes"' in body
+    assert airtable.posts() == []
+
+
+def test_new_project_confirm_creates_once_and_opens_it(airtable, server):
+    form = _new_form()
+    form["confirm"] = ["yes"]
+    status, loc, _ = _http(server, "POST", "/projects/new", form)
+    assert status == 303 and loc.startswith("/projects?open=rec") and "msg=Created" in loc
+    assert len(airtable.posts()) == 1
+    status, _loc, body = _http(server, "POST", "/projects/new", form)                    # double submit
+    assert status == 400 and "already exists" in body and len(airtable.posts()) == 1
+
+
+def test_new_project_errors_redisplay_the_form_with_the_values(airtable, server):
+    status, _loc, body = _http(server, "POST", "/projects/new", _new_form(requester="Dana", urgency="bogus"))
+    assert status == 400 and "Urgency Rating options" in body and 'value="Dana"' in body
+    assert airtable.posts() == []
+
+
+def test_new_project_refuses_a_foreign_origin(airtable, server):
+    form = _new_form()
+    form["confirm"] = ["yes"]
+    status, _loc, _ = _http(server, "POST", "/projects/new", form, headers={"Origin": "https://evil.example"})
+    assert status == 403 and airtable.posts() == []
+
+
+def test_new_project_when_unconfigured_redirects(server, monkeypatch):
+    fake = FakeAirtable()
+    monkeypatch.setattr(_projects, "_request", fake)
+    assert _http(server, "GET", "/projects/new")[0] == 303
+    assert _http(server, "POST", "/projects/new", _new_form())[0] == 303 and fake.calls == []
+
+
+# --- snapshots before saves ----------------------------------------------------------------
+
+def _snapshot_files():
+    return sorted((_common.OUTPUT_DIR / "projects_snapshots").glob("projects-*.json")) \
+        if (_common.OUTPUT_DIR / "projects_snapshots").exists() else []
+
+
+def test_first_save_takes_a_full_snapshot_before_writing(airtable):
+    airtable.records[REC1]["fields"]["Unread Extra Field"] = "kept in the backup"
+    _commit(airtable, REC1, notes="Changed")
+    kinds = [c[0] for c in airtable.calls]
+    assert kinds.index("GET") < kinds.index("PATCH")                        # snapshot read comes first
+    files = _snapshot_files()
+    assert len(files) == 1
+    data = json.loads(files[0].read_text())
+    assert len(data["records"]) == 3 and data["table"] == "tblTESTTABLE"
+    assert data["records"][0]["fields"]["Unread Extra Field"] == "kept in the backup"   # every field, not just the page's
+    assert "pat-test-token" not in files[0].read_text()
+    assert oct(files[0].stat().st_mode & 0o777) == "0o600"
+
+
+def test_second_save_inside_the_interval_reuses_the_snapshot(airtable):
+    _commit(airtable, REC1, notes="One")
+    _commit(airtable, REC1, notes="Two")
+    assert len(_snapshot_files()) == 1
+
+
+def test_an_old_snapshot_is_replaced_by_a_new_one(airtable):
+    import os
+    import time
+    _commit(airtable, REC1, notes="One")
+    old = _snapshot_files()[0]
+    stale = time.time() - _projects.SNAPSHOT_MIN_INTERVAL_SECONDS - 60
+    os.utime(old, (stale, stale))
+    old.rename(old.with_name("projects-20200101-000000.json"))
+    _commit(airtable, REC1, notes="Two")
+    assert len(_snapshot_files()) == 2
+
+
+def test_only_the_newest_snapshots_are_kept(airtable):
+    import os
+    folder = _common.OUTPUT_DIR / "projects_snapshots"
+    folder.mkdir(parents=True)
+    for i in range(_projects.SNAPSHOT_KEEP + 3):
+        f = folder / f"projects-2020{i:04d}-000000.json"
+        f.write_text("{}")
+        os.utime(f, (1_600_000_000 + i, 1_600_000_000 + i))
+    result = _projects.take_snapshot(force=True)
+    assert result["ok"] and result["taken"]
+    assert len(_snapshot_files()) == _projects.SNAPSHOT_KEEP
+    assert result["path"] in [f.name for f in _snapshot_files()]
+
+
+def test_a_failed_snapshot_never_blocks_the_save(airtable, monkeypatch):
+    monkeypatch.setattr(_projects, "take_snapshot", lambda force=False: {"ok": False, "error": "disk full"})
+    result = _commit(airtable, REC1, notes="Changed")
+    assert result["ok"] and "Snapshot skipped: disk full" in result["message"] and len(airtable.patches()) == 1
+
+
+def test_snapshot_when_unconfigured(monkeypatch):
+    monkeypatch.delenv("AIRTABLE_TOKEN", raising=False)
+    result = _projects.take_snapshot()
+    assert result["ok"] is False and "not set up" in result["error"]
+
+
+# --- the real-write smoke test --------------------------------------------------------------
+
+def test_smoke_test_creates_edits_and_deletes_only_its_own_record(airtable):
+    before = set(airtable.records)
+    result = _projects.smoke_test()
+    assert result["ok"], result
+    assert [c[0] for c in airtable.calls if c[0] != "GET"] == ["POST", "PATCH", "DELETE"]
+    post = airtable.posts()[0]
+    assert post[3]["typecast"] is False and list(post[3]["fields"]) == ["Project name"]
+    assert post[3]["fields"]["Project name"].startswith(_projects.SMOKE_PREFIX)
+    assert airtable.patches()[0][3]["fields"] == {"Sprint Notes": "smoke test edit"}
+    assert set(airtable.records) == before                                  # nothing left, nothing else touched
+    deleted = [c[1].split("/")[-1] for c in airtable.calls if c[0] == "DELETE"]
+    assert len(deleted) == 1 and deleted[0] not in before
+    log = [json.loads(line) for line in (_common.OUTPUT_DIR / "projects_edits.jsonl").read_text().splitlines()]
+    assert log[-1]["kind"] == "smoke" and log[-1]["ok"] is True
+    assert "pat-test-token" not in json.dumps(log)
+
+
+def test_smoke_test_create_failure_leaves_nothing(airtable):
+    airtable.fail = "Airtable returned 403 (INVALID_PERMISSIONS)"
+    result = _projects.smoke_test()
+    assert result["ok"] is False and "Nothing was left" in result["message"]
+    assert result["steps"][0][1] is False and "403" in result["steps"][0][2]
+
+
+def test_smoke_test_reports_an_edit_the_reply_did_not_hold(airtable):
+    airtable.drop_writes = True
+    result = _projects.smoke_test()
+    assert result["ok"] is False and result["steps"][1][1] is False
+    assert result["steps"][2][1] is True and "Nothing was left" in result["message"]    # still cleaned up
+
+
+def test_smoke_test_does_not_delete_a_record_that_lost_its_name(airtable):
+    class Renaming(FakeAirtable):
+        def __call__(self, method, path, params=None, body=None):
+            out = super().__call__(method, path, params, body)
+            if method == "PATCH":
+                self.records[path.split("/")[-1]]["fields"]["Project name"] = "Somebody's real project"
+            return out
+    fake = Renaming(airtable.records)
+    _projects._request = fake
+    result = _projects.smoke_test()
+    assert result["ok"] is False and "left alone" in result["steps"][2][2]
+    assert not [c for c in fake.calls if c[0] == "DELETE"]
+    assert result["record_id"] in result["message"]
+
+
+def test_smoke_test_delete_failure_names_the_record(airtable):
+    class NoDelete(FakeAirtable):
+        def __call__(self, method, path, params=None, body=None):
+            if method == "DELETE":
+                raise _projects.AirtableError("Airtable returned 403 (INVALID_PERMISSIONS)")
+            return super().__call__(method, path, params, body)
+    fake = NoDelete(airtable.records)
+    _projects._request = fake
+    result = _projects.smoke_test()
+    assert result["ok"] is False and result["record_id"] and result["record_id"] in result["message"]
+    assert "delete it in Airtable" in result["message"]
+
+
+def test_smoke_test_refuses_to_run_twice_at_once(airtable):
+    assert _projects.begin_action("smoke-test")
+    try:
+        result = _projects.smoke_test()
+    finally:
+        _projects.end_action("smoke-test")
+    assert result["ok"] is False and "already running" in result["message"] and airtable.calls == []
+
+
+def test_check_connection(airtable):
+    assert _projects.check_connection()["ok"] is True
+    airtable.fail = "Airtable returned 401 (AUTHENTICATION_REQUIRED)"
+    out = _projects.check_connection()
+    assert out["ok"] is False and "401" in out["message"] and "pat-test-token" not in out["message"]

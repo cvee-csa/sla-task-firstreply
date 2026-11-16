@@ -1,5 +1,5 @@
 """The Airtable "Projects" table: a read for the /projects page, and a small
-allowlisted write-back (name, description, Status, assignee, requester, urgency,
+allowlisted write-back and create (name, description, Status, assignee, requester, urgency,
 blockers, notes, dates).
 
 Everything here talks to Airtable's REST API with a personal access token that
@@ -34,6 +34,10 @@ REQUEST_TIMEOUT_SECONDS = 20
 TEXT_LIMIT = 10000
 LINE_LIMIT = 255          # one-line text fields (project name, requester)
 
+SNAPSHOT_MIN_INTERVAL_SECONDS = 6 * 3600     # one snapshot per "save session", not one per click
+SNAPSHOT_KEEP = 30                           # newest files kept in scripts/output/projects_snapshots/
+SMOKE_PREFIX = "[Smoke test]"
+
 STATUS_ORDER = ("INTAKE", "SCOPING", "ACTIVE", "BLOCKED", "COMPLETE", "CANCELLED")
 
 # The options of the single-select "Urgency Rating" field, exactly as Airtable spells them (writes
@@ -64,6 +68,11 @@ FIELD_SLUGS = {
     "notes": ("Sprint Notes", "text", "Sprint notes"),
     "description": ("Description", "text", "Description"),
 }
+
+# The fields the "New project" form can set (a subset of FIELD_SLUGS; Start and Completed dates, Blockers
+# and Sprint notes are for a project that has begun, so they stay edit-only).
+CREATE_SLUGS = ("name", "status", "assignee", "requester", "urgency", "end", "description")
+DEFAULT_NEW_STATUS = "INTAKE"
 
 _RECORD_ID_RE = re.compile(r"^rec[A-Za-z0-9]{14}$")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -264,6 +273,64 @@ def fetch_record(record_id: str) -> dict:
     return normalize(data, cfg)
 
 
+# --- local snapshots (a backup beyond what Undo covers) ------------------------------------
+
+def snapshot_dir():
+    return _common.OUTPUT_DIR / "projects_snapshots"
+
+
+def list_snapshots() -> list:
+    """[(path, mtime)] newest first."""
+    try:
+        files = [p for p in snapshot_dir().glob("projects-*.json") if p.is_file()]
+    except OSError:
+        return []
+    return sorted(((p, p.stat().st_mtime) for p in files), key=lambda t: t[1], reverse=True)
+
+
+def take_snapshot(force: bool = False) -> dict:
+    """Saves every record of the table, all fields (the page itself reads only some), to
+    scripts/output/projects_snapshots/projects-<timestamp>.json, unless one is younger than
+    SNAPSHOT_MIN_INTERVAL_SECONDS. Never raises. Returns {"ok", "taken", "path", "records", "error"}."""
+    cfg = config()
+    if not cfg["configured"]:
+        return {"ok": False, "taken": False, "path": "", "records": 0, "error": "Airtable is not set up."}
+    existing = list_snapshots()
+    if existing and not force and time.time() - existing[0][1] < SNAPSHOT_MIN_INTERVAL_SECONDS:
+        return {"ok": True, "taken": False, "path": existing[0][0].name, "records": 0, "error": ""}
+    records, offset = [], ""
+    try:
+        for _page in range(MAX_PAGES):
+            params = [("pageSize", "100")] + ([("offset", offset)] if offset else [])
+            data = _request("GET", _table_path(cfg), params=params)
+            records += data.get("records", [])
+            offset = data.get("offset") or ""
+            if not offset:
+                break
+        name = f"projects-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
+        folder = snapshot_dir()
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / name
+        path.write_text(json.dumps({"taken_at": datetime.now().isoformat(timespec="seconds"),
+                                    "base": cfg["base"], "table": cfg["table"], "records": records},
+                                   ensure_ascii=False), encoding="utf-8")
+        _common._harden_file_permissions(path)
+        for old, _mtime in list_snapshots()[SNAPSHOT_KEEP:]:
+            try:
+                old.unlink()
+            except OSError:
+                pass
+    except (AirtableError, OSError) as exc:
+        return {"ok": False, "taken": False, "path": "", "records": 0, "error": str(exc)}
+    return {"ok": True, "taken": True, "path": name, "records": len(records), "error": ""}
+
+
+def _snapshot_note() -> str:
+    """Runs before a write; a failed snapshot never blocks the save, but is reported in its message."""
+    result = take_snapshot()
+    return "" if result["ok"] else f" (Snapshot skipped: {result['error']})"
+
+
 # --- editing ---------------------------------------------------------------------
 
 def current_values(item: dict) -> dict:
@@ -301,6 +368,33 @@ def _same(slug: str, a: str, b: str) -> bool:
     return a.casefold() == b.casefold() if slug == "assignee" else a == b
 
 
+def _check_value(slug: str, kind: str, label: str, new: str, people: dict, allow_empty_status: bool = False) -> str:
+    """The problem with a proposed value for one allowlisted field, or "" when it is acceptable."""
+    if kind == "select":
+        if new not in STATUS_ORDER and not (allow_empty_status and not new):
+            return f"{label}: \"{new}\" is not one of {', '.join(STATUS_ORDER)}."
+    elif kind == "choice":
+        if new and new not in URGENCY_OPTIONS:
+            return f"{label}: \"{new}\" is not one of the Urgency Rating options."
+    elif kind == "line":
+        if "\n" in new:
+            return f"{label}: must be a single line."
+        if slug == "name" and not new:
+            return f"{label}: cannot be empty."
+        if len(new) > LINE_LIMIT:
+            return f"{label}: longer than {LINE_LIMIT} characters."
+    elif kind == "collaborator":
+        if new and new not in people:
+            return f"{label}: \"{new}\" is not in the list of people who can be assigned."
+    elif kind == "date":
+        if new and not _valid_date(new):
+            return f"{label}: \"{new}\" is not a date (use YYYY-MM-DD)."
+    else:
+        if len(new) > TEXT_LIMIT:
+            return f"{label}: longer than {TEXT_LIMIT} characters."
+    return ""
+
+
 def plan_edit(form: dict, item: dict, today: str | None = None) -> dict:
     """Works out what a submitted form would change on `item` (a freshly read record).
 
@@ -325,36 +419,10 @@ def plan_edit(form: dict, item: dict, today: str | None = None) -> dict:
         shown = _clean_text(first(f"orig_{slug}") or "")
         if _same(slug, new, shown):
             continue
-        if kind == "select":
-            if new not in STATUS_ORDER:
-                errors.append(f"{label}: \"{new}\" is not one of {', '.join(STATUS_ORDER)}.")
-                continue
-        elif kind == "choice":
-            if new and new not in URGENCY_OPTIONS:
-                errors.append(f"{label}: \"{new}\" is not one of the Urgency Rating options.")
-                continue
-        elif kind == "line":
-            if "\n" in new:
-                errors.append(f"{label}: must be a single line.")
-                continue
-            if slug == "name" and not new:
-                errors.append(f"{label}: cannot be empty.")
-                continue
-            if len(new) > LINE_LIMIT:
-                errors.append(f"{label}: longer than {LINE_LIMIT} characters.")
-                continue
-        elif kind == "collaborator":
-            if new and new not in people:
-                errors.append(f"{label}: \"{new}\" is not in the list of people who can be assigned.")
-                continue
-        elif kind == "date":
-            if new and not _valid_date(new):
-                errors.append(f"{label}: \"{new}\" is not a date (use YYYY-MM-DD).")
-                continue
-        else:
-            if len(new) > TEXT_LIMIT:
-                errors.append(f"{label}: longer than {TEXT_LIMIT} characters.")
-                continue
+        problem = _check_value(slug, kind, label, new, people)
+        if problem:
+            errors.append(problem)
+            continue
         if not _same(slug, now[slug], shown):
             conflicts.append({"slug": slug, "label": label, "yours": new, "shown": shown, "now": now[slug]})
             continue
@@ -434,6 +502,7 @@ def commit_edit(record_id: str, plan: dict) -> dict:
     if not plan["changes"]:
         return {"ok": False, "message": "Nothing changed, so nothing was sent to Airtable.", "undo_id": ""}
     cfg = config()
+    snap_note = _snapshot_note()
     try:
         data = _request("PATCH", f"{_table_path(cfg)}/{urllib.parse.quote(record_id)}",
                         body={"fields": plan["payload"], "typecast": False})
@@ -459,7 +528,7 @@ def commit_edit(record_id: str, plan: dict) -> dict:
     if problems:
         return {"ok": True, "undo_id": undo_id,
                 "message": f"Sent to Airtable{title}: {summary}. Airtable's reply did not match for {', '.join(problems)}; check the record."}
-    return {"ok": True, "undo_id": undo_id, "message": f"Saved to Airtable{title} (confirmed): {summary}."}
+    return {"ok": True, "undo_id": undo_id, "message": f"Saved to Airtable{title} (confirmed): {summary}.{snap_note}"}
 
 
 def undo_edit(undo_id: str) -> str:
@@ -498,6 +567,164 @@ def undo_edit(undo_id: str) -> str:
         return "Undone: " + "; ".join(f"{c['label']} back to {c['before'] or '(empty)'}" for c in edit["changes"]) + "."
     finally:
         end_action(record_id)
+
+
+# --- creating a project ----------------------------------------------------------------
+
+def plan_create(form: dict, existing_names=()) -> dict:
+    """Validates a submitted "New project" form. Only CREATE_SLUGS are read; an unchecked-empty field
+    is simply not sent. Returns {"values", "fields", "errors"}: values maps slug -> text for the
+    review page, fields maps Airtable field name -> API value for the POST."""
+    people = assignees()
+    values, fields, errors = {}, {}, []
+    for slug in CREATE_SLUGS:
+        field, kind, label = FIELD_SLUGS[slug]
+        vals = form.get(slug)
+        new = _clean_text(vals[0]) if vals else ""
+        problem = _check_value(slug, kind, label, new, people, allow_empty_status=True)
+        if problem:
+            errors.append(problem)
+            continue
+        values[slug] = new
+        if new:
+            fields[field] = _api_value(slug, new, people.get(new, ""))
+    name = values.get("name", "")
+    if name and name.casefold() in {n.strip().casefold() for n in existing_names}:
+        errors.append(f"A project named \"{name}\" already exists. Pick another name, or open that project and edit it.")
+    return {"values": values, "fields": fields, "errors": errors}
+
+
+def commit_create(plan: dict) -> dict:
+    """POSTs one new record, reads the reply back, logs it. Returns {"ok", "message", "record_id"}.
+    Nothing is deleted anywhere: a create has no Undo, and the log entry records the new record's id."""
+    if plan["errors"] or not plan["fields"].get(FIELD_SLUGS["name"][0]):
+        return {"ok": False, "message": "Nothing was created: the form has problems.", "record_id": ""}
+    cfg = config()
+    snap_note = _snapshot_note()
+    try:
+        data = _request("POST", _table_path(cfg), body={"fields": plan["fields"], "typecast": False})
+    except AirtableError as exc:
+        return {"ok": False, "message": f"Nothing was created: {exc}.", "record_id": ""}
+    record_id = str(data.get("id") or "")
+    if not _RECORD_ID_RE.match(record_id) or data.get("fields") is None:
+        return {"ok": False, "record_id": "",
+                "message": "Airtable's reply held no new record. Check the table in Airtable before trying again."}
+    saved = normalize(data, cfg)
+    _cache_add(saved)
+    now = current_values(saved)
+    problems = [FIELD_SLUGS[s][2] for s, text in plan["values"].items() if text and not _same(s, now[s], text)]
+    _log_append({"id": secrets.token_hex(6), "kind": "create", "at": datetime.now().isoformat(timespec="seconds"),
+                 "record": record_id, "name": saved["name"],
+                 "values": {s: t for s, t in plan["values"].items() if t}})
+    if problems:
+        return {"ok": True, "record_id": record_id,
+                "message": f"Created \"{saved['name']}\". Airtable's reply did not match for {', '.join(problems)}; check the record."}
+    return {"ok": True, "record_id": record_id, "message": f"Created \"{saved['name']}\" in Airtable (confirmed). Remove it in Airtable if it was a mistake.{snap_note}"}
+
+
+def _cache_add(item: dict) -> None:
+    with _cache_lock:
+        cached = _cache["result"]
+        if cached is None:
+            return
+        _cache["result"] = {**cached, "items": [item] + [i for i in cached["items"] if i["id"] != item["id"]]}
+
+
+# --- real-write smoke test ----------------------------------------------------------------
+
+def smoke_test() -> dict:
+    """Creates a record named "[Smoke test] <time>", edits its Sprint Notes, checks both replies, then
+    deletes it. Only the record this run created is ever deleted, and only after its name is re-read
+    and still starts with SMOKE_PREFIX. Returns {"ok", "steps": [(label, ok, detail)], "record_id", "message"}.
+    Meant to be started by a person; nothing calls it automatically."""
+    cfg = config()
+    steps, record_id = [], ""
+    if not cfg["configured"]:
+        return {"ok": False, "steps": [], "record_id": "", "message": "Airtable is not set up."}
+    if not begin_action("smoke-test"):
+        return {"ok": False, "steps": [], "record_id": "", "message": "A smoke test is already running."}
+    name_field, notes_field = FIELD_SLUGS["name"][0], FIELD_SLUGS["notes"][0]
+
+    def step(label, ok, detail=""):
+        steps.append((label, ok, detail))
+        return ok
+
+    try:
+        name = f"{SMOKE_PREFIX} {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        try:
+            data = _request("POST", _table_path(cfg), body={"fields": {name_field: name}, "typecast": False})
+        except AirtableError as exc:
+            step("Create a temporary record", False, str(exc))
+            return _smoke_result(steps, record_id)
+        record_id = str(data.get("id") or "")
+        if not (_RECORD_ID_RE.match(record_id) and (data.get("fields") or {}).get(name_field) == name):
+            step("Create a temporary record", False, "Airtable's reply did not match what was sent.")
+            return _smoke_result(steps, record_id if _RECORD_ID_RE.match(record_id) else "")
+        step("Create a temporary record", True, record_id)
+
+        try:
+            data = _request("PATCH", f"{_table_path(cfg)}/{urllib.parse.quote(record_id)}",
+                            body={"fields": {notes_field: "smoke test edit"}, "typecast": False})
+            step("Edit it (Sprint Notes) and read the reply back",
+                 (data.get("fields") or {}).get(notes_field) == "smoke test edit",
+                 "" if (data.get("fields") or {}).get(notes_field) == "smoke test edit" else "The reply did not hold the edit.")
+        except AirtableError as exc:
+            step("Edit it (Sprint Notes) and read the reply back", False, str(exc))
+
+        try:
+            current = _request("GET", f"{_table_path(cfg)}/{urllib.parse.quote(record_id)}")
+            safe = str((current.get("fields") or {}).get(name_field, "")).startswith(SMOKE_PREFIX)
+        except AirtableError as exc:
+            step("Delete it", False, f"Could not re-read the record before deleting: {exc}")
+            return _smoke_result(steps, record_id)
+        if not safe:
+            step("Delete it", False, "The record no longer carries the smoke-test name, so it was left alone.")
+            return _smoke_result(steps, record_id)
+        try:
+            data = _request("DELETE", f"{_table_path(cfg)}/{urllib.parse.quote(record_id)}")
+            deleted = bool(data.get("deleted")) and data.get("id") == record_id
+            step("Delete it", deleted, "" if deleted else "Airtable did not confirm the deletion.")
+            if deleted:
+                _cache_remove(record_id)
+        except AirtableError as exc:
+            step("Delete it", False, str(exc))
+        return _smoke_result(steps, record_id)
+    finally:
+        end_action("smoke-test")
+
+
+def _smoke_result(steps: list, record_id: str) -> dict:
+    ok = bool(steps) and all(s[1] for s in steps) and len(steps) == 3
+    leftover = bool(record_id) and not (len(steps) == 3 and steps[2][1])
+    if ok:
+        message = "Write test passed: a temporary record was created, edited and deleted."
+    elif leftover:
+        message = (f"Write test failed. Record {record_id} (named \"{SMOKE_PREFIX} ...\") may still be in the table; "
+                   "delete it in Airtable.")
+    else:
+        message = "Write test failed. Nothing was left in the table."
+    _log_append({"id": secrets.token_hex(6), "kind": "smoke", "at": datetime.now().isoformat(timespec="seconds"),
+                 "record": record_id, "ok": ok, "steps": [[a, b, c] for a, b, c in steps]})
+    return {"ok": ok, "steps": steps, "record_id": record_id, "message": message}
+
+
+def _cache_remove(record_id: str) -> None:
+    with _cache_lock:
+        cached = _cache["result"]
+        if cached is not None:
+            _cache["result"] = {**cached, "items": [i for i in cached["items"] if i["id"] != record_id]}
+
+
+def check_connection() -> dict:
+    """One read of a single record: {"ok", "message"}. Never raises."""
+    cfg = config()
+    if not cfg["configured"]:
+        return {"ok": False, "message": "Airtable is not set up (AIRTABLE_TOKEN, AIRTABLE_BASE_ID and AIRTABLE_TABLE_ID)."}
+    try:
+        data = _request("GET", _table_path(cfg), params=[("pageSize", "1"), ("fields[]", FIELD_SLUGS["name"][0])])
+    except AirtableError as exc:
+        return {"ok": False, "message": f"Airtable read failed: {exc}."}
+    return {"ok": True, "message": f"Airtable read worked ({len(data.get('records', []))} record fetched to test)."}
 
 
 def valid_record_id(record_id: str) -> bool:

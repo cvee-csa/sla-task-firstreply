@@ -35,6 +35,7 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _common  # noqa: E402
+import _diagnostics  # noqa: E402
 import _projects  # noqa: E402
 
 BIND_HOST = "127.0.0.1"  # do not change to 0.0.0.0 -- see module docstring
@@ -116,6 +117,8 @@ _TOPIC_ICON_FILES = {
     # its own badge by status name; a status with no key just renders
     # without one (_topic_icon returns "").
     "projects": "folder-csa-blue.png",
+    # /diagnostics -- same gear glyph as an ACTIVE project, own key.
+    "diagnostics": "gear-csa-blue.png",
     "project-triage": "error-csa-blue.png",
     "project-INTAKE": "identify-gap-csa-blue.png",
     "project-SCOPING": "checklist-csa-blue.png",
@@ -350,7 +353,7 @@ _ABOUT_TOOL_HTML = """<details class="about-tool" id="about-tool">
       <li><strong>SLA charts.</strong> Daily snapshots from the separate <code>sla-report-slack</code> project (<code>data/sla_history.json</code>), which its scheduled job updates on weekdays. They are only as fresh as the last <code>git pull</code> of that project, unless <strong>Update history</strong> on that page fetches the newest snapshots from GitHub into this tool&rsquo;s own output folder (nothing in that project&rsquo;s files is changed); the page shows the newest snapshot date and where it came from. When the newest snapshot is older than today, the last point on the charts is a live count of the open tickets. The live ticket scan adds the SLA breach count in the nav.</li>
       <li><strong>Standup.</strong> Read-only, from <code>dist/standup_data.json</code> built by the separate <code>meetingnotestool</code> project from the Operations Standup notes. This tool displays that view and stores none of it.</li>
       <li><strong>My tasks.</strong> Drafts live in a local file (<code>personal_tasks.json</code>) until you promote one, which is the only moment a Zendesk ticket is created. Each page load checks promoted tasks against their live ticket status.</li>
-      <li><strong>Projects.</strong> Read from the IT Operations Projects table in Airtable through its API, using the token in this repo&rsquo;s <code>.env</code>. Results are kept in memory for about 2 minutes, and <strong>Refresh data</strong> on that page reads again. Nothing from Airtable is stored on disk except a local log of the edits made here (<code>projects_edits.jsonl</code>), which powers Undo.</li>
+      <li><strong>Projects.</strong> Read from the IT Operations Projects table in Airtable through its API, using the token in this repo&rsquo;s <code>.env</code>. Results are kept in memory for about 2 minutes, and <strong>Refresh data</strong> on that page reads again. Two things from Airtable are stored on disk: a local log of the changes made here (<code>projects_edits.jsonl</code>), which powers Undo, and a full snapshot of the table (<code>projects_snapshots/</code>, newest 30) taken before the first save in each 6-hour stretch, as a backup.</li>
       <li><strong>This browser.</strong> The theme, any Background image and which sections are open or closed are kept in this browser&rsquo;s local storage and never leave it.</li>
     </ul>
     <h3>GitHub repositories</h3>
@@ -363,7 +366,7 @@ _ABOUT_TOOL_HTML = """<details class="about-tool" id="about-tool">
     <h3>What it writes to Zendesk</h3>
     <p>Only what you click: <strong>Public Reply</strong>, <strong>Internal Comment</strong> (optionally tagging teammates), <strong>Claim</strong>, and promoting or quick-solving a task. Before a reply is posted, the tool checks the ticket again for someone else&rsquo;s reply.</p>
     <h3>What it writes to Airtable</h3>
-    <p>Only from the Projects page, only after a review step, and only these fields: Project name, Description, Status, Assigned to, Requester, Urgency Rating, Start date, End date, Actual Completion Date, Blockers and Sprint Notes. A field changed in Airtable since the page loaded is never overwritten. Each save is read back to confirm it, and the banner offers Undo.</p>
+    <p>Only from the Projects page, only after a review step, and only these fields: Project name, Description, Status, Assigned to, Requester, Urgency Rating, Start date, End date, Actual Completion Date, Blockers and Sprint Notes. <strong>+ New project</strong> adds one record with a subset of those fields. A field changed in Airtable since the page loaded is never overwritten. Each save is read back to confirm it, and the banner offers Undo (a new project has no Undo; delete it in Airtable). The one exception to &ldquo;only those fields&rdquo; is the <a href="/diagnostics">Diagnostics</a> write test, which you start yourself: it creates a record named &ldquo;[Smoke test]&rdquo;, edits its Sprint Notes and deletes that same record.</p>
   </div>
 </details>"""
 
@@ -2218,6 +2221,22 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
   @media (max-width: 520px) {{ .project-edit-dates {{ grid-template-columns: minmax(0, 1fr); }} }}
   .project-edit-form .project-check {{ display: flex; align-items: flex-start; gap: 0.4rem; font-weight: 400; }}
   body.project-panel-open {{ overflow: hidden; }}
+  .diag-table {{ width: 100%; table-layout: fixed; }}
+  .diag-table td:first-child {{ width: 16rem; font-weight: 600; padding-right: 1rem; overflow-wrap: anywhere; }}
+  .diag-table td:nth-child(2) {{ width: 6rem; }}
+  @media (max-width: 700px) {{
+    .diag-table, .diag-table tbody, .diag-table tr, .diag-table td {{ display: block; width: auto; }}
+    .diag-table tr {{ padding: 0.4rem 0; border-bottom: 1px solid var(--card-border); }}
+    .diag-table td:first-child, .diag-table td:nth-child(2) {{ width: auto; display: inline-block; vertical-align: middle; }}
+    .diag-table td {{ padding: 0.1rem 0.6rem 0.1rem 0; }}
+  }}
+  .diag-chip {{ display: inline-block; min-width: 4.2rem; text-align: center; padding: 0.05rem 0.5rem; border-radius: 999px; font-size: 0.72rem; font-weight: 700; border: 1px solid var(--border, currentColor); }}
+  .diag-ok {{ color: var(--accent); }}
+  .diag-warn {{ color: #c58a00; }}
+  .diag-fail {{ color: #d4493f; }}
+  .diag-info {{ color: var(--muted); }}
+  .project-new-form {{ max-width: 34rem; }}
+  .project-new-form .required-mark {{ color: var(--muted); font-weight: 400; }}
   .project-diff {{ border-collapse: collapse; margin: 0.5rem 0 1rem; }}
   .project-diff th, .project-diff td {{ text-align: left; padding: 0.3rem 0.8rem 0.3rem 0; vertical-align: top; white-space: pre-wrap; }}
   :is(html.has-bg-image, html.theme-galaxy) :is(.project-edit-form select, .project-edit-form input[type=date], .project-edit-form input[type=text]) {{ background: var(--lg-input); border-color: var(--glass-border); }}
@@ -6445,12 +6464,144 @@ PROJECTS_ASSIGNEES=Name:email,Name:email</pre>
     body = f"""{title}
 <p class="meta">{loaded}{len(items)} projects. Edits made here are written to Airtable after a review step. {base_link}.</p>
 {problem}{capped}
-<div class="project-toolbar"><div class="standup-subnav">{toggle}</div>{filter_html}</div>
+<div class="project-toolbar"><div class="standup-subnav">{toggle}<a class="sla-range-btn" href="/projects/new">+ New project</a></div>{filter_html}</div>
 {hint}
 {main}
 {panel}{templates}
 {_PROJECT_PANEL_SCRIPT}"""
     return _page(body, banner=banner, banner_undo_path=banner_undo_path, current_path="/projects", wide=True)
+
+
+_DIAG_LABELS = {"ok": "OK", "warn": "Check", "fail": "Problem", "info": "Info"}
+
+
+def _render_diagnostics_page() -> bytes:
+    rows_by_section = []
+    for title, checks in _diagnostics.run_checks():
+        rows = "".join(
+            f'<tr><td>{html.escape(c["name"])}</td><td><span class="diag-chip diag-{c["status"]}">{_DIAG_LABELS[c["status"]]}</span></td>'
+            f'<td>{html.escape(c["detail"])}</td></tr>' for c in checks)
+        rows_by_section.append(f'<h3 class="project-panel-label">{html.escape(title)}</h3><table class="project-diff diag-table"><tbody>{rows}</tbody></table>')
+    configured = _projects.config()["configured"]
+    actions = ""
+    if configured:
+        actions = f"""<h3 class="project-panel-label">Airtable tests</h3>
+<div class="security-panel">
+  <form method="post" action="/diagnostics/airtable-test" class="actions">
+    <button class="approve" type="submit" data-loading-text="Testing…">{_icon("send", "icon-sm")}<span>Test Airtable connection</span></button>
+    <span class="meta">One read of a single record. Writes nothing.</span>
+  </form>
+  <form method="post" action="/diagnostics/smoke-test" class="actions">
+    <button class="internal" type="submit">{_icon("send", "icon-sm")}<span>Run write test…</span></button>
+    <span class="meta">Creates, edits and deletes one temporary record, after a confirmation step.</span>
+  </form>
+</div>"""
+    body = f"""<h2>{_topic_icon("diagnostics")}Diagnostics</h2>
+<p class="meta">Local checks only: nothing on this page calls Zendesk, and Airtable is contacted only by the buttons below. No secret values are shown.</p>
+{"".join(rows_by_section)}
+{actions}"""
+    return _page(body, current_path="/diagnostics", wide=True)
+
+
+def _render_smoke_confirm_page() -> bytes:
+    prefix = html.escape(_projects.SMOKE_PREFIX)
+    body = f"""<p><a href="/diagnostics">&larr; back to diagnostics</a></p>
+<h2>Run the Airtable write test?</h2>
+<div class="security-panel">
+  <p>This writes to the live Airtable base, in this order:</p>
+  <ol>
+    <li>Creates one record named &ldquo;{prefix} &lt;date and time&gt;&rdquo; (name only).</li>
+    <li>Edits that record&rsquo;s Sprint Notes and checks Airtable&rsquo;s reply.</li>
+    <li>Reads the record again and, only if it still carries that name, deletes it.</li>
+  </ol>
+  <p class="meta">Only the record this test created is deleted. If a step fails, the result page says which record to remove in Airtable by hand. Needs a token that may create and delete records.</p>
+  <form method="post" action="/diagnostics/smoke-test">
+    <input type="hidden" name="confirm" value="yes">
+    <div class="actions">
+      <button class="approve" type="submit" data-loading-text="Testing…">{_icon("send", "icon-sm")}<span>Run write test</span></button>
+      <a class="meta" href="/diagnostics">Cancel</a>
+    </div>
+  </form>
+</div>"""
+    return _page(body, current_path="/diagnostics", wide=True)
+
+
+def _render_smoke_result_page(result: dict) -> bytes:
+    rows = "".join(
+        f'<tr><td>{html.escape(label)}</td><td><span class="diag-chip diag-{"ok" if ok else "fail"}">{"OK" if ok else "Failed"}</span></td>'
+        f'<td>{html.escape(detail)}</td></tr>' for label, ok, detail in result["steps"])
+    table = f'<table class="project-diff diag-table"><tbody>{rows}</tbody></table>' if rows else ""
+    body = f"""<p><a href="/diagnostics">&larr; back to diagnostics</a></p>
+<h2>Airtable write test</h2>
+<div class="security-panel {"" if result["ok"] else "flag-alert"}">
+  <p><strong>{html.escape(result["message"])}</strong></p>
+  {table}
+</div>"""
+    return _page(body, current_path="/diagnostics", wide=True)
+
+
+def _project_new_form_html(values: dict) -> str:
+    people = _projects.assignees()
+    pick = lambda slug: values.get(slug, "")
+    status = pick("status") if "status" in values else _projects.DEFAULT_NEW_STATUS
+    status_opts = f'<option value=""{"" if status else " selected"}>(no status)</option>' + "".join(
+        f'<option value="{s}"{" selected" if s == status else ""}>{s}</option>' for s in _projects.STATUS_ORDER)
+    urgency_opts = f'<option value=""{"" if pick("urgency") else " selected"}>(none)</option>' + "".join(
+        f'<option value="{html.escape(o)}"{" selected" if o == pick("urgency") else ""}>{html.escape(o)}</option>'
+        for o in _projects.URGENCY_OPTIONS)
+    person_opts = '<option value="">Unassigned</option>' + "".join(
+        f'<option value="{html.escape(n)}"{" selected" if n == pick("assignee") else ""}>{html.escape(n)}</option>' for n in people)
+    note = ("" if people else '<p class="meta">Assignee can be set once <code>PROJECTS_ASSIGNEES</code> lists the people (see .env.example).</p>')
+    return f"""<form method="post" action="/projects/new" class="project-edit-form project-new-form">
+    <label>Project name <span class="required-mark">(required)</span><input type="text" name="name" value="{html.escape(pick("name"))}" maxlength="{_projects.LINE_LIMIT}" required autofocus></label>
+    <label>Status<select name="status">{status_opts}</select></label>
+    <label>Assignee<select name="assignee"{"" if people else " disabled"}>{person_opts}</select></label>
+    {note}
+    <label>Requester<input type="text" name="requester" value="{html.escape(pick("requester"))}" maxlength="{_projects.LINE_LIMIT}"></label>
+    <label>Urgency<select name="urgency">{urgency_opts}</select></label>
+    <label>End date<input type="date" name="end" value="{html.escape(pick("end"))}"></label>
+    <label>Description<textarea name="description" class="project-desc-input">{html.escape(pick("description"))}</textarea></label>
+    <div class="actions">
+      <button class="approve" type="submit" data-loading-text="Checking…">{_icon("send", "icon-sm")}<span>Review new project</span></button>
+      <a class="meta" href="/projects">Cancel</a>
+    </div>
+  </form>"""
+
+
+def _render_project_new_page(values: dict | None = None, errors: list | None = None) -> bytes:
+    problems = ""
+    if errors:
+        problems = '<div class="flag-alert"><ul>' + "".join(f"<li>{html.escape(e)}</li>" for e in errors) + "</ul></div>"
+    body = f"""<p><a href="/projects">&larr; back to projects</a></p>
+<h2>{_topic_icon("projects") or _icon("folder") + " "}New project</h2>
+<p class="meta">Creates one record in the live Airtable table after a review step. Dates other than End date, Blockers and Sprint notes are edited later, once the project has begun.</p>
+{problems}
+{_project_new_form_html(values or {})}"""
+    return _page(body, current_path="/projects", wide=True)
+
+
+def _render_project_create_confirm_page(plan: dict) -> bytes:
+    rows = "".join(
+        f'<tr><th scope="row">{html.escape(_projects.FIELD_SLUGS[slug][2])}</th><td><strong>{html.escape(plan["values"][slug])}</strong></td></tr>'
+        for slug in _projects.CREATE_SLUGS if plan["values"].get(slug)
+    )
+    hidden = "".join(
+        f'<input type="hidden" name="{slug}" value="{html.escape(plan["values"].get(slug, ""))}">' for slug in _projects.CREATE_SLUGS)
+    body = f"""<p><a href="/projects/new">&larr; back to the form</a></p>
+<h2>{_topic_icon("projects") or _icon("folder") + " "}Create in Airtable?</h2>
+<div class="security-panel">
+  <table class="project-diff"><tbody>{rows}</tbody></table>
+  <p class="meta">This adds a new record to the live Airtable base. A new project has no Undo here; if it was a mistake, delete it in Airtable.</p>
+  <form method="post" action="/projects/new">
+    {hidden}
+    <input type="hidden" name="confirm" value="yes">
+    <div class="actions">
+      <button class="approve" type="submit" data-loading-text="Creating…">{_icon("send", "icon-sm")}<span>Create in Airtable</span></button>
+      <a class="meta" href="/projects/new">Back</a>
+    </div>
+  </form>
+</div>"""
+    return _page(body, current_path="/projects", wide=True)
 
 
 def _projects_hidden_form_copy(form: dict) -> str:
@@ -6512,7 +6663,7 @@ _PROJECTS_LOCAL_HOSTS = ("127.0.0.1", "localhost", "[::1]", "::1")
 
 
 def _same_origin_request_allowed(headers) -> bool:
-    """Same-origin guard for the /projects writes and the /sla update. A page on another site can make a browser
+    """Same-origin guard for every POST route. A page on another site can make a browser
     POST to this local server; the browser still labels such a request with its real Origin,
     so a mismatch (or a Host that is not this machine, as in DNS rebinding) is refused. A request
     with no Origin and no Referer cannot come from a cross-site browser form and is allowed."""
@@ -6714,6 +6865,17 @@ class Handler(BaseHTTPRequestHandler):
             self._send_html(_render_reconnect_page(banner=banner))
             return
 
+        if parsed.path == "/diagnostics":
+            self._send_html(_render_diagnostics_page())
+            return
+
+        if parsed.path == "/projects/new":
+            if not _projects.config()["configured"]:
+                self._redirect(_projects_redirect_path("board", "Airtable is not set up."))
+                return
+            self._send_html(_render_project_new_page())
+            return
+
         if parsed.path == "/projects":
             view = _project_view(qs.get("view", [""])[0])
             sort = qs.get("sort", [""])[0]
@@ -6911,6 +7073,18 @@ class Handler(BaseHTTPRequestHandler):
         # rather than just redirecting, so this needs the same fresh-per-
         # request cache reset.
         _common.clear_request_cache()
+        # Every POST changes something (Zendesk, Airtable or a local file), so every route sits behind
+        # the same-origin guard. A refused request still has its body read and dropped: this server
+        # speaks HTTP/1.1 keep-alive, and an unread body would be parsed as the next request.
+        if not _same_origin_request_allowed(self.headers):
+            try:
+                length = max(0, min(int(self.headers.get("Content-Length", 0)), 1_000_000))
+            except (TypeError, ValueError):
+                length = 0
+            if length:
+                self.rfile.read(length)
+            self._send_html(_page('<p class="empty">Refused: this request did not come from this tool\'s own pages.</p>'), status=403)
+            return
         parsed = urlparse(self.path)
         parts = parsed.path.strip("/").split("/")
 
@@ -6951,6 +7125,22 @@ class Handler(BaseHTTPRequestHandler):
 
         if parts and parts[0] == "projects":
             self._projects_post(parts)
+            return
+
+        if parts == ["diagnostics", "airtable-test"]:
+            self._parse_form_body()
+            self._redirect(f"/diagnostics?msg={quote(_projects.check_connection()['message'])}")
+            return
+
+        if parts == ["diagnostics", "smoke-test"]:
+            form = self._parse_form_body()
+            if not _projects.config()["configured"]:
+                self._redirect("/diagnostics?msg=" + quote("Airtable is not set up."))
+                return
+            if form.get("confirm", [""])[0] != "yes":
+                self._send_html(_render_smoke_confirm_page())
+                return
+            self._send_html(_render_smoke_result_page(_projects.smoke_test()))
             return
 
         if parts == ["sla", "update"]:
@@ -7048,6 +7238,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if len(parts) != 2 or parts[0] not in ("post_public", "post_internal", "dismiss", "undo_dismiss", "claim"):
+            self._parse_form_body()          # read and drop the body so keep-alive stays in step
             self._send_html(_page('<p class="empty">Not found.</p>'), status=404)
             return
         action, ticket_id = parts
@@ -7112,6 +7303,9 @@ class Handler(BaseHTTPRequestHandler):
         if not _projects_request_allowed(self.headers):
             self._send_html(_page('<p class="empty">Refused: this request did not come from this tool\'s own pages.</p>'), status=403)
             return
+        if parts == ["projects", "new"]:
+            self._projects_create(form)
+            return
         if len(parts) == 3 and parts[2] == "edit" and _projects.valid_record_id(parts[1]):
             self._projects_edit(parts[1], form)
             return
@@ -7119,6 +7313,33 @@ class Handler(BaseHTTPRequestHandler):
             self._redirect(f"/projects?msg={quote(_projects.undo_edit(parts[2]))}")
             return
         self._send_html(_page('<p class="empty">Not found.</p>'), status=404)
+
+    def _projects_create(self, form: dict) -> None:
+        if not _projects.config()["configured"]:
+            self._redirect(_projects_redirect_path("board", "Airtable is not set up."))
+            return
+        confirmed = form.get("confirm", [""])[0] == "yes"
+        key = "new-project"
+        if confirmed and not _projects.begin_action(key):
+            self._redirect(_projects_redirect_path("board", "A project is already being created. Try again in a moment."))
+            return
+        try:
+            existing = [i["name"] for i in _projects.fetch_projects()["items"]]
+            plan = _projects.plan_create(form, existing)
+            if plan["errors"]:
+                self._send_html(_render_project_new_page(plan["values"], plan["errors"]), status=400)
+                return
+            if not confirmed:
+                self._send_html(_render_project_create_confirm_page(plan))
+                return
+            result = _projects.commit_create(plan)
+        finally:
+            if confirmed:
+                _projects.end_action(key)
+        if result["ok"] and result["record_id"]:
+            self._redirect(f"/projects?open={result['record_id']}&msg={quote(result['message'])}")
+        else:
+            self._redirect(_projects_redirect_path("board", result["message"]))
 
     def _projects_edit(self, record_id: str, form: dict) -> None:
         if not _projects.config()["configured"]:
