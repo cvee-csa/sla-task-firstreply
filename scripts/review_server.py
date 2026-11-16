@@ -152,6 +152,38 @@ def _load_icon_data_uris(file_map: dict) -> dict:
 
 TOPIC_ICON_DATA_URIS = _load_icon_data_uris(_TOPIC_ICON_FILES)
 
+# Recolorable badges. Every "<name>-csa-blue.png" has a twin "<name>.png" in assets/topic-glyphs/
+# (white glyph, transparent elsewhere; made by make_topic_glyphs.py). _topic_icon draws such a badge
+# as a square in the theme's accent with the glyph masked over it in the theme's contrast color, so
+# the badges follow the theme. A key whose file has no glyph twin (error-white.png) or whose glyph
+# file is missing keeps the plain <img>.
+TOPIC_GLYPHS_DIR = Path(__file__).resolve().parent / "assets" / "topic-glyphs"
+_GLYPH_SOURCE_SUFFIX = "-csa-blue.png"
+
+
+def _glyph_name(key: str) -> str:
+    filename = _TOPIC_ICON_FILES.get(key, "")
+    return filename[: -len(_GLYPH_SOURCE_SUFFIX)] if filename.endswith(_GLYPH_SOURCE_SUFFIX) else ""
+
+
+def _load_glyph_data_uris() -> dict:
+    uris = {}
+    for key in _TOPIC_ICON_FILES:
+        name = _glyph_name(key)
+        if not name or name in uris:
+            continue
+        try:
+            data = (TOPIC_GLYPHS_DIR / f"{name}.png").read_bytes()
+        except Exception:
+            continue
+        uris[name] = f"data:image/png;base64,{base64.b64encode(data).decode('ascii')}"
+    return uris
+
+
+TOPIC_GLYPH_DATA_URIS = _load_glyph_data_uris()
+# One rule per glyph, defined once per page (not once per use), as a custom property the badge's mask reads.
+_TOPIC_BADGE_CSS = "".join(f'.tbg-{name} {{ --glyph: url("{uri}"); }}\n  ' for name, uri in TOPIC_GLYPH_DATA_URIS.items())
+
 
 def _topic_icon(key: str, css_class: str = "topic-icon", alt: str = "") -> str:
     """<img> for one of TOPIC_ICON_DATA_URIS, sized via CSS the same way
@@ -160,6 +192,9 @@ def _topic_icon(key: str, css_class: str = "topic-icon", alt: str = "") -> str:
     decorative, redundant with the visible heading/label text right next
     to it) rather than describing the icon itself, so a screen reader
     doesn't announce e.g. "checklist" immediately before "Tasks"."""
+    glyph = _glyph_name(key)
+    if glyph in TOPIC_GLYPH_DATA_URIS and not alt:
+        return f'<span class="{css_class} tb tbg-{glyph}" aria-hidden="true"></span>'
     uri = TOPIC_ICON_DATA_URIS.get(key, "")
     if not uri:
         return ""
@@ -1600,6 +1635,9 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
     --excerpt-border: #cccccc;
     --link: #1a56c4;
     --accent: #1a56c4;
+    --topic-badge-bg: var(--accent);   /* topic badges: square = accent, glyph = ink (the theme's contrast color) */
+    --topic-badge-ink: #ffffff;
+    --topic-badge-fg: var(--topic-badge-ink);
     --focus-ring: rgba(26,86,196,0.35);
     /* Button palette -- six distinct hues, deliberately none of them red or
        green, so "primary/positive" and "destructive/caution" are conveyed
@@ -1667,6 +1705,7 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
       --excerpt-border: rgba(255,255,255,0.14);
       --link: #6fa3ef;
       --accent: #6fa3ef;
+      --topic-badge-ink: #0b1220;
       --focus-ring: rgba(111,163,239,0.45);
       --btn-approve: #158a96;     --btn-approve-hover: #106e78;
       --btn-internal: #7c5cc4;    --btn-internal-hover: #6749a8;
@@ -1725,6 +1764,7 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
     --excerpt-border: rgba(255,255,255,0.14);
     --link: #6fa3ef;
     --accent: #6fa3ef;
+    --topic-badge-ink: #0b1220;
     --focus-ring: rgba(111,163,239,0.45);
     --btn-approve: #158a96;     --btn-approve-hover: #106e78;
     --btn-internal: #7c5cc4;    --btn-internal-hover: #6749a8;
@@ -1773,6 +1813,7 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
     --excerpt-border: rgba(102,136,204,0.22);
     --link: #ddbb88;
     --accent: #ddbb88;
+    --topic-badge-ink: var(--on-accent);
     --on-accent: #1a1204;
     --focus-ring: rgba(102,136,204,0.55);
     --btn-approve: #0063a5;     --btn-approve-hover: #004f84;  /* badge blue */
@@ -1820,6 +1861,7 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
     --excerpt-border: rgba(187,218,255,0.20);
     --link: #bbdaff;
     --accent: #bbdaff;
+    --topic-badge-ink: var(--on-accent);
     --on-accent: #00122e;
     --focus-ring: rgba(187,218,255,0.5);
     --btn-approve: #1d7f8a;     --btn-approve-hover: #17666f;  /* aqua */
@@ -1869,6 +1911,7 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
     --excerpt-border: #f0d2c4;
     --link: #a30262;
     --accent: #b04a85;
+    --topic-badge-ink: #ffffff;
     --focus-ring: rgba(176,74,133,0.35);
     --btn-approve: #a84c85;     --btn-approve-hover: #8d3d6e;  /* rose */
     --btn-internal: #8a4d9b;    --btn-internal-hover: #723e81; /* orchid */
@@ -1926,6 +1969,7 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
     --excerpt-border: rgba(255,170,90,0.2);
     --link: #ff8a3d;
     --accent: #ff8a3d;
+    --topic-badge-ink: var(--on-accent);
     --on-accent: #1a0d03;
     --focus-ring: rgba(255,138,61,0.45);
     --btn-approve: #c2410c;       --btn-approve-hover: #9f3409;  /* pumpkin */
@@ -1971,6 +2015,7 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
     --excerpt-border: rgba(150,220,175,0.18);
     --link: #4fd17f;
     --accent: #4fd17f;
+    --topic-badge-ink: var(--on-accent);
     --on-accent: #06140b;
     --focus-ring: rgba(79,209,127,0.45);
     --btn-approve: #1c7a44;       --btn-approve-hover: #15602f;  /* evergreen */
@@ -2019,6 +2064,7 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
     --excerpt-border: rgba(170,200,235,0.18);
     --link: #8cc4f2;
     --accent: #f09a7a;
+    --topic-badge-ink: var(--on-accent);
     --on-accent: #1f0d07;
     --focus-ring: rgba(240,154,122,0.45);
     --btn-approve: #1d7f88;     --btn-approve-hover: #17666e;  /* cyan stars */
@@ -2982,12 +3028,18 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
      for three different spots: next to a page's own h2 heading, floating
      above an empty-state's muted text, and inline inside the small
      already-coloured priority pill. */
-  .topic-icon {{ width: 24px; height: 24px; flex-shrink: 0; vertical-align: middle; margin-right: 0.45rem; border-radius: 6px; }}
+  /* Recolorable topic badge (see _topic_icon): the span is the colored square, ::after is the glyph. */
+  .tb {{ display: inline-block; position: relative; background-color: var(--topic-badge-bg, var(--accent)); }}
+  .tb::after {{
+    content: ""; position: absolute; inset: 0; background-color: var(--topic-badge-fg, #fff);
+    -webkit-mask: var(--glyph) center / 100% 100% no-repeat; mask: var(--glyph) center / 100% 100% no-repeat;
+  }}
+  /* On the active link the pill is already the accent, so the badge inverts. */
+  .top-nav-link.active .tb {{ --topic-badge-bg: var(--topic-badge-ink); --topic-badge-fg: var(--accent); }}
+  {_TOPIC_BADGE_CSS}.topic-icon {{ width: 24px; height: 24px; flex-shrink: 0; vertical-align: middle; margin-right: 0.45rem; border-radius: 6px; }}
   .topic-icon-sm {{ width: 20px; height: 20px; flex-shrink: 0; vertical-align: -5px; margin-right: 0.4rem; border-radius: 5px; }}
   .project-dates-legend {{ display: flex; align-items: center; font-size: 0.85rem; color: var(--muted, #555); margin-top: 0.2rem; }}
   .topic-icon-nav {{ width: 22px; height: 22px; flex-shrink: 0; border-radius: 6px; }}
-  /* The badge is CSA blue, the active link's fill is the accent: a thin light ring keeps it readable there. */
-  .top-nav-link.active .topic-icon-nav {{ box-shadow: 0 0 0 1.5px rgba(255, 255, 255, 0.85); }}
   .topic-icon-empty {{ display: block; width: 26px; height: 26px; margin: 0 auto 0.6rem auto; border-radius: 6px; opacity: 0.9; }}
   .badge-priority .topic-icon-inline {{ width: 11px; height: 11px; margin-right: 0.3rem; vertical-align: -1px; border-radius: 0; }}
   /* Confirmation "banner" now renders as a toast: fixed to the corner of

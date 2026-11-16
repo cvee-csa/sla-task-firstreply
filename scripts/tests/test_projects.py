@@ -192,10 +192,10 @@ def test_projects_page_uses_the_csa_topic_icons(airtable):
     page = review_server._render_projects_page(_projects.fetch_projects(), today="2026-06-01").decode()
     body = page.split("</style>")[-1]
     visible = re.sub(r"<template.*?</template>", "", body, flags=re.S)
-    assert re.search(r"<h2><img src=\"data:image/png;base64,[^\"]+\" alt=\"\" class=\"topic-icon\">Projects</h2>", visible)
+    assert '<h2><span class="topic-icon tb tbg-folder" aria-hidden="true"></span>Projects</h2>' in visible
     for status in ("INTAKE", "SCOPING", "ACTIVE", "BLOCKED", "COMPLETE", "CANCELLED"):
         column = visible.split(f'data-status="{status}"')[1].split("</h2>")[0]
-        assert 'class="topic-icon-sm"' in column, status
+        assert 'class="topic-icon-sm tb tbg-' in column, status
     assert "project-dates-legend" in body                 # panel templates carry the dates legend
 
 
@@ -204,10 +204,10 @@ def test_nav_links_use_badges_and_fall_back_to_line_glyphs():
     links = re.findall(r'<a class="top-nav-link[^>]*>.*?</a>', nav, flags=re.S)
     assert len(links) == 7
     for link in links:
-        assert ('class="topic-icon-nav"' in link) != ("<svg" in link)       # exactly one kind of icon
-    with_badge = [lk for lk in links if 'class="topic-icon-nav"' in lk]
+        assert ('class="topic-icon-nav tb tbg-' in link) != ("<svg" in link)       # exactly one kind of icon
+    with_badge = [lk for lk in links if 'class="topic-icon-nav tb tbg-' in lk]
     assert len(with_badge) == 7                                       # every link, Overview included
-    assert "First Reply" in links[0] and 'class="topic-icon-nav"' in links[0]
+    assert "First Reply" in links[0] and 'class="topic-icon-nav tb tbg-email"' in links[0]
 
 
 def test_overview_heading_has_its_badge():
@@ -612,7 +612,7 @@ def _board_only(page):
 
 
 def _column_labels(page):
-    return re.findall(r'<h2 class="column-heading"[^>]*>(?:<img[^>]*>)?([^<]+)</h2>', _board_only(page))
+    return re.findall(r'<h2 class="column-heading"[^>]*>(?:<img[^>]*>|<span class="[^"]*\btb\b[^"]*"[^>]*></span>)?([^<]+)</h2>', _board_only(page))
 
 
 def test_projects_without_a_status_come_first_as_needs_triage(airtable):
@@ -632,7 +632,7 @@ def test_spelling_variants_of_a_status_share_one_column(airtable):
     page = _page_for()
     labels = _column_labels(page)
     assert labels.count("ACTIVE") == 1 and len(labels) == len(set(labels))
-    segment = {re.sub(r"^<img[^>]*>", "", seg).split("<", 1)[0]: seg for seg in _board_only(page).split('<h2 class="column-heading">')[1:]}
+    segment = {re.sub(r"^(?:<img[^>]*>|<span[^>]*></span>)", "", seg).split("<", 1)[0]: seg for seg in _board_only(page).split('<h2 class="column-heading">')[1:]}
     active = segment["ACTIVE</h2>".split("<")[0]]
     assert '<span class="stat-chip">3</span>' in active
     assert "Laptop refresh" in active and "Old audit" in active and "Rotate" in active

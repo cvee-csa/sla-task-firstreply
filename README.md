@@ -348,7 +348,7 @@ The reasoning behind each decision is in [`docs/DESIGN.md`](docs/DESIGN.md); thi
 **UI**
 
 - **A new workflow gets a new page**, and a page's status shows where you are through the highlighted nav link. Anything counted for a header is computed from cheap local files or warm caches, never a new Zendesk call.
-- **One primary action per page, everything else outlined.** Icons are a fixed set of hand-authored inline SVGs (`_ICONS`, `currentColor`). Decorative topic icons (`_topic_icon()`) are separate self-contained colored PNG badges with empty `alt` text and degrade to nothing if a file is missing. The Projects page uses them for its heading, one badge per status column (keys `project-<STATUS>`; a status without a key shows none) and the edit panel's dates legend.
+- **One primary action per page, everything else outlined.** Icons are a fixed set of hand-authored inline SVGs (`_ICONS`, `currentColor`). Decorative topic icons (`_topic_icon()`) are recolorable badges: a square in the active theme's accent color with the CSA glyph masked over it in the theme's contrast color, so the badges follow every theme (on the active nav link the two colors swap). They are decorative (`aria-hidden`) and degrade to the original blue badge image, or to nothing, if a glyph or badge file is missing. The Projects page uses them for its heading, one badge per status column (keys `project-<STATUS>`; a status without a key shows none) and the edit panel's dates legend.
 - **Avatars only beside names the tool trusts** (`_avatar_html`, `_requester_avatar_prefix`), never beside an unconfirmed guess.
 - **The toast and the auth banner share CSS but not behavior.** The toast (`data-toast`) floats and auto-dismisses; the auth warning stays docked, since a standing condition shouldn't vanish on a timer.
 - **The fade-on-submit is cosmetic**, not an optimistic update. If a post fails, the card reappears.
@@ -393,7 +393,8 @@ scripts/
   com.csa.zendesk-watchdog.plist              launchd config for the watchdog (every 5 min)
   reload_launchd.sh                           (re)installs all three services; works out paths itself, `--check` for a dry run
   csa_notifier.applescript                    source for the optional "CSA Notifier.app" helper
-  assets/                                     csa-logo.png, galaxy-bg.jpg, topic-icons/
+  assets/                                     csa-logo.png, galaxy-bg.jpg, topic-icons/ (CSA badges), topic-glyphs/ (white-glyph masks made from them)
+  make_topic_glyphs.py                        dev tool (needs Pillow): rebuilds assets/topic-glyphs/ from assets/topic-icons/
   output/                                     logs and runtime state (git-ignored)
   tests/                                      pytest suite
 ```
