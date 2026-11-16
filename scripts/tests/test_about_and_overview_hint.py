@@ -40,3 +40,17 @@ def test_overview_says_the_board_scrolls_sideways():
     assert "This board scrolls sideways." in out
     assert "hold Shift and use the mouse wheel" in out
     assert 'aria-label="Overview board, scrolls sideways"' in out
+
+
+def test_about_intro_covers_airtable_and_github_and_names_the_repositories():
+    panel = _page().split('class="about-panel"')[1].split("</details>")[0]
+    intro = panel.split("<h3>")[0]
+    assert "Airtable" in intro and "GitHub" in intro
+    assert "IT-Security group" in panel and "ZENDESK_IT_SECURITY_GROUP_ID" in panel
+    assert "open or closed" in panel
+    section = panel.split("<h3>GitHub repositories</h3>")[1]
+    for repo in ("cvee-csa/sla-task-firstreply", "cvee-csa/sla-report-slack",
+                 "cvee-csa/meetingnotestool", "cvee-csa/zendeskmcp"):
+        assert f"<code>{repo}</code>" in section, repo
+    # only sla-report-slack is reached over the network by the running app
+    assert "Update history" in section.split("cvee-csa/sla-report-slack")[1].split("<li>")[0]

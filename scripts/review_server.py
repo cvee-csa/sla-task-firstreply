@@ -124,6 +124,12 @@ _TOPIC_ICON_FILES = {
     "project-COMPLETE": "checkmark-csa-blue.png",
     "project-CANCELLED": "cancel-csa-blue.png",
     "dates": "calendar-csa-blue.png",
+    # Sidebar nav badges (see _top_nav_html). The other six nav links reuse
+    # the page-heading keys above ("sla", "tasks", "standup", "projects",
+    # "solved"); First Reply has no heading of its own, so it gets its own.
+    "nav-firstreply": "email-csa-blue.png",
+    # /overview: its heading, its empty-state, and its nav link.
+    "overview": "matrix-csa-blue.png",
 }
 
 def _load_icon_data_uris(file_map: dict) -> dict:
@@ -336,16 +342,23 @@ _ABOUT_TOOL_HTML = """<details class="about-tool" id="about-tool">
   <summary title="How this tool gets its data">__ICON__<span class="about-label">About This Tool</span></summary>
   <div class="about-panel" role="region" aria-label="About This Tool">
     <h2>About This Tool</h2>
-    <p>A review tool that runs only on this Mac (<code>127.0.0.1:8765</code>). It reads from Zendesk and from a few local files, and it writes to Zendesk only when you click a button. Nothing is posted automatically.</p>
+    <p>A review tool that runs only on this Mac (<code>127.0.0.1:8765</code>). It reads from Zendesk, from Airtable and from a few local files, and it fetches SLA snapshots from GitHub. It writes to Zendesk only when you click a button, and to Airtable only from the Projects page after a review step. Nothing is posted automatically.</p>
     <h3>Where the data comes from</h3>
     <ul>
-      <li><strong>Zendesk, live.</strong> The queue, Overview, Discussion, Security, Recently Solved and Recently worked on all read IT-Operations tickets and their comments through the Zendesk API, using the credentials in this repo&rsquo;s <code>.env</code>. Zendesk cannot filter some of these (for example by tag), so the tool pages through the group and filters locally, within a set limit; a note appears when a scan stopped early. Results are kept in memory for about 2 minutes, and <strong>Refresh data</strong> reads again on demand.</li>
+      <li><strong>Zendesk, live.</strong> The queue, Overview, Discussion, Recently Solved and Recently worked on read IT-Operations tickets and their comments, and Security reads the IT-Security group, all through the Zendesk API using the credentials in this repo&rsquo;s <code>.env</code>. Both groups are chosen in <code>.env</code> (<code>ZENDESK_IT_OPERATIONS_GROUP_ID</code>, <code>ZENDESK_IT_SECURITY_GROUP_ID</code>). Zendesk cannot filter some of these (for example by tag), so the tool pages through the group and filters locally, within a set limit; a note appears when a scan stopped early. Results are kept in memory for about 2 minutes, and <strong>Refresh data</strong> reads again on demand.</li>
       <li><strong>The first-reply check.</strong> A background job runs every 2 minutes, Monday to Friday, 9am to 4pm local time. It looks back up to 72 hours, keeps tickets with no public reply yet, drafts the acknowledgment, and saves the candidates to a local file (<code>pending_drafts.json</code>). The main queue is drawn from that file, so it loads without waiting on Zendesk. <strong>Last checked</strong> and <strong>Pending Refresh</strong> in the sidebar report that job.</li>
       <li><strong>SLA charts.</strong> Daily snapshots from the separate <code>sla-report-slack</code> project (<code>data/sla_history.json</code>), which its scheduled job updates on weekdays. They are only as fresh as the last <code>git pull</code> of that project, unless <strong>Update history</strong> on that page fetches the newest snapshots from GitHub into this tool&rsquo;s own output folder (nothing in that project&rsquo;s files is changed); the page shows the newest snapshot date and where it came from. When the newest snapshot is older than today, the last point on the charts is a live count of the open tickets. The live ticket scan adds the SLA breach count in the nav.</li>
       <li><strong>Standup.</strong> Read-only, from <code>dist/standup_data.json</code> built by the separate <code>meetingnotestool</code> project from the Operations Standup notes. This tool displays that view and stores none of it.</li>
       <li><strong>My tasks.</strong> Drafts live in a local file (<code>personal_tasks.json</code>) until you promote one, which is the only moment a Zendesk ticket is created. Each page load checks promoted tasks against their live ticket status.</li>
       <li><strong>Projects.</strong> Read from the IT Operations Projects table in Airtable through its API, using the token in this repo&rsquo;s <code>.env</code>. Results are kept in memory for about 2 minutes, and <strong>Refresh data</strong> on that page reads again. Nothing from Airtable is stored on disk except a local log of the edits made here (<code>projects_edits.jsonl</code>), which powers Undo.</li>
-      <li><strong>This browser.</strong> The theme and any Background image are kept in this browser&rsquo;s local storage and never leave it.</li>
+      <li><strong>This browser.</strong> The theme, any Background image and which sections are open or closed are kept in this browser&rsquo;s local storage and never leave it.</li>
+    </ul>
+    <h3>GitHub repositories</h3>
+    <ul>
+      <li><code>cvee-csa/sla-task-firstreply</code>: this tool&rsquo;s own code. The app does not contact it while running.</li>
+      <li><code>cvee-csa/sla-report-slack</code>: the SLA history. The only repository the running app reaches on GitHub, and only when you click <strong>Update history</strong> on the SLA page (a <code>git fetch</code> of <code>origin/main</code>, read-only). Its <code>data/sla_history.json</code> is also read from the local checkout.</li>
+      <li><code>cvee-csa/meetingnotestool</code> (private): builds the standup data. Only the local file <code>dist/standup_data.json</code> from its checkout is read, with no GitHub access.</li>
+      <li><code>cvee-csa/zendeskmcp</code> (its <code>zendesk-mcp-server</code> folder): supplies the Zendesk client library this tool runs on, from its local checkout.</li>
     </ul>
     <h3>What it writes to Zendesk</h3>
     <p>Only what you click: <strong>Public Reply</strong>, <strong>Internal Comment</strong> (optionally tagging teammates), <strong>Claim</strong>, and promoting or quick-solving a task. Before a reply is posted, the tool checks the ticket again for someone else&rsquo;s reply.</p>
@@ -2939,6 +2952,9 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
   .topic-icon {{ width: 24px; height: 24px; flex-shrink: 0; vertical-align: middle; margin-right: 0.45rem; border-radius: 6px; }}
   .topic-icon-sm {{ width: 20px; height: 20px; flex-shrink: 0; vertical-align: -5px; margin-right: 0.4rem; border-radius: 5px; }}
   .project-dates-legend {{ display: flex; align-items: center; font-size: 0.85rem; color: var(--muted, #555); margin-top: 0.2rem; }}
+  .topic-icon-nav {{ width: 22px; height: 22px; flex-shrink: 0; border-radius: 6px; }}
+  /* The badge is CSA blue, the active link's fill is the accent: a thin light ring keeps it readable there. */
+  .top-nav-link.active .topic-icon-nav {{ box-shadow: 0 0 0 1.5px rgba(255, 255, 255, 0.85); }}
   .topic-icon-empty {{ display: block; width: 26px; height: 26px; margin: 0 auto 0.6rem auto; border-radius: 6px; opacity: 0.9; }}
   .badge-priority .topic-icon-inline {{ width: 11px; height: 11px; margin-right: 0.3rem; vertical-align: -1px; border-radius: 0; }}
   /* Confirmation "banner" now renders as a toast: fixed to the corner of
@@ -3442,15 +3458,18 @@ def _top_nav_html(current_path: str = "") -> str:
     toggle's own .active treatment). The links carry no count badges: they
     used to show open tasks, standup items and SLA breaches, and were
     removed because the numbers were more noise than signal."""
-    def _link(path, icon, label):
+    def _link(path, icon, label, topic=""):
         is_active = current_path == path
+        # A CSA badge (topic icon) when its file is present, the inline
+        # line glyph otherwise -- a missing PNG never leaves a bare gap.
+        glyph = _topic_icon(topic, "topic-icon-nav") if topic else ""
         active_class = " active" if is_active else ""
         aria = ' aria-current="page"' if is_active else ""
         # The label is real visible text (a .top-nav-label span, not a title
         # attribute): the sidebar has a whole column of room for it.
         return (
             f'<a class="top-nav-link{active_class}" href="{path}"{aria}>'
-            f'{_icon(icon)}<span class="top-nav-label">{html.escape(label)}</span></a>'
+            f'{glyph or _icon(icon)}<span class="top-nav-label">{html.escape(label)}</span></a>'
         )
 
     # One flat list, ordered roughly by how often you'd actually reach for
@@ -3467,25 +3486,25 @@ def _top_nav_html(current_path: str = "") -> str:
     # working page, so there's no second category left to separate from
     # the first.
     nav_links = (
-        _link("/firstreply", "reply", "First Reply")
+        _link("/firstreply", "reply", "First Reply", "nav-firstreply")
         # Overview sits second -- it's the "check this before anything
         # else" glance across all four of the pages below it (see
         # _render_overview_page), so it goes near the top of the list
         # rather than slotted in by topic like the rest.
-        + _link("/overview", "grid", "Overview")
+        + _link("/overview", "grid", "Overview", "overview")
         # SLA sits right after Overview -- another "check this before you
         # dig in" glance page rather than a queue you work from day to day.
-        + _link("/sla", "clock", "SLA")
-        + _link("/tasks", "check-square", "Tasks")
+        + _link("/sla", "clock", "SLA", "sla")
+        + _link("/tasks", "check-square", "Tasks", "tasks")
         # Standup keeps its own tab. Discussion and Security are not tabs:
         # they are blocks on Overview (see _render_overview_page), each
         # linking to its full page, whose own pages keep Overview
         # highlighted here.
-        + _link("/standup", "bar-chart", "Standup")
+        + _link("/standup", "bar-chart", "Standup", "standup")
         # Projects sits next to Standup: the Airtable project board, which
         # standup items often point at (see _render_projects_page).
-        + _link("/projects", "folder", "Projects")
-        + _link("/solved", "check-circle", "Recently Solved")
+        + _link("/projects", "folder", "Projects", "projects")
+        + _link("/solved", "check-circle", "Recently Solved", "solved")
     )
     return f'<div class="top-nav">{nav_links}</div>'
 
@@ -6374,7 +6393,7 @@ def _render_projects_confirm_page(item: dict, plan: dict, form: dict) -> bytes:
         for c in plan["changes"]
     )
     body = f"""<p><a href="{back}">&larr; back to projects</a></p>
-<h2>{_icon("folder")} Save to Airtable?</h2>
+<h2>{_topic_icon("projects") or _icon("folder") + " "}Save to Airtable?</h2>
 <div class="security-panel">
   <h2 class="column-heading">{html.escape(item["name"])}</h2>
   <table class="project-diff"><tbody>{rows}</tbody></table>
@@ -6399,7 +6418,7 @@ def _render_projects_problem_page(item: dict, plan: dict) -> bytes:
             f'(now: {html.escape(c["now"] or "(empty)")}). Reload the page and make the edit again.</li>'
         )
     body = f"""<p><a href="/projects">&larr; back to projects</a></p>
-<h2>{_icon("folder")} Nothing was saved</h2>
+<h2>{_topic_icon("projects") or _icon("folder") + " "}Nothing was saved</h2>
 <div class="security-panel"><h2 class="column-heading">{html.escape(item["name"])}</h2><ul>{"".join(lines)}</ul></div>"""
     return _page(body, current_path="/projects", wide=True)
 
