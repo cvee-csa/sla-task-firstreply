@@ -49,3 +49,32 @@ def test_nav_badge_hidden_with_no_drafts(monkeypatch):
     nav = review_server._top_nav_html(current_path="/tasks")
     tag = nav[nav.index('href="/tasks"'):]
     assert "nav-badge" not in tag[:tag.index("</a>")]
+
+
+def _completed(n):
+    return [{"ticket_id": 100 + i, "subject": f"Done <b>{i}</b>", "completed_at": f"2026-10-2{i}T14:05:00"} for i in range(1, n + 1)]
+
+
+def test_recently_completed_is_a_column_to_the_right_of_the_main_body(monkeypatch):
+    monkeypatch.setattr(_common, "completed_personal_tasks", lambda limit=10: _completed(2))
+    page = _page([_draft(1)])
+    body = page.split("</style>")[-1]
+    assert "Scrolls sideways: Recently completed is to the right." in body
+    board = body[body.index('<div class="tasks-board">'):]
+    assert board.index('class="tasks-main"') < board.index('id="tasks-drafts"') < board.index('id="tasks-completed"')
+    assert board.index('class="ticket"') < board.index('id="tasks-completed"')            # the new-task form is in the main body
+    # the completed column is a sibling of the main body, not nested inside it
+    main = board[board.index('class="tasks-main"'):board.index('id="tasks-completed"')]
+    # (the slice starts after the main div's own opening tag and ends inside the completed column's)
+    assert main.count("<div") == main.count("</div>")
+    assert "Recently completed (2)" in board and "Done &lt;b&gt;1&lt;/b&gt;" in board and "<b>1</b>" not in board
+    assert 'class="recently-handled"' not in body
+
+
+def test_completed_column_empty_state_and_css(monkeypatch):
+    monkeypatch.setattr(_common, "completed_personal_tasks", lambda limit=10: [])
+    page = _page([])
+    assert "Recently completed (0)" in page and "Nothing completed yet." in page
+    css = page.split("</style>")[0]
+    assert ".tasks-board {" in css and "overflow-x: auto" in css.split(".tasks-board {")[1].split("}")[0]
+    assert "flex: 0 0 calc(100% - 5rem)" in css          # the main body leaves the next column's edge showing

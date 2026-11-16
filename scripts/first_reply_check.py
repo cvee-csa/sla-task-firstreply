@@ -48,7 +48,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _common  # noqa: E402
 
 # Business hours (and in_business_hours()) live in _common.py now, shared
-# with review_server.py's "next automatic check" estimate on the review page
+# with review_server.py's "Pending Refresh" estimate on the review page
 # -- two copies of "what counts as business hours" is exactly the kind of
 # drift that caused the launchd OAuth-path bug earlier in this project.
 

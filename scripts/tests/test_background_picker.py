@@ -15,7 +15,7 @@ def test_picker_markup_is_on_the_page_below_the_refresh_button():
     out = _page_html()
     assert 'class="bg-picker"' in out and 'id="bg-file"' in out and 'accept="image/*"' in out
     assert 'id="bg-veil"' in out and 'id="bg-remove"' in out
-    assert out.index('class="brand-nav-row"') < out.index('Refresh data') < out.index('class="bg-picker"')
+    assert out.index('class="brand-nav-row"') < out.index('Refresh data', out.index('class="brand-nav-row"')) < out.index('class="bg-picker"')
     assert out.index('class="bg-picker"') < out.index("</main>") if "</main>" in out else True
 
 
@@ -96,28 +96,19 @@ def test_a_toast_confirms_the_upload_and_says_whether_re_uploading_is_needed():
     assert "Background image removed" in script
 
 
-def test_collapse_menu_option_lives_in_the_background_panel():
+def test_collapse_menu_button_lives_in_the_background_panel_and_only_closes_it():
     out = _page_html()
     panel = out.split('class="bg-picker-panel"')[1].split("</details>")[0]
     assert 'id="menu-collapse"' in panel and "Collapse menu" in panel
-    assert out.count('id="menu-expand"') == 1 and 'id="menu-expand"' not in panel
-    assert out.index('id="menu-expand"') < out.index('<div class="brand">')
+    script = out.split("The Collapse menu button inside the Background panel")[1].split("</script>")[0]
+    assert "panel.open = false" in script and "menu-collapsed" not in script and "localStorage" not in script
 
 
-def test_collapsed_menu_css_hides_the_sidebar_and_shows_the_expand_button():
-    css = _css()
-    assert "html.menu-collapsed .brand { display: none; }" in css
-    assert "html.menu-collapsed .menu-expand { display: inline-flex; }" in css
-    assert re.search(r"\.menu-expand \{\s*display: none; position: fixed;", css)
-    assert "html.menu-collapsed body { margin: 2rem auto;" in css
-    assert "html.menu-collapsed #page-loading-dim { left: 0; }" in css
-
-
-def test_collapse_state_is_applied_before_paint_and_kept_in_this_browser():
+def test_the_sidebar_can_no_longer_be_hidden():
+    """Collapse menu used to hide the whole sidebar; it now closes only the Background panel, so the hide
+    feature (its restore button, CSS, saved choice) is gone, including a stale saved choice."""
     out = _page_html()
-    head = out.split("</head>")[0]
-    assert "csa-menu-collapsed" in head and "menu-collapsed" in head
-    assert "localStorage.setItem(KEY, '1')" in out and "localStorage.removeItem(KEY)" in out
+    assert 'id="menu-expand"' not in out and "menu-collapsed" not in out and "csa-menu-collapsed" not in out
 
 
 def test_panel_buttons_are_outlined_and_readable():

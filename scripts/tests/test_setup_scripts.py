@@ -225,7 +225,7 @@ def test_env_example_lists_every_required_zendesk_setting():
 
 def test_env_example_names_are_all_read_by_the_code():
     code = (SCRIPTS_DIR / "_common.py").read_text() + (SCRIPTS_DIR / "review_server.py").read_text() \
-        + (SCRIPTS_DIR / "first_reply_check.py").read_text()
+        + (SCRIPTS_DIR / "first_reply_check.py").read_text() + (SCRIPTS_DIR / "_projects.py").read_text()
     for name in _example_names():
         assert f'"{name}"' in code, f"{name} in .env.example is not read anywhere"
 
@@ -235,7 +235,7 @@ def test_env_example_holds_no_credentials():
         if line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
-        if key in ("ZENDESK_API_KEY", "ZENDESK_CLIENT_ID", "ZENDESK_CLIENT_SECRET"):
+        if key in ("ZENDESK_API_KEY", "ZENDESK_CLIENT_ID", "ZENDESK_CLIENT_SECRET", "AIRTABLE_TOKEN"):
             assert value == "", f"{key} must be blank in the example file"
 
 

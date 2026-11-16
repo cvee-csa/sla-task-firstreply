@@ -8,6 +8,7 @@ truth both scripts import from.
 
 import collections
 import fcntl
+import html as _html
 import json
 import os
 import re
@@ -913,6 +914,80 @@ def resolve_personal_task_identity(client, choice: str, own_agent_id, log_fn=pri
         return None, f"Could not find a Zendesk user named {people[choice]}."
     return user_id, None
 
+
+# --- @mentions on internal comments ------------------------------------------
+# Zendesk can only @mention agents (never the requester), and a mention in an
+# internal note is stored as an anchor at the top of the comment's html_body:
+#     <a href="/users/<id>" class="atmention">Full Name</a>
+# (copied from a comment written in Zendesk's own composer). post_comment sends
+# the draft as html_body, so the same anchor can be sent from here. The people
+# offered are the OVERVIEW_PEOPLE other than you.
+
+def mention_choices() -> dict:
+    """{choice value: full Zendesk display name} for the people that can be
+    tagged -- everyone in OVERVIEW_PEOPLE except you (tagging yourself in
+    your own note adds nothing)."""
+    return {k: n for k, n in personal_task_identity_people().items() if k != PERSONAL_TASK_IDENTITY_SELF}
+
+
+def clean_mention_keys(keys) -> list:
+    """The submitted choice values, de-duplicated, in the order mention_choices()
+    lists them. Raises ValueError on anything that is not an offered choice,
+    so a forged form value can never mention an arbitrary user."""
+    choices = mention_choices()
+    wanted = set(keys or [])
+    unknown = wanted - set(choices)
+    if unknown:
+        raise ValueError("Unknown person to tag.")
+    return [k for k in choices if k in wanted]
+
+
+def resolve_mentions(client, keys, log_fn=print):
+    """Resolves choice values to [(zendesk_user_id, display_name), ...].
+    Returns (users, error): error is a human-readable string (and users is
+    empty) when any person matches no Zendesk user, so the caller can stop
+    before posting anything."""
+    choices = mention_choices()
+    users = []
+    for key in keys:
+        name = choices[key]
+        user_id = _resolve_agent_id_by_name(client, name, log_fn=log_fn)
+        if user_id is None:
+            return [], f"Could not find a Zendesk user named {name} to tag."
+        users.append((user_id, name))
+    return users, None
+
+
+def mention_html(users) -> str:
+    """The mention anchors, space-separated, followed by a blank line --
+    the layout Zendesk's composer produces. Names are HTML-escaped."""
+    if not users:
+        return ""
+    anchors = " ".join(
+        f'<a href="/users/{int(uid)}" class="atmention">{_html.escape(name)}</a>' for uid, name in users
+    )
+    return anchors + "<br><br>"
+
+
+def mentions_stored(client, ticket_id, users, log_fn=print):
+    """Reads the ticket's newest internal comment back and checks that it still
+    carries a mention anchor for each of `users`. Returns (missing_names, error):
+    missing_names lists people whose mention Zendesk did not keep (empty when
+    all are present); error is set (and missing_names is None) when the
+    read-back itself failed -- a failed check says nothing about the post."""
+    try:
+        comments = client.get_ticket_comments(int(ticket_id))
+    except Exception as exc:
+        log_fn(f"mentions_stored(#{ticket_id}): read-back failed ({exc})")
+        return None, str(exc)
+    internal = [c for c in comments if not c.get("public")]
+    html_body = (internal[-1].get("html_body") or "") if internal else ""
+    missing = [
+        name for uid, name in users
+        if f'/users/{int(uid)}"' not in html_body or "atmention" not in html_body
+    ]
+    return missing, None
+
 # How far back each scan looks for candidate tickets. Widened from the
 # original 24h: a ticket that arrives and ages past this window before this
 # Mac ever wakes up to scan it (e.g. the lid stays closed over a long
@@ -959,7 +1034,7 @@ def last_scan_completed_at() -> str:
         return ""
 
 
-# --- business hours + "next automatic check" estimate -----------------------
+# --- business hours + "Pending Refresh" estimate -----------------------
 # The source of truth for when first_reply_check.py actually runs its scan
 # (as opposed to firing every CRON_INTERVAL_SECONDS and immediately no-oping).
 # Lives here, not duplicated in first_reply_check.py, for the same reason
@@ -971,7 +1046,7 @@ BUSINESS_WEEKDAYS = range(0, 5)  # Mon=0 ... Fri=4
 
 # Mirrors com.csa.zendesk-first-reply-check.plist's StartInterval. launchd
 # reads that value from the plist itself, not from here -- this constant only
-# feeds the "next automatic check" estimate below, so if the plist's interval
+# feeds the "Pending Refresh" estimate below, so if the plist's interval
 # is ever changed again, update this too or the estimate will quietly drift
 # out of sync with what's actually scheduled.
 CRON_INTERVAL_SECONDS = 120
@@ -2851,28 +2926,82 @@ SLA_HISTORY_FILE = Path(os.getenv(
 ))
 
 
+SLA_HISTORY_REMOTE = "origin"
+SLA_HISTORY_BRANCH = "main"
+SLA_UPDATE_FETCH_TIMEOUT_SECONDS = 60
+SLA_UPDATE_SHOW_TIMEOUT_SECONDS = 20
+SLA_STALE_AFTER_DAYS = 3
+
+
+def _sla_remote_cache_path() -> Path:
+    return OUTPUT_DIR / "sla_history_remote.json"
+
+
+def _load_history_entries(raw: str):
+    """Parses a history file's text into its list of daily snapshots, or raises ValueError."""
+    entries = json.loads(raw)
+    if not isinstance(entries, list):
+        raise ValueError("expected a JSON list of daily snapshots")
+    if any(not isinstance(e, dict) for e in entries):
+        raise ValueError("expected every snapshot to be an object")
+    return entries
+
+
+def _last_date(entries: list) -> str:
+    return str(entries[-1].get("date") or "") if entries else ""
+
+
+def _read_remote_cache() -> dict | None:
+    """The copy of the history that "Update history" fetched from the sibling repo's remote and
+    saved under this tool's own output folder, or None when there is none or it is unusable."""
+    try:
+        data = json.loads(_sla_remote_cache_path().read_text())
+        entries = _load_history_entries(json.dumps(data.get("entries")))
+    except (OSError, ValueError, AttributeError):
+        return None
+    if not entries or not _last_date(entries):
+        return None
+    return {"entries": entries, "fetched_at": str(data.get("fetched_at") or "")}
+
+
 def sla_history_snapshot() -> dict:
     """Read-only load of the sibling project's sla_history.json, for the
     /sla page's trend chart. Returns {"entries": [...], "error": str|None,
-    "as_of": str|None} -- "as_of" is the last entry's own "date" field
-    (falling back to the file's own mtime) so the page can honestly label
-    how fresh this is: this file is only ever as current as the last
-    `git pull` of that OTHER repo on this machine, since this tool never
-    fetches or writes it. A missing file or unreadable JSON degrades to an
-    empty "entries" list with an explanatory "error", never raises."""
+    "as_of": str|None, "source": "local"|"github", "fetched_at": str} --
+    "as_of" is the last entry's own "date" field (falling back to the
+    file's own mtime) so the page can honestly label how fresh this is.
+
+    There are two possible sources. The checkout's own file is only ever as
+    current as the last `git pull` of that OTHER repo on this machine, since
+    this tool never pulls or writes there. "Update history" (update_sla_history)
+    can also save a newer copy of that file, read from the remote's
+    tracking branch, under this tool's own output folder; whichever of the two
+    ends on the later date is used, and the checkout wins a tie. A missing
+    checkout file falls back to the saved copy. A missing file with no saved
+    copy, or unreadable JSON, degrades to an empty "entries" list with an
+    explanatory "error", never raises."""
+    remote = _read_remote_cache()
     try:
         raw = SLA_HISTORY_FILE.read_text()
     except FileNotFoundError:
-        return {"entries": [], "error": f"No history file found at {SLA_HISTORY_FILE} yet.", "as_of": None}
+        if remote:
+            return {"entries": remote["entries"], "error": None, "as_of": _last_date(remote["entries"]),
+                    "source": "github", "fetched_at": remote["fetched_at"]}
+        return {"entries": [], "error": f"No history file found at {SLA_HISTORY_FILE} yet.", "as_of": None, "source": "local", "fetched_at": ""}
     except Exception as exc:
-        return {"entries": [], "error": f"Could not read SLA history file: {exc}", "as_of": None}
+        return {"entries": [], "error": f"Could not read SLA history file: {exc}", "as_of": None, "source": "local", "fetched_at": ""}
 
     try:
-        entries = json.loads(raw)
-        if not isinstance(entries, list):
-            raise ValueError("expected a JSON list of daily snapshots")
+        entries = _load_history_entries(raw)
     except Exception as exc:
-        return {"entries": [], "error": f"Could not parse SLA history file: {exc}", "as_of": None}
+        if remote:
+            return {"entries": remote["entries"], "error": None, "as_of": _last_date(remote["entries"]),
+                    "source": "github", "fetched_at": remote["fetched_at"]}
+        return {"entries": [], "error": f"Could not parse SLA history file: {exc}", "as_of": None, "source": "local", "fetched_at": ""}
+
+    if remote and _last_date(remote["entries"]) > _last_date(entries):
+        return {"entries": remote["entries"], "error": None, "as_of": _last_date(remote["entries"]),
+                "source": "github", "fetched_at": remote["fetched_at"]}
 
     as_of = entries[-1].get("date") if entries else None
     if not as_of:
@@ -2880,7 +3009,119 @@ def sla_history_snapshot() -> dict:
             as_of = datetime.fromtimestamp(SLA_HISTORY_FILE.stat().st_mtime).strftime("%Y-%m-%d")
         except Exception:
             as_of = None
-    return {"entries": entries, "error": None, "as_of": as_of}
+    return {"entries": entries, "error": None, "as_of": as_of, "source": "local", "fetched_at": ""}
+
+
+def sla_history_age_days(as_of: str | None, today=None) -> int | None:
+    """Whole days between the newest saved snapshot and today (None if unknown)."""
+    try:
+        then = datetime.strptime(as_of, "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return None
+    return ((today or datetime.now().date()) - then).days
+
+
+def sla_live_entry(items: list, today: str) -> dict:
+    """Today's counts from the live open-ticket scan (fetch_sla_tickets), shaped like one history
+    entry and marked "live". Only the fields that can be counted from open tickets are present;
+    the response-time, compliance and agent-activity series stay blank for it."""
+    counts = {"on_track": 0, "due_soon": 0, "breached": 0}
+    rules: dict = {}
+    breached_ids = []
+    for item in items:
+        status = item.get("sla_status")
+        if status in counts:
+            counts[status] += 1
+        if status == "breached":
+            if item.get("ticket_id") is not None:
+                breached_ids.append(item["ticket_id"])
+            for rule in item.get("breached_rules") or []:
+                key = rule[0] if isinstance(rule, (list, tuple)) and rule else rule
+                rules[key] = rules.get(key, 0) + 1
+    return {"date": today, "live": True, "total": len(items), **counts, "breached_ids": breached_ids, "rules": rules}
+
+
+def sla_history_with_live_point(history: dict, sla_result: dict, today=None) -> dict:
+    """The history with a final "live" entry for today, so the charts do not end weeks ago when
+    the saved snapshots are stale. Added only when the live scan succeeded and was not cut short
+    (a partial count would mislead), and only when no saved snapshot exists for today or later
+    (a saved snapshot is authoritative). The returned dict carries "live_date" when a point was
+    added; "as_of" stays the newest SAVED snapshot."""
+    entries = history.get("entries") or []
+    day = (today or datetime.now().date()).isoformat()
+    if not entries or sla_result.get("error") or sla_result.get("capped") or _last_date(entries) >= day:
+        return history
+    return {**history, "entries": entries + [sla_live_entry(sla_result.get("items") or [], day)], "live_date": day}
+
+
+_sla_update_lock = threading.Lock()
+
+
+def _sla_git(repo: Path, *args: str, timeout: int):
+    """One git call against the sibling repo: no shell, no prompts (a missing credential fails
+    fast instead of waiting for input), English messages."""
+    import subprocess
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never", "LC_ALL": "C"}
+    return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, timeout=timeout, env=env)
+
+
+def _git_error_text(proc) -> str:
+    """The last line git printed, with any credentials in a URL removed, capped in length."""
+    lines = [ln.strip() for ln in (proc.stderr or "").splitlines() if ln.strip()]
+    text = re.sub(r"://[^/@\s]+@", "://", lines[-1] if lines else f"exit status {proc.returncode}")
+    return text[:200]
+
+
+def update_sla_history() -> dict:
+    """The /sla page's "Update history" button: fetches the sibling repo's remote branch and saves
+    its copy of data/sla_history.json under this tool's own output folder when it is newer than what
+    the checkout holds. Returns {"ok": bool, "message": str}.
+
+    Deliberately NOT a `git pull`: the checkout can hold uncommitted work, and a pull would fail on
+    or rewrite it. `git fetch` only moves the remote-tracking branch (the working tree is never
+    touched), and the file is read straight out of that branch with `git show`. Nothing is written
+    in the sibling repo's working tree; the checkout's own file stays as it is, so a later manual
+    `git pull` works as before. A failure (no network, no git credentials, branch missing) leaves
+    the current data in place and says why."""
+    import subprocess
+    if not _sla_update_lock.acquire(blocking=False):
+        return {"ok": False, "message": "An update is already running."}
+    try:
+        repo = SLA_HISTORY_FILE.parent.parent
+        if not (repo / ".git").exists():
+            return {"ok": False, "message": f"{repo} is not a git checkout, so there is nothing to update from."}
+        rel = SLA_HISTORY_FILE.relative_to(repo).as_posix()
+        remote_ref = f"{SLA_HISTORY_REMOTE}/{SLA_HISTORY_BRANCH}"
+        try:
+            fetched = _sla_git(repo, "fetch", "--quiet", SLA_HISTORY_REMOTE, SLA_HISTORY_BRANCH, timeout=SLA_UPDATE_FETCH_TIMEOUT_SECONDS)
+            if fetched.returncode != 0:
+                return {"ok": False, "message": f"Could not fetch from GitHub: {_git_error_text(fetched)}. The history was not changed."}
+            shown = _sla_git(repo, "show", f"{remote_ref}:{rel}", timeout=SLA_UPDATE_SHOW_TIMEOUT_SECONDS)
+            if shown.returncode != 0:
+                return {"ok": False, "message": f"{remote_ref} has no {rel}: {_git_error_text(shown)}. The history was not changed."}
+        except FileNotFoundError:
+            return {"ok": False, "message": "git is not installed or not on this service's PATH. The history was not changed."}
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "message": "GitHub did not answer in time. The history was not changed."}
+        try:
+            remote_entries = _load_history_entries(shown.stdout)
+        except ValueError as exc:
+            return {"ok": False, "message": f"GitHub's copy could not be read ({exc}). The history was not changed."}
+        remote_last = _last_date(remote_entries)
+        if not remote_last:
+            return {"ok": False, "message": "GitHub's copy holds no dated snapshots. The history was not changed."}
+        current = sla_history_snapshot()
+        current_last = _last_date(current.get("entries") or [])
+        if current_last and remote_last <= current_last:
+            return {"ok": True, "message": f"Already current: the newest snapshot on GitHub is {remote_last}, and this page already has {current_last}."}
+        _atomic_write_json(_sla_remote_cache_path(), {
+            "fetched_at": datetime.now().isoformat(timespec="seconds"), "source": remote_ref, "entries": remote_entries})
+        have = {e.get("date") for e in (current.get("entries") or [])}
+        new_days = sum(1 for e in remote_entries if e.get("date") not in have)
+        was = f" (was {current_last})" if current_last else ""
+        return {"ok": True, "message": f"Updated: the history now runs to {remote_last}{was}, {new_days} new day(s)."}
+    finally:
+        _sla_update_lock.release()
 
 
 # Read-only look at the sibling meetingnotestool project's precomputed

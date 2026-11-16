@@ -31,6 +31,7 @@ for _p in (str(STUB_PKG_DIR), str(SCRIPTS_DIR)):
 import pytest
 
 import _common  # noqa: E402
+import _projects  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -71,4 +72,10 @@ def isolated_output_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(_common, "STANDUP_PEOPLE", ["Alex", "Sam"])
     monkeypatch.setattr(_common, "_standup_cache", {})
     monkeypatch.setattr(_common, "STANDUP_TRACKED_PERSON", "Sam")
+    # /projects: no real Airtable settings or cached projects in any test, and no
+    # leftover per-record locks. Tests that need Airtable set the env vars themselves.
+    for name in ("AIRTABLE_TOKEN", "AIRTABLE_BASE_ID", "AIRTABLE_TABLE_ID", "AIRTABLE_VIEW_ID", "PROJECTS_ASSIGNEES"):
+        monkeypatch.delenv(name, raising=False)
+    _projects.reset_cache()
+    monkeypatch.setattr(_projects, "_in_progress", set())
     yield

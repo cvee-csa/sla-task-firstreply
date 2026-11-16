@@ -35,6 +35,7 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _common  # noqa: E402
+import _projects  # noqa: E402
 
 BIND_HOST = "127.0.0.1"  # do not change to 0.0.0.0 -- see module docstring
 
@@ -224,13 +225,12 @@ _ICONS = {
     "check-square": '<polyline points="9 11 12 14 22 4"></polyline><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path>',
     "flag": '<path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"></path><line x1="4" y1="22" x2="4" y2="15"></line>',
     "check-circle": '<path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline>',
+    "info": '<circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line>',
     "chevron-up": '<polyline points="18 15 12 9 6 15"></polyline>',
     "chevron-down": '<polyline points="6 9 12 15 18 9"></polyline>',
     # Icons for the icon-only theme toggle (see _page()'s brand-right): anchor
     # (Abyss), orbit (Galaxy), moon-star (Dark), terminal (Tomorrow Blue),
     # cloud-moon (Lesbian pride), ghost (Halloween), snowflake (Christmas).
-    "menu": '<line x1="4" y1="6" x2="20" y2="6"></line><line x1="4" y1="12" x2="20" y2="12"></line><line x1="4" y1="18" x2="20" y2="18"></line>',
-    "panel-left-close": '<rect x="3" y="3" width="18" height="18" rx="2"></rect><path d="M9 3v18"></path><path d="m16 15-3-3 3-3"></path>',
     "anchor": '<path d="M12 22V8"></path><path d="M5 12H2a10 10 0 0 0 20 0h-3"></path><circle cx="12" cy="5" r="3"></circle>',
     "orbit": '<circle cx="12" cy="12" r="3"></circle><circle cx="19" cy="5" r="2"></circle><circle cx="5" cy="19" r="2"></circle><path d="M10.4 21.9a10 10 0 0 0 9.941-15.416"></path><path d="M13.5 2.1a10 10 0 0 0-9.841 15.416"></path>',
     "moon-star": '<path d="M18 5h4"></path><path d="M20 3v4"></path><path d="M20.985 12.486a9 9 0 1 1-9.473-9.472c.405-.022.617.46.402.803a6 6 0 0 0 8.268 8.268c.344-.215.825-.004.803.401"></path>',
@@ -247,6 +247,7 @@ _ICONS = {
     # Added for the /overview nav link -- a four-quadrant grid reads as
     # "several separate things pulled into one view", which is exactly
     # what that page is (see _render_overview_page).
+    "folder": '<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>',
     "grid": '<rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect>',
     # Added for the /firstreply nav link -- a reply arrow (curving back to
     # the sender) is the literal action that page's whole queue exists to
@@ -316,6 +317,36 @@ def _avatar_html(name: str) -> str:
     hue_index = sum(ord(c) for c in name) % len(_AVATAR_HUES)
     initials = html.escape(_initials(name))
     return f'<span class="avatar avatar-hue-{hue_index}" title="{html.escape(name)}">{initials}</span>'
+
+
+_ABOUT_TOOL_HTML = """<details class="about-tool" id="about-tool">
+  <summary title="How this tool gets its data">__ICON__<span class="about-label">About This Tool</span></summary>
+  <div class="about-panel" role="region" aria-label="About This Tool">
+    <h2>About This Tool</h2>
+    <p>A review tool that runs only on this Mac (<code>127.0.0.1:8765</code>). It reads from Zendesk and from a few local files, and it writes to Zendesk only when you click a button. Nothing is posted automatically.</p>
+    <h3>Where the data comes from</h3>
+    <ul>
+      <li><strong>Zendesk, live.</strong> The queue, Overview, Discussion, Security, Recently Solved and Recently worked on all read IT-Operations tickets and their comments through the Zendesk API, using the credentials in this repo&rsquo;s <code>.env</code>. Zendesk cannot filter some of these (for example by tag), so the tool pages through the group and filters locally, within a set limit; a note appears when a scan stopped early. Results are kept in memory for about 2 minutes, and <strong>Refresh data</strong> reads again on demand.</li>
+      <li><strong>The first-reply check.</strong> A background job runs every 2 minutes, Monday to Friday, 9am to 4pm local time. It looks back up to 72 hours, keeps tickets with no public reply yet, drafts the acknowledgment, and saves the candidates to a local file (<code>pending_drafts.json</code>). The main queue is drawn from that file, so it loads without waiting on Zendesk. <strong>Last checked</strong> and <strong>Pending Refresh</strong> in the sidebar report that job.</li>
+      <li><strong>SLA charts.</strong> Daily snapshots from the separate <code>sla-report-slack</code> project (<code>data/sla_history.json</code>), which its scheduled job updates on weekdays. They are only as fresh as the last <code>git pull</code> of that project, unless <strong>Update history</strong> on that page fetches the newest snapshots from GitHub into this tool&rsquo;s own output folder (nothing in that project&rsquo;s files is changed); the page shows the newest snapshot date and where it came from. When the newest snapshot is older than today, the last point on the charts is a live count of the open tickets. The live ticket scan adds the SLA breach count in the nav.</li>
+      <li><strong>Standup.</strong> Read-only, from <code>dist/standup_data.json</code> built by the separate <code>meetingnotestool</code> project from the Operations Standup notes. This tool displays that view and stores none of it.</li>
+      <li><strong>My tasks.</strong> Drafts live in a local file (<code>personal_tasks.json</code>) until you promote one, which is the only moment a Zendesk ticket is created. Each page load checks promoted tasks against their live ticket status.</li>
+      <li><strong>Projects.</strong> Read from the IT Operations Projects table in Airtable through its API, using the token in this repo&rsquo;s <code>.env</code>. Results are kept in memory for about 2 minutes, and <strong>Refresh data</strong> on that page reads again. Nothing from Airtable is stored on disk except a local log of the edits made here (<code>projects_edits.jsonl</code>), which powers Undo.</li>
+      <li><strong>This browser.</strong> The theme and any Background image are kept in this browser&rsquo;s local storage and never leave it.</li>
+    </ul>
+    <h3>What it writes to Zendesk</h3>
+    <p>Only what you click: <strong>Public Reply</strong>, <strong>Internal Comment</strong> (optionally tagging teammates), <strong>Claim</strong>, and promoting or quick-solving a task. Before a reply is posted, the tool checks the ticket again for someone else&rsquo;s reply.</p>
+    <h3>What it writes to Airtable</h3>
+    <p>Only from the Projects page, only after a review step, and only these fields: Status, Assigned to, Blockers, Sprint Notes, Start date, End date and Actual Completion Date. A field changed in Airtable since the page loaded is never overwritten. Each save is read back to confirm it, and the banner offers Undo.</p>
+  </div>
+</details>"""
+
+
+def _about_tool_html() -> str:
+    """The About This Tool control at the top-right of every page: a pill that
+    opens a panel describing where each page's data comes from (the text is
+    static, so it needs no escaping)."""
+    return _ABOUT_TOOL_HTML.replace("__ICON__", _icon("info", "icon-sm"))
 
 
 def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh: bool = False, header_meta: str = "", current_path: str = "/firstreply", wide: bool = False, nav_path: str = "") -> bytes:
@@ -455,9 +486,6 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
       root.style.setProperty('--csa-bg-veil', String(isNaN(veil) ? 60 : Math.max(0, Math.min(95, veil))));
       root.classList.add('has-bg-image');
     }
-    if (localStorage.getItem('csa-menu-collapsed') === '1') {
-      document.documentElement.classList.add('menu-collapsed');
-    }
   } catch (e) {}
 })();
 </script>"""
@@ -487,7 +515,7 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
         if auto_refresh
         else ""
     )
-    # Ticks the "Last checked" / "Next automatic check" status-bar spans
+    # Ticks the "Last checked" / "Pending Refresh" status-bar spans
     # every second so they read as a live clock instead of a string frozen
     # at page-load time. Harmless no-op on pages without these ids (the
     # reconnect page, 404s) -- getElementById just returns null and the tick
@@ -654,10 +682,303 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
     snow.flakes = [];
   }
   window.addEventListener('resize', snowResize);
+  // Bats for the Halloween theme: a canvas inside #side-sky, the empty space of the sidebar. A few bats flap
+  // across it at different speeds and heights, leave one side and come back later. With reduced motion set,
+  // a still row of bats is drawn once instead. Nothing runs in other themes or while the tab is hidden.
+  var bats = { canvas: null, ctx: null, list: [], raf: 0, last: 0, w: 0, h: 0, dpr: 1, on: false, ro: null };
+  function batNew(initial) {
+    var fromLeft = Math.random() < 0.5;
+    var size = 11 + Math.random() * 9;
+    var speed = 24 + Math.random() * 30;
+    return {
+      size: size,
+      x: initial ? Math.random() * bats.w : (fromLeft ? -size * 2 : bats.w + size * 2),
+      baseY: size + Math.random() * Math.max(1, bats.h - size * 2),
+      vx: fromLeft ? speed : -speed,
+      wobble: 4 + Math.random() * 12,
+      wobbleRate: 0.8 + Math.random() * 1.4,
+      phase: Math.random() * 6.28,
+      flapRate: 8 + Math.random() * 5,
+      wait: initial ? 0 : 0.4 + Math.random() * 3.5
+    };
+  }
+  function batDraw(ctx, b, flap, y) {
+    var s = b.size;
+    ctx.save();
+    ctx.translate(b.x, y);
+    ctx.fillStyle = '#2a1d38';
+    ctx.strokeStyle = bats.rim;
+    ctx.lineWidth = 1;
+    for (var side = -1; side <= 1; side += 2) {
+      ctx.beginPath();
+      ctx.moveTo(side * 0.1 * s, 0);
+      ctx.quadraticCurveTo(side * 0.5 * s, (-0.55 - 0.35 * flap) * s, side * 1.05 * s, (-0.2 - 0.7 * flap) * s);
+      ctx.quadraticCurveTo(side * 0.92 * s, (0.02 - 0.35 * flap) * s, side * 0.78 * s, (0.1 - 0.3 * flap) * s);
+      ctx.quadraticCurveTo(side * 0.66 * s, (-0.02 - 0.2 * flap) * s, side * 0.52 * s, (0.18 - 0.18 * flap) * s);
+      ctx.quadraticCurveTo(side * 0.34 * s, (0.04 - 0.08 * flap) * s, side * 0.12 * s, 0.3 * s);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+    }
+    ctx.beginPath();
+    ctx.ellipse(0, 0.06 * s, 0.15 * s, 0.32 * s, 0, 0, 6.2832);
+    ctx.fill();
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(-0.13 * s, -0.22 * s);
+    ctx.lineTo(-0.1 * s, -0.5 * s);
+    ctx.lineTo(0, -0.3 * s);
+    ctx.lineTo(0.1 * s, -0.5 * s);
+    ctx.lineTo(0.13 * s, -0.22 * s);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = bats.rim;
+    ctx.fillRect(-0.07 * s, -0.22 * s, 0.05 * s, 0.05 * s);
+    ctx.fillRect(0.02 * s, -0.22 * s, 0.05 * s, 0.05 * s);
+    ctx.restore();
+  }
+  function batsResize() {
+    var sky = document.getElementById('side-sky');
+    if (!bats.canvas || !sky) { return; }
+    bats.dpr = Math.min(window.devicePixelRatio || 1, 2);
+    bats.w = sky.clientWidth;
+    bats.h = sky.clientHeight;
+    bats.canvas.width = Math.round(bats.w * bats.dpr);
+    bats.canvas.height = Math.round(bats.h * bats.dpr);
+    var want = bats.h < 50 || bats.w < 60 ? 0 : Math.min(4, Math.max(1, Math.round(bats.h / 110)));
+    while (bats.list.length < want) { bats.list.push(batNew(true)); }
+    if (bats.list.length > want) { bats.list.length = want; }
+    for (var i = 0; i < bats.list.length; i++) { bats.list[i].baseY = Math.min(bats.list[i].baseY, Math.max(bats.list[i].size, bats.h - bats.list[i].size)); }
+    if (snowReduced()) { batsStill(); }
+  }
+  function batsStill() {
+    if (!bats.ctx) { return; }
+    bats.ctx.setTransform(bats.dpr, 0, 0, bats.dpr, 0, 0);
+    bats.ctx.clearRect(0, 0, bats.w, bats.h);
+    for (var i = 0; i < bats.list.length; i++) {
+      var b = bats.list[i];
+      b.x = bats.w * (i + 1) / (bats.list.length + 1);
+      batDraw(bats.ctx, b, 0.3, b.baseY);
+    }
+  }
+  function batsFrame(now) {
+    if (!bats.on) { return; }
+    var dt = Math.min(0.05, (now - (bats.last || now)) / 1000);
+    bats.last = now;
+    var ctx = bats.ctx;
+    ctx.setTransform(bats.dpr, 0, 0, bats.dpr, 0, 0);
+    ctx.clearRect(0, 0, bats.w, bats.h);
+    for (var i = 0; i < bats.list.length; i++) {
+      var b = bats.list[i];
+      if (b.wait > 0) { b.wait -= dt; continue; }
+      b.x += b.vx * dt;
+      b.phase += b.flapRate * dt;
+      var off = b.vx > 0 ? b.x > bats.w + b.size * 2 : b.x < -b.size * 2;
+      if (off) { bats.list[i] = batNew(false); continue; }
+      var y = b.baseY + Math.sin(now / 1000 * b.wobbleRate + i) * b.wobble;
+      batDraw(ctx, b, Math.sin(b.phase), y);
+    }
+    bats.raf = window.requestAnimationFrame(batsFrame);
+  }
+  function batsStart() {
+    if (bats.on) { return; }
+    var sky = document.getElementById('side-sky');
+    if (!sky) { return; }
+    var c = sky.querySelector('canvas.fx-bats');
+    if (!c) { c = document.createElement('canvas'); c.className = 'fx-bats'; sky.appendChild(c); }
+    bats.canvas = c;
+    bats.ctx = c.getContext('2d');
+    if (!bats.ctx) { return; }
+    var accent = window.getComputedStyle(document.documentElement).getPropertyValue('--accent').trim();
+    bats.rim = accent || '#ff8a3d';
+    bats.on = true;
+    bats.last = 0;
+    batsResize();
+    if (window.ResizeObserver && !bats.ro) { bats.ro = new window.ResizeObserver(batsResize); bats.ro.observe(sky); }
+    if (snowReduced()) { bats.on = false; batsStill(); return; }
+    if (!document.hidden) { bats.raf = window.requestAnimationFrame(batsFrame); }
+  }
+  function batsStop() {
+    bats.on = false;
+    if (bats.raf) { window.cancelAnimationFrame(bats.raf); bats.raf = 0; }
+    if (bats.ro) { bats.ro.disconnect(); bats.ro = null; }
+    var sky = document.getElementById('side-sky');
+    var c = sky && sky.querySelector('canvas.fx-bats');
+    if (c && c.parentNode) { c.parentNode.removeChild(c); }
+    bats.canvas = null;
+    bats.ctx = null;
+    bats.list = [];
+  }
+  window.addEventListener('resize', batsResize);
+
+  // Lesbian pride theme: soft clouds drift across #side-sky (the same empty sidebar space the bats use) while
+  // pastel hearts and petals float up through it. With reduced motion set, one still frame is drawn instead.
+  // Nothing runs in other themes or while the tab is hidden.
+  var pride = { canvas: null, ctx: null, clouds: [], bits: [], raf: 0, last: 0, w: 0, h: 0, dpr: 1, on: false, ro: null };
+  var PRIDE_COLORS = ['#ff9a56', '#ef7627', '#ffb48a', '#d362a4', '#e8a1c8', '#b55690'];
+  function prideCloudNew(i, count, initial) {
+    var s = 13 + Math.random() * 9;
+    return {
+      s: s,
+      x: initial ? Math.random() * pride.w : -s * 5,
+      y: (i + 0.5) / count * pride.h + (Math.random() - 0.5) * (pride.h / count) * 0.5,
+      v: 5 + Math.random() * 8,
+      a: 0.7 + Math.random() * 0.25
+    };
+  }
+  function prideBitNew(initial) {
+    var size = 5 + Math.random() * 5;
+    return {
+      size: size,
+      x: Math.random() * pride.w,
+      y: initial ? Math.random() * pride.h : pride.h + size + Math.random() * pride.h * 0.4,
+      vy: 14 + Math.random() * 16,
+      sway: 6 + Math.random() * 10,
+      swayRate: 0.6 + Math.random() * 0.9,
+      phase: Math.random() * 6.28,
+      tilt: (Math.random() - 0.5) * 0.8,
+      heart: Math.random() < 0.7,
+      color: PRIDE_COLORS[Math.floor(Math.random() * PRIDE_COLORS.length)],
+      a: 0.55 + Math.random() * 0.3
+    };
+  }
+  function prideCloudDraw(ctx, c) {
+    var s = c.s;
+    var parts = [[0, 0, 1], [0.95, -0.4, 1.25], [1.95, -0.1, 1.0], [2.8, 0.12, 0.8], [-0.85, 0.18, 0.72]];
+    ctx.save();
+    ctx.translate(c.x, c.y);
+    ctx.globalAlpha = c.a;
+    var g = ctx.createLinearGradient(0, -s * 1.6, 0, s * 0.9);
+    g.addColorStop(0, '#ffffff');
+    g.addColorStop(1, '#f4c8de');
+    ctx.fillStyle = g;
+    ctx.shadowColor = 'rgba(176, 74, 133, 0.38)';
+    ctx.shadowBlur = 7;
+    ctx.shadowOffsetY = 2;
+    ctx.beginPath();
+    for (var i = 0; i < parts.length; i++) {
+      var px = parts[i][0] * s, py = parts[i][1] * s, pr = parts[i][2] * s;
+      ctx.moveTo(px + pr, py);
+      ctx.arc(px, py, pr, 0, 6.2832);
+    }
+    ctx.rect(-0.85 * s, 0.1 * s, 3.65 * s, 0.8 * s);
+    ctx.fill();
+    ctx.restore();
+  }
+  function prideBitDraw(ctx, b) {
+    var s = b.size;
+    ctx.save();
+    ctx.translate(b.x, b.y);
+    ctx.rotate(b.tilt + Math.sin(b.phase) * 0.35);
+    ctx.globalAlpha = b.a;
+    ctx.fillStyle = b.color;
+    ctx.beginPath();
+    if (b.heart) {
+      ctx.moveTo(0, s * 0.9);
+      ctx.bezierCurveTo(-s * 1.5, -s * 0.1, -s * 0.7, -s * 1.1, 0, -s * 0.35);
+      ctx.bezierCurveTo(s * 0.7, -s * 1.1, s * 1.5, -s * 0.1, 0, s * 0.9);
+    } else {
+      ctx.ellipse(0, 0, s * 0.45, s * 0.9, 0, 0, 6.2832);
+    }
+    ctx.fill();
+    ctx.restore();
+  }
+  function prideResize() {
+    var sky = document.getElementById('side-sky');
+    if (!pride.canvas || !sky) { return; }
+    pride.dpr = Math.min(window.devicePixelRatio || 1, 2);
+    pride.w = sky.clientWidth;
+    pride.h = sky.clientHeight;
+    pride.canvas.width = Math.round(pride.w * pride.dpr);
+    pride.canvas.height = Math.round(pride.h * pride.dpr);
+    var tooSmall = pride.h < 50 || pride.w < 60;
+    var wantClouds = tooSmall ? 0 : Math.min(4, Math.max(2, Math.round(pride.h / 130)));
+    var wantBits = tooSmall ? 0 : Math.min(16, Math.max(5, Math.round(pride.h / 38)));
+    if (pride.clouds.length !== wantClouds) {
+      pride.clouds = [];
+      for (var i = 0; i < wantClouds; i++) { pride.clouds.push(prideCloudNew(i, wantClouds, true)); }
+    }
+    while (pride.bits.length < wantBits) { pride.bits.push(prideBitNew(true)); }
+    if (pride.bits.length > wantBits) { pride.bits.length = wantBits; }
+    if (snowReduced()) { prideStill(); }
+  }
+  function prideStill() {
+    if (!pride.ctx) { return; }
+    pride.ctx.setTransform(pride.dpr, 0, 0, pride.dpr, 0, 0);
+    pride.ctx.clearRect(0, 0, pride.w, pride.h);
+    for (var i = 0; i < pride.clouds.length; i++) { prideCloudDraw(pride.ctx, pride.clouds[i]); }
+    for (var j = 0; j < pride.bits.length; j++) { prideBitDraw(pride.ctx, pride.bits[j]); }
+  }
+  function prideFrame(now) {
+    if (!pride.on) { return; }
+    var dt = Math.min(0.05, (now - (pride.last || now)) / 1000);
+    pride.last = now;
+    var ctx = pride.ctx;
+    ctx.setTransform(pride.dpr, 0, 0, pride.dpr, 0, 0);
+    ctx.clearRect(0, 0, pride.w, pride.h);
+    var i;
+    for (i = 0; i < pride.clouds.length; i++) {
+      var c = pride.clouds[i];
+      c.x += c.v * dt;
+      if (c.x > pride.w + c.s) { pride.clouds[i] = prideCloudNew(i, pride.clouds.length, false); continue; }
+      prideCloudDraw(ctx, c);
+    }
+    for (i = 0; i < pride.bits.length; i++) {
+      var b = pride.bits[i];
+      b.y -= b.vy * dt;
+      b.phase += b.swayRate * dt;
+      if (b.y < -b.size * 2) { pride.bits[i] = prideBitNew(false); continue; }
+      var dx = Math.sin(b.phase * 1.7) * b.sway;
+      ctx.save();
+      ctx.translate(dx, 0);
+      prideBitDraw(ctx, b);
+      ctx.restore();
+    }
+    pride.raf = window.requestAnimationFrame(prideFrame);
+  }
+  function prideStart() {
+    if (pride.on) { return; }
+    var sky = document.getElementById('side-sky');
+    if (!sky) { return; }
+    var c = sky.querySelector('canvas.fx-pride');
+    if (!c) { c = document.createElement('canvas'); c.className = 'fx-pride'; sky.appendChild(c); }
+    pride.canvas = c;
+    pride.ctx = c.getContext('2d');
+    if (!pride.ctx) { return; }
+    pride.on = true;
+    pride.last = 0;
+    prideResize();
+    if (window.ResizeObserver && !pride.ro) { pride.ro = new window.ResizeObserver(prideResize); pride.ro.observe(sky); }
+    if (snowReduced()) { pride.on = false; prideStill(); return; }
+    if (!document.hidden) { pride.raf = window.requestAnimationFrame(prideFrame); }
+  }
+  function prideStop() {
+    pride.on = false;
+    if (pride.raf) { window.cancelAnimationFrame(pride.raf); pride.raf = 0; }
+    if (pride.ro) { pride.ro.disconnect(); pride.ro = null; }
+    var sky = document.getElementById('side-sky');
+    var c = sky && sky.querySelector('canvas.fx-pride');
+    if (c && c.parentNode) { c.parentNode.removeChild(c); }
+    pride.canvas = null;
+    pride.ctx = null;
+    pride.clouds = [];
+    pride.bits = [];
+  }
+  window.addEventListener('resize', prideResize);
   document.addEventListener('visibilitychange', function() {
-    if (document.documentElement.classList.contains('theme-christmas')) {
+    var cls = document.documentElement.classList;
+    if (cls.contains('theme-christmas')) {
       if (document.hidden) { snow.on = false; if (snow.raf) { window.cancelAnimationFrame(snow.raf); snow.raf = 0; } }
       else { snowStart(); }
+    }
+    if (cls.contains('theme-lesbian')) {
+      if (document.hidden) { pride.on = false; if (pride.raf) { window.cancelAnimationFrame(pride.raf); pride.raf = 0; } }
+      else { prideStart(); }
+    }
+    if (cls.contains('theme-halloween')) {
+      if (document.hidden) { bats.on = false; if (bats.raf) { window.cancelAnimationFrame(bats.raf); bats.raf = 0; } }
+      else { batsStart(); }
     }
   });
   function applyTheme(mode) {
@@ -677,6 +998,8 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
       themeColorMeta.content = mode === 'abyss' ? '#000c18' : mode === 'tomorrow' ? '#002451' : mode === 'lesbian' ? '#d162a4' : mode === 'halloween' ? '#ff8a3d' : mode === 'christmas' ? '#4fd17f' : mode === 'galaxy' ? '#f09a7a' : (isDark ? '#6fa3ef' : '#1a56c4');
     }
     if (mode === 'christmas') { snowStart(); } else { snowStop(); }
+    if (mode === 'halloween') { batsStart(); } else { batsStop(); }
+    if (mode === 'lesbian') { prideStart(); } else { prideStop(); }
   }
   window.setTheme = function(mode) {
     try {
@@ -779,31 +1102,24 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
 </script>
 <script>
 (function() {
-  // Sidebar collapse: the button in the Background panel hides the left menu,
-  // and the small button at the top-left of the page brings it back. The
-  // choice is kept per browser (csa-menu-collapsed in localStorage).
-  var root = document.documentElement;
-  var KEY = 'csa-menu-collapsed';
-  var expand = document.getElementById('menu-expand');
+  // The Collapse menu button inside the Background panel closes that panel (the details element) and nothing else.
   var collapse = document.getElementById('menu-collapse');
-  function setCollapsed(on) {
-    root.classList.toggle('menu-collapsed', on);
-    try {
-      if (on) { localStorage.setItem(KEY, '1'); } else { localStorage.removeItem(KEY); }
-    } catch (e) {}
-  }
   if (collapse) {
     collapse.addEventListener('click', function() {
       var panel = document.querySelector('details.bg-picker');
       if (panel) { panel.open = false; }
-      setCollapsed(true);
-      if (expand) { expand.focus(); }
+      var summary = panel && panel.querySelector('summary');
+      if (summary) { summary.focus(); }
     });
   }
-  if (expand) {
-    expand.addEventListener('click', function() {
-      setCollapsed(false);
-      if (collapse) { collapse.focus(); }
+  // About This Tool: Escape or a click outside the panel closes it.
+  var about = document.getElementById('about-tool');
+  if (about) {
+    document.addEventListener('keydown', function(e) {
+      if (e.key === 'Escape' && about.open) { about.open = false; var sm = about.querySelector('summary'); if (sm) { sm.focus(); } }
+    });
+    document.addEventListener('click', function(e) {
+      if (about.open && !about.contains(e.target)) { about.open = false; }
     });
   }
 })();
@@ -1022,7 +1338,8 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
   var dim = document.getElementById('page-loading-dim');
   var card = document.getElementById('page-loading-card');
   var cardTitle = document.getElementById('page-loading-title');
-  var cardFill = document.getElementById('page-loading-fill');
+  var cardArc = document.getElementById('page-loading-arc');
+  var cardPct = document.getElementById('page-loading-pct');
   var cardDetail = document.getElementById('page-loading-detail');
 
   // The id from the navigation that produced THIS page is spent.
@@ -1037,7 +1354,9 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
   function setPct(pct) {
     if (pct > shown) { shown = pct; }
     bar.style.width = shown + '%';
-    if (cardFill) { cardFill.style.width = shown + '%'; }
+    if (cardArc) { cardArc.style.strokeDasharray = shown + ' 100'; }
+    if (cardPct) { cardPct.textContent = Math.round(shown) + '%'; }
+    if (card) { card.style.setProperty('--load-rot', String(shown * 3.6)); }
   }
 
   // Detail card text from the latest /__progress snapshot (or none).
@@ -1067,7 +1386,9 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
     dim.classList.remove('show');
     card.classList.remove('show');
     card.setAttribute('aria-hidden', 'true');
-    cardFill.style.width = '0%';
+    if (cardArc) { cardArc.style.strokeDasharray = '0 100'; }
+    if (cardPct) { cardPct.textContent = ''; }
+    card.style.setProperty('--load-rot', '0');
   }
 
   function creep() {
@@ -1788,6 +2109,78 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
   .overview-board > .overview-section {{ flex: 0 0 var(--board-col-width, 330px); width: var(--board-col-width, 330px); max-height: calc(100vh - 11rem); overflow-y: auto; scroll-snap-align: start; margin-bottom: 0; box-sizing: border-box; }}
   .overview-board > .overview-block-discussion, .overview-board > .overview-block-security {{ --board-col-width: 380px; }}
   .overview-board-hint {{ margin: 0 0 0.5rem; }}
+  /* /tasks is a two-column board that scrolls sideways, like /overview: the main
+     body (new task + drafts) takes nearly the full width so the Recently completed
+     column starts to the right of it, with its left edge peeking in as a cue. */
+  .tasks-board {{ display: flex; gap: 1.25rem; align-items: flex-start; overflow-x: auto; padding: 0.25rem 0.25rem 1rem 0; scroll-snap-type: x proximity; }}
+  .tasks-main {{ flex: 0 0 calc(100% - 5rem); min-width: 0; scroll-snap-align: start; }}
+  .tasks-completed {{ flex: 0 0 22rem; width: 22rem; box-sizing: border-box; scroll-snap-align: start; margin-bottom: 0; }}
+  @media (max-width: 720px) {{ .tasks-main {{ flex-basis: calc(100% - 3rem); }} .tasks-completed {{ flex-basis: 18rem; width: 18rem; }} }}
+  .tasks-completed-list {{ list-style: none; padding: 0; margin: 0; }}
+  .tasks-completed-list li {{ padding: 0.5rem 0; border-bottom: 1px solid var(--divider); font-size: 0.9rem; overflow-wrap: anywhere; }}
+  .tasks-completed-list li:last-child {{ border-bottom: 0; }}
+  .tasks-completed-list .handled-time {{ display: block; float: none; color: var(--muted); font-size: 0.78rem; margin-top: 0.15rem; }}
+  .sla-history-bar {{ display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem 1rem; margin-bottom: 0.5rem; }}
+  .sla-history-bar .sla-history-note {{ margin: 0; flex: 1 1 24rem; }}
+  .sla-update-form {{ margin: 0; }}
+  .sla-history-stale {{ color: var(--flag-alert-color); }}
+  /* /projects: columns reuse the Overview board; the card is a .mini-ticket. */
+  .project-board > .project-column {{ --board-col-width: 340px; }}
+  .project-card {{ display: block; }}
+  .project-name {{ font-weight: 700; margin-bottom: 0.3rem; }}
+  .project-line {{ display: flex; flex-wrap: wrap; align-items: center; gap: 0.2rem 0.6rem; }}
+  .project-line:empty {{ display: none; }}
+  .project-who {{ display: inline-flex; align-items: center; gap: 0.4rem; font-size: 0.85rem; }}
+  .project-unassigned {{ margin: 0; font-style: italic; opacity: 0.8; }}
+  .project-chips {{ display: flex; flex-wrap: wrap; gap: 0.3rem 0; margin: 0.35rem 0; }}
+  .project-chips:empty {{ display: none; }}
+  .project-preview {{ margin: 0.3rem 0; font-size: 0.85rem; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }}
+  .project-blockers {{ color: var(--flag-alert-color); font-size: 0.85rem; margin: 0.3rem 0; white-space: pre-wrap; }}
+  .project-notes {{ font-size: 0.85rem; margin: 0.3rem 0; white-space: pre-wrap; color: var(--muted); }}
+  .project-open {{ display: inline-block; margin-top: 0.3rem; font-size: 0.82rem; font-weight: 600; }}
+  .project-toolbar {{ display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 1rem; margin-bottom: 0.5rem; }}
+  .project-toolbar .standup-subnav {{ margin: 0; }}
+  .project-toolbar .filter-box {{ flex: 1 1 18rem; margin: 0; }}
+  .project-status-BLOCKED {{ color: var(--flag-alert-color); }}
+  .project-status-NONE {{ font-style: italic; }}
+  /* Table view */
+  .project-table-wrap {{ overflow-x: auto; }}
+  .project-table {{ width: 100%; border-collapse: collapse; font-size: 0.88rem; }}
+  .project-table th, .project-table td {{ text-align: left; padding: 0.45rem 0.7rem 0.45rem 0; border-bottom: 1px solid var(--divider); vertical-align: top; }}
+  .project-table th a {{ color: var(--muted); font-weight: 700; text-decoration: none; white-space: nowrap; }}
+  .project-table th a:hover {{ color: var(--text); }}
+  .project-cell-name {{ min-width: 14rem; font-weight: 600; }}
+  .project-cell-tickets {{ white-space: nowrap; }}
+  .project-cell-blockers {{ color: var(--flag-alert-color); min-width: 10rem; }}
+  .project-cell-date {{ white-space: nowrap; }}
+  /* Side panel: details and the edit form. */
+  .project-backdrop {{ position: fixed; inset: 0; background: rgba(0, 0, 0, 0.35); z-index: 40; }}
+  .project-backdrop[hidden], .project-panel[hidden] {{ display: none; }}
+  .project-panel {{
+    position: fixed; top: 0; right: 0; bottom: 0; width: min(30rem, 100vw); z-index: 41; box-sizing: border-box;
+    overflow-y: auto; padding: 1rem 1.25rem 2rem; background: var(--card-bg); color: var(--text);
+    border-left: 1px solid var(--card-border); box-shadow: -8px 0 24px rgba(0, 0, 0, 0.25);
+  }}
+  .project-panel-head {{ display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; }}
+  .project-panel-title {{ margin: 0 0 0.4rem; font-size: 1.15rem; }}
+  .project-panel-close {{ font-size: 1.6rem; line-height: 1; text-decoration: none; color: var(--muted); padding: 0 0.3rem; }}
+  .project-panel-close:hover {{ color: var(--text); }}
+  .project-panel-label {{ margin: 1rem 0 0.35rem; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }}
+  .project-panel-desc {{ white-space: pre-wrap; font-size: 0.9rem; max-height: 18rem; overflow-y: auto; padding-right: 0.3rem; overflow-wrap: anywhere; }}
+  .project-edit-form {{ display: grid; gap: 0.5rem; }}
+  .project-edit-form label {{ display: grid; gap: 0.2rem; font-size: 0.75rem; font-weight: 600; color: var(--muted); }}
+  .project-edit-form select, .project-edit-form input[type=date] {{
+    font-family: inherit; font-size: 0.85rem; padding: 0.35rem 0.45rem; border-radius: 6px;
+    border: 1px solid var(--input-border); background: var(--input-bg); color: var(--text); width: 100%; box-sizing: border-box;
+  }}
+  .project-edit-form textarea {{ min-height: 3.5rem; font-weight: 400; }}
+  .project-edit-dates {{ display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.4rem; }}
+  @media (max-width: 520px) {{ .project-edit-dates {{ grid-template-columns: minmax(0, 1fr); }} }}
+  .project-edit-form .project-check {{ display: flex; align-items: flex-start; gap: 0.4rem; font-weight: 400; }}
+  body.project-panel-open {{ overflow: hidden; }}
+  .project-diff {{ border-collapse: collapse; margin: 0.5rem 0 1rem; }}
+  .project-diff th, .project-diff td {{ text-align: left; padding: 0.3rem 0.8rem 0.3rem 0; vertical-align: top; white-space: pre-wrap; }}
+  :is(html.has-bg-image, html.theme-galaxy) :is(.project-edit-form select, .project-edit-form input[type=date]) {{ background: var(--lg-input); border-color: var(--glass-border); }}
   .person-card .overview-section-head {{ flex-wrap: wrap; row-gap: 0.35rem; }}
   .sla-history-note.person-others-note {{ margin-top: 1.5rem; }}
   .person-card {{ min-width: 0; margin-bottom: 0; }}
@@ -2211,24 +2604,31 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
     background: transparent; color: var(--text); border-color: var(--input-border); font-size: 0.8rem; padding: 0.35rem 0.6rem;
   }}
   .bg-picker-remove:hover:not(:disabled), .bg-picker-collapse:hover {{ border-color: var(--accent); color: var(--accent); }}
-  /* Collapsed sidebar: the menu is hidden, the page content takes the width
-     (centered, as on narrow screens), and a small button at the top-left
-     brings the menu back. */
-  .menu-expand {{
-    display: none; position: fixed; top: 0.75rem; left: 0.75rem; z-index: 6;
-    width: 2.1rem; height: 2.1rem; padding: 0; align-items: center; justify-content: center;
-    background: var(--card-bg); color: var(--muted); border: 1px solid var(--input-border);
-    border-radius: 10px; box-shadow: var(--card-shadow); cursor: pointer;
-  }}
-  .menu-expand:hover {{ color: var(--text); border-color: var(--accent); }}
-  html.menu-collapsed .menu-expand {{ display: inline-flex; }}
-  html.menu-collapsed .brand {{ display: none; }}
-  @media (min-width: 861px) {{
-    html.menu-collapsed body {{ margin: 2rem auto; padding-top: 1.5rem; }}
-    html.menu-collapsed #page-loading-dim {{ left: 0; }}
-    html.menu-collapsed #page-loading-card {{ left: 50%; }}
-  }}
   .bg-picker-panel .meta {{ margin: 0; }}
+  /* About This Tool: a pill at the top-right of the page (it scrolls away with the page) that opens a card
+     describing where the data comes from. Icon only on very narrow screens. */
+  .about-tool {{ position: absolute; top: 0.75rem; right: 1rem; z-index: 20; }}
+  .about-tool > summary {{
+    list-style: none; cursor: pointer; display: inline-flex; align-items: center; gap: 0.4rem;
+    font-size: 0.8rem; font-weight: 600; padding: 0.35rem 0.7rem; border-radius: 999px;
+    background: var(--card-bg); color: var(--muted); border: 1px solid var(--input-border); box-shadow: var(--card-shadow);
+  }}
+  .about-tool > summary::-webkit-details-marker {{ display: none; }}
+  .about-tool > summary:hover, .about-tool[open] > summary {{ color: var(--accent); border-color: var(--accent); }}
+  .about-tool > summary:focus-visible {{ outline: 2px solid var(--focus-ring); outline-offset: 2px; }}
+  .about-panel {{
+    position: absolute; top: calc(100% + 0.5rem); right: 0; width: min(36rem, calc(100vw - 2rem)); box-sizing: border-box;
+    max-height: calc(100vh - 5rem); overflow-y: auto; padding: 0.9rem 1.15rem 1rem; text-align: left;
+    background: var(--card-bg); color: var(--text); border: 1px solid var(--card-border); border-radius: 12px;
+    box-shadow: 0 8px 32px var(--glass-shadow); font-size: 0.86rem; line-height: 1.45;
+  }}
+  .about-panel h2 {{ font-size: 1.05rem; margin: 0 0 0.5rem; }}
+  .about-panel h3 {{ font-size: 0.8rem; margin: 0.9rem 0 0.35rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }}
+  .about-panel p {{ margin: 0 0 0.4rem; }}
+  .about-panel ul {{ margin: 0; padding-left: 1.1rem; }}
+  .about-panel li {{ margin-bottom: 0.45rem; }}
+  .about-panel code {{ font-size: 0.8rem; overflow-wrap: anywhere; }}
+  @media (max-width: 520px) {{ .about-label {{ display: none; }} }}
   /* Confirmation after choosing or removing a background image. */
   .bg-toast {{
     position: fixed; right: 1.25rem; bottom: 1.25rem; z-index: 50; max-width: min(26rem, calc(100vw - 2.5rem));
@@ -2361,6 +2761,11 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
   .brand-home-link:hover {{ text-decoration: none; }}
   .brand-home-link h1 {{ margin: 0; }}
   .brand .meta {{ margin: 0.5rem 0 0 var(--nav-inset); line-height: 1.5; }}
+  /* In the sidebar the two timing items each get their own line (the middot only separates them in the narrow top card). */
+  @media (min-width: 861px) {{
+    .brand .meta-item {{ display: block; }}
+    .brand .meta-sep {{ display: none; }}
+  }}
   /* Wide viewports get a true left-hand sidebar instead of a header
      pinned above the content -- position: fixed with top/bottom both 0
      spans the full viewport height, flush against the left edge (no
@@ -2504,6 +2909,14 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
   .icon {{ width: 14px; height: 14px; flex-shrink: 0; }}
   .icon-sm {{ width: 12px; height: 12px; flex-shrink: 0; }}
   .logo {{ height: 36px; width: auto; }}
+  /* Sidebar effects. #side-sky is the empty stretch of the sidebar between the nav and the footer (wide layout
+     only; hidden everywhere else and in every theme without an effect there): Halloween bats and lesbian-pride
+     clouds and hearts draw into it (batsStart / prideStart in the theme script, each on its own canvas). */
+  .side-sky {{ display: none; }}
+  .side-sky canvas {{ position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }}
+  @media (min-width: 861px) {{
+    html.theme-halloween .side-sky, html.theme-lesbian .side-sky {{ display: block; flex: 1 1 0; min-height: 0; position: relative; margin: 0.5rem 0; overflow: hidden; }}
+  }}
   /* Snowfall canvas (Christmas theme only; see snowStart in the theme script): above the page, below the toast and loading overlay, never takes clicks. */
   #snow-canvas {{ position: fixed; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 30; }}
   /* Topic icons (see _topic_icon()) -- self-contained colour badges, sized
@@ -2621,6 +3034,12 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
   textarea:focus, input[type=text]:focus {{ outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--focus-ring); }}
   .actions {{ margin-top: 0.6rem; display: flex; flex-wrap: wrap; gap: 0.5rem; }}
   .kbd-hint {{ margin-top: 0.4rem; color: var(--muted-2); font-size: 0.78rem; }}
+  .tag-row {{ display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem; margin: 0.5rem 0 0.2rem; font-size: 0.85rem; }}
+  .tag-label {{ color: var(--muted); margin-right: 0.2rem; }}
+  .tag-chip {{ display: inline-flex; align-items: center; gap: 0.35rem; padding: 0.15rem 0.65rem; border: 1px solid var(--input-border); border-radius: 999px; background: var(--input-bg); color: var(--text); cursor: pointer; }}
+  .tag-chip input {{ margin: 0; accent-color: var(--accent); }}
+  .tag-chip:has(input:checked) {{ border-color: var(--accent); }}
+  .tag-chip:has(input:focus-visible) {{ outline: 2px solid var(--focus-ring); outline-offset: 1px; }}
   button {{
     padding: 0.5rem 1rem; border-radius: 6px; border: 1px solid transparent; font-size: 0.9rem;
     cursor: pointer; color: white; box-sizing: border-box;
@@ -2694,28 +3113,70 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
   #page-loading-dim {{ top: 0; right: 0; bottom: 0; left: 0; background: var(--bg-translucent); }}
   #page-loading-card {{
     top: 40%; left: 50%; transform: translate(-50%, -50%); width: min(340px, calc(100vw - 2rem));
-    box-sizing: border-box; padding: 1rem 1.2rem; background: var(--card-bg);
+    box-sizing: border-box; display: flex; align-items: center; gap: 1rem; padding: 0.9rem 1.2rem; background: var(--card-bg);
     border: 1px solid var(--card-border); border-radius: 12px; box-shadow: var(--card-shadow), 0 8px 28px var(--glass-shadow);
     color: var(--text); z-index: 9999;
   }}
   #page-loading-dim.show, #page-loading-card.show {{ opacity: 1; }}
-  #page-loading-title {{ font-weight: 600; font-size: 0.95rem; margin-bottom: 0.65rem; overflow-wrap: anywhere; }}
-  #page-loading-track {{ height: 6px; border-radius: 999px; background: var(--divider); overflow: hidden; }}
-  #page-loading-fill {{
-    height: 100%; width: 0%; border-radius: 999px; background: var(--accent);
-    transition: width 0.25s ease-out;
+  /* The card is a progress ring (left) with the destination name and request count (right). The arc is the real
+     progress (JS sets its dash length, the percent in the middle and --load-rot); with no baseline yet the card is
+     "indeterminate": a short arc spins and the percent is hidden. Plain arc, no stripes. */
+  #page-loading-ring {{ position: relative; flex: 0 0 72px; width: 72px; height: 72px; }}
+  #page-loading-ring svg {{ display: block; width: 100%; height: 100%; overflow: visible; }}
+  .ring-track {{ fill: none; stroke: var(--divider); stroke-width: 6; }}
+  .ring-arc {{ fill: none; stroke: var(--accent); stroke-width: 6; stroke-linecap: round; stroke-dasharray: 0 100; transition: stroke-dasharray 0.25s ease-out; }}
+  #page-loading-pct {{ position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 0.8rem; font-weight: 600; font-variant-numeric: tabular-nums; }}
+  #page-loading-card.indeterminate #page-loading-pct {{ visibility: hidden; }}
+  #page-loading-card.indeterminate .ring-arc {{ stroke-dasharray: 25 100 !important; }}
+  #page-loading-card.indeterminate #page-loading-ring svg {{ animation: page-loading-ring-spin 1.1s linear infinite; }}
+  @keyframes page-loading-ring-spin {{ to {{ transform: rotate(360deg); }} }}
+  #page-loading-text {{ flex: 1 1 auto; min-width: 0; }}
+  #page-loading-title {{ font-weight: 600; font-size: 0.95rem; margin-bottom: 0.3rem; overflow-wrap: anywhere; }}
+  #page-loading-detail {{ font-size: 0.8rem; color: var(--muted); min-height: 1.1em; }}
+  /* Rider: the themed sprite sits on the arc's leading end (Halloween, Lesbian pride and Christmas only). */
+  #page-loading-rider {{ display: none; position: absolute; inset: 0; pointer-events: none; transform: rotate(calc(var(--load-rot, 0) * 1deg)); transition: transform 0.25s ease-out; }}
+  #page-loading-rider > span {{ position: absolute; left: 50%; top: 6.75px; width: 26px; height: 26px; transform: translate(-50%, -50%) rotate(calc(var(--load-rot, 0) * var(--load-upright, 0) * -1deg)); transition: transform 0.25s ease-out; }}
+  #page-loading-rider > span::after {{ content: ""; position: absolute; inset: 0; background: var(--load-rider) center / contain no-repeat; }}
+  @keyframes page-loading-rider-spin {{ from {{ transform: rotate(90deg); }} to {{ transform: rotate(450deg); }} }}
+  @keyframes page-loading-rider-keep-upright {{ from {{ transform: translate(-50%, -50%) rotate(-90deg); }} to {{ transform: translate(-50%, -50%) rotate(-450deg); }} }}
+  @keyframes page-loading-flap {{ 0%, 100% {{ transform: scaleY(1); }} 50% {{ transform: scaleY(0.6); }} }}
+  @keyframes page-loading-beat {{ 0%, 100% {{ transform: scale(1); }} 50% {{ transform: scale(1.25); }} }}
+  @keyframes page-loading-spin {{ to {{ transform: rotate(360deg); }} }}
+  html.theme-halloween #page-loading-rider, html.theme-lesbian #page-loading-rider, html.theme-christmas #page-loading-rider {{ display: block; }}
+  html.theme-halloween #page-loading-card.indeterminate #page-loading-rider, html.theme-lesbian #page-loading-card.indeterminate #page-loading-rider,
+  html.theme-christmas #page-loading-card.indeterminate #page-loading-rider {{ animation: page-loading-rider-spin 1.1s linear infinite; }}
+  html.theme-halloween #page-loading-card.indeterminate #page-loading-rider > span, html.theme-lesbian #page-loading-card.indeterminate #page-loading-rider > span {{ animation: page-loading-rider-keep-upright 1.1s linear infinite; }}
+
+  /* Theme looks for the card (Halloween, Lesbian pride and Christmas only; every other theme keeps the plain ring). */
+  /* Halloween: orange-rimmed card, purple-to-orange arc, a flapping bat. */
+  html.theme-halloween #page-loading-card {{ --load-upright: 1; --load-rider: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 20'%3E%3Cpath d='M16 6C14 6 13 4 12 2L11 6C8 3 4 3 1 6C3 7 4 9 4 11C6 9 8 9 10 11C12 10 14 11 16 15C18 11 20 10 22 11C24 9 26 9 28 11C28 9 29 7 31 6C28 3 24 3 21 6L20 2C19 4 18 6 16 6Z' fill='%232a1d38' stroke='%23ff8a3d' stroke-width='1.2' stroke-linejoin='round'/%3E%3C/svg%3E"); border-color: rgba(255,138,61,0.45); box-shadow: var(--card-shadow), 0 8px 28px var(--glass-shadow), 0 0 22px rgba(255,138,61,0.22); }}
+  html.theme-halloween .ring-track {{ stroke: rgba(122,63,160,0.3); }}
+  html.theme-halloween .ring-arc {{ stroke: url(#ring-grad-halloween); }}
+  html.theme-halloween #page-loading-rider > span {{ width: 40px; height: 28px; }}
+  html.theme-halloween #page-loading-rider > span::after {{ animation: page-loading-flap 0.3s ease-in-out infinite; }}
+  /* Lesbian pride: soft pink card, the flag's bands around the arc, a beating heart that stays upright. */
+  html.theme-lesbian #page-loading-card {{ --load-rider: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 21C4 14 2 9 5 6C8 3 11 5 12 7C13 5 16 3 19 6C22 9 20 14 12 21Z' fill='%23d362a4' stroke='%23a30262' stroke-width='1.2' stroke-linejoin='round'/%3E%3C/svg%3E"); --load-upright: 1; border-color: rgba(209,98,164,0.45); box-shadow: var(--card-shadow), 0 8px 28px var(--glass-shadow); }}
+  html.theme-lesbian .ring-track {{ stroke: rgba(209,98,164,0.18); }}
+  html.theme-lesbian .ring-arc {{ stroke: url(#ring-grad-lesbian); }}
+  html.theme-lesbian #page-loading-rider > span::after {{ animation: page-loading-beat 0.8s ease-in-out infinite; }}
+  /* Christmas: a snow cap along the card's top edge, a red arc on a green ring, a turning snowflake. */
+  html.theme-christmas #page-loading-card {{ --load-rider: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23ffffff' stroke-width='2' stroke-linecap='round'%3E%3Cpath d='M12 2V22M3.3 7L20.7 17M3.3 17L20.7 7'/%3E%3Cpath d='M9.5 3.8L12 6.3L14.5 3.8M9.5 20.2L12 17.7L14.5 20.2' stroke-width='1.6'/%3E%3C/svg%3E"); border-color: rgba(140,220,170,0.4); }}
+  html.theme-christmas #page-loading-card::before {{
+    content: ""; position: absolute; left: 12px; right: 12px; top: -8px; height: 15px; pointer-events: none;
+    background:
+      radial-gradient(circle at 10px 4px, #fff 0 10.5px, transparent 11px) 0 0 / 20px 15px repeat-x,
+      radial-gradient(circle at 15px 4px, #eef3f8 0 8px, transparent 8.5px) 6px 0 / 31px 15px repeat-x,
+      linear-gradient(#fff, #fff) 0 0 / 100% 6px no-repeat;
+    border-radius: 7px 7px 0 0;
   }}
-  /* No baseline for this route yet: an animated stripe instead of a number
-     nobody can justify. */
-  #page-loading-card.indeterminate #page-loading-fill {{
-    width: 100% !important;
-    background: repeating-linear-gradient(45deg, var(--accent) 0 10px, transparent 10px 20px);
-    background-size: 28px 28px; animation: page-loading-stripes 0.9s linear infinite;
-  }}
-  @keyframes page-loading-stripes {{ to {{ background-position: 28px 0; }} }}
-  #page-loading-detail {{ margin-top: 0.5rem; font-size: 0.8rem; color: var(--muted); min-height: 1.1em; }}
+  html.theme-christmas .ring-track {{ stroke: rgba(79,209,127,0.22); }}
+  html.theme-christmas .ring-arc {{ stroke: #e5384f; }}
+  html.theme-christmas #page-loading-rider > span::after {{ animation: page-loading-spin 4s linear infinite; }}
   @media (prefers-reduced-motion: reduce) {{
-    #page-loading-card.indeterminate #page-loading-fill {{ animation: none; }}
+    #page-loading-card.indeterminate #page-loading-ring svg, html.theme-halloween #page-loading-card.indeterminate #page-loading-rider,
+    html.theme-lesbian #page-loading-card.indeterminate #page-loading-rider, html.theme-christmas #page-loading-card.indeterminate #page-loading-rider,
+    html.theme-halloween #page-loading-card.indeterminate #page-loading-rider > span, html.theme-lesbian #page-loading-card.indeterminate #page-loading-rider > span,
+    html.theme-halloween #page-loading-rider > span::after, html.theme-lesbian #page-loading-rider > span::after, html.theme-christmas #page-loading-rider > span::after {{ animation: none; }}
   }}
   @media (min-width: 861px) {{
     #page-loading-dim {{ left: 240px; }}
@@ -2756,7 +3217,7 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
     from {{ opacity: 0; transform: translateY(2px); }}
     to {{ opacity: 1; transform: translateY(0); }}
   }}
-  /* Small ambient "this is watching" cue next to "Next automatic check"
+  /* Small ambient "this is watching" cue next to "Pending Refresh"
      (see _header_meta_html) -- the page already auto-refreshes and the
      background scan already runs on its own schedule regardless of
      whether anyone's looking, but nothing on the page itself used to
@@ -2808,11 +3269,24 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
 <div id="page-loading-bar" aria-hidden="true"></div>
 <div id="page-loading-dim" aria-hidden="true"></div>
 <div id="page-loading-card" role="status" aria-live="polite" aria-hidden="true">
-  <div id="page-loading-title">Loading…</div>
-  <div id="page-loading-track"><div id="page-loading-fill"></div></div>
-  <div id="page-loading-detail"></div>
+  <div id="page-loading-ring">
+    <svg viewBox="0 0 64 64" aria-hidden="true">
+      <defs>
+        <linearGradient id="ring-grad-halloween" gradientUnits="userSpaceOnUse" x1="6" y1="0" x2="58" y2="0"><stop offset="0" stop-color="#7a3fa0"/><stop offset="1" stop-color="#ff8a3d"/></linearGradient>
+        <linearGradient id="ring-grad-lesbian" gradientUnits="userSpaceOnUse" x1="0" y1="6" x2="0" y2="58"><stop offset="0" stop-color="#d52d00"/><stop offset="0.2" stop-color="#ef7627"/><stop offset="0.4" stop-color="#ff9a56"/><stop offset="0.55" stop-color="#e8a1c8"/><stop offset="0.75" stop-color="#d362a4"/><stop offset="1" stop-color="#a30262"/></linearGradient>
+      </defs>
+      <circle class="ring-track" cx="32" cy="32" r="26"/>
+      <circle id="page-loading-arc" class="ring-arc" cx="32" cy="32" r="26" pathLength="100" transform="rotate(-90 32 32)"/>
+    </svg>
+    <div id="page-loading-rider" aria-hidden="true"><span></span></div>
+    <span id="page-loading-pct"></span>
+  </div>
+  <div id="page-loading-text">
+    <div id="page-loading-title">Loading…</div>
+    <div id="page-loading-detail"></div>
+  </div>
 </div>
-<button type="button" id="menu-expand" class="menu-expand" title="Show the menu" aria-label="Show the menu">{_icon("menu", "icon")}</button>
+{_about_tool_html()}
 <div class="brand">
   <div class="brand-controls-row">
     <div class="theme-toggle" role="group" aria-label="Theme">
@@ -2828,7 +3302,7 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
   <div class="brand-nav-row">
     {_top_nav_html(nav_path or current_path)}
   </div>
-  {header_meta}
+  <div class="side-sky" id="side-sky" aria-hidden="true"></div>
   <div class="brand-footer">
     <a class="brand-home-link" href="/firstreply">
       {logo_html}
@@ -2845,11 +3319,12 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
         <label class="bg-picker-file">Choose image&hellip;<input type="file" id="bg-file" accept="image/*"></label>
         <label class="bg-picker-veil">Fade <input type="range" id="bg-veil" min="0" max="95" step="5" value="60" aria-label="How much the theme color covers the image"></label>
         <button type="button" id="bg-remove" class="bg-picker-remove">Remove</button>
-        <button type="button" id="menu-collapse" class="bg-picker-collapse" title="Hide the left menu">{_icon("panel-left-close", "icon-sm")}<span>Collapse menu</span></button>
+        <button type="button" id="menu-collapse" class="bg-picker-collapse" title="Close this panel">{_icon("chevron-up", "icon-sm")}<span>Collapse menu</span></button>
         <p class="meta" id="bg-status" role="status">Stays in this browser only.</p>
       </div>
     </details>
     <p class="galaxy-credit">Background: International Gemini Observatory / NOIRLab / NSF / AURA, <a href="https://noirlab.edu/public/images/noirlab2621a/" target="_blank" rel="noopener">CC BY 4.0</a></p>
+    {header_meta}
   </div>
 </div>
 {banner_html}
@@ -2871,7 +3346,7 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
 
 
 def _header_meta_html() -> str:
-    """The "N pending / last checked / next check / OAuth link" line, shown
+    """The "N pending / last checked / Pending Refresh" line, shown
     inside the merged sticky header band below the logo/title + Refresh
     button row (see _page()'s header_meta param). Split out from the old
     _status_bar() so that band can be a single sticky container instead of
@@ -2907,7 +3382,7 @@ def _header_meta_html() -> str:
     # the end of this sentence -- moved to _top_nav_html() (rendered in the
     # header's brand-right area on every page) instead; this line goes back
     # to being just the counts/timing it was always meant to show.
-    # A small pulsing dot ahead of "Next automatic check" -- purely
+    # A small pulsing dot ahead of "Pending Refresh" -- purely
     # decorative reinforcement of what the text already says (this is the
     # one page that auto-refreshes AND runs its own background scan every
     # couple of minutes), not new information, so aria-hidden keeps it out
@@ -2917,8 +3392,9 @@ def _header_meta_html() -> str:
     # this doesn't need its own conditional the way a shared helper would.
     live_pulse_html = '<span class="live-pulse" aria-hidden="true"></span>'
     return (
-        f'<div class="meta">{summary}<br>Last checked: <span id="last-checked"{last_checked_attr}>{last_checked_text}</span> '
-        f'&middot; {live_pulse_html}Next automatic check: <span id="next-check"{next_check_attr}>{next_check_text}</span></div>'
+        f'<div class="meta">{summary}<br><span class="meta-item">Last checked: <span id="last-checked"{last_checked_attr}>{last_checked_text}</span></span>'
+        f'<span class="meta-sep"> &middot; </span>'
+        f'<span class="meta-item">{live_pulse_html}Pending Refresh: <span id="next-check"{next_check_attr}>{next_check_text}</span></span></div>'
     )
 
 
@@ -2991,6 +3467,9 @@ def _top_nav_html(current_path: str = "") -> str:
         # linking to its full page, whose own pages keep Overview
         # highlighted here.
         + _link("/standup", "bar-chart", "Standup")
+        # Projects sits next to Standup: the Airtable project board, which
+        # standup items often point at (see _render_projects_page).
+        + _link("/projects", "folder", "Projects")
         + _link("/solved", "check-circle", "Recently Solved")
     )
     return f'<div class="top-nav">{nav_links}</div>'
@@ -3452,7 +3931,26 @@ def _render_worked_on_sidebar(items: list, capped: bool = False, zendesk_unavail
 </div>"""
 
 
-def _render_confirm_page(ticket_id, draft_text: str, public: bool, reply_check: dict, subject: str, url: str) -> bytes:
+def _tag_picker_html() -> str:
+    """Checkboxes for tagging teammates on an Internal Comment. Zendesk only
+    mentions agents, and a mention in an internal note is how a teammate gets
+    pulled onto a ticket (see _common.mention_html). Sent with both submit
+    buttons, but only an Internal Comment uses them (see Handler._post)."""
+    choices = _common.mention_choices()
+    if not choices:
+        return ""
+    chips = "".join(
+        f'<label class="tag-chip"><input type="checkbox" name="mention" value="{html.escape(key)}">'
+        f"<span>{html.escape(name)}</span></label>"
+        for key, name in choices.items()
+    )
+    return (
+        '<div class="tag-row" role="group" aria-label="Tag people on an internal comment">'
+        f'<span class="tag-label">Tag on internal comment:</span>{chips}</div>'
+    )
+
+
+def _render_confirm_page(ticket_id, draft_text: str, public: bool, reply_check: dict, subject: str, url: str, mention_keys=()) -> bytes:
     """Interstitial shown instead of posting outright when check_already_replied
     finds a public comment already on the ticket -- for BOTH a public reply
     and an internal comment (previously public silently auto-skipped the
@@ -3475,6 +3973,15 @@ def _render_confirm_page(ticket_id, draft_text: str, public: bool, reply_check: 
     reason_html = html.escape(reply_check.get("reason", "an existing reply"))
     button_class = "approve" if public else "internal"
     button_icon = _icon("send") if public else _icon("lock")
+    mention_hidden = ""
+    mention_line = ""
+    if mention_keys and not public:
+        names = _common.mention_choices()
+        mention_hidden = "".join(
+            f'<input type="hidden" name="mention" value="{html.escape(k)}">' for k in mention_keys
+        )
+        tagged = ", ".join(html.escape(names[k]) for k in mention_keys if k in names)
+        mention_line = f"<p>Tagging: {tagged}</p>" if tagged else ""
     return _page(f"""
 <p><a href="/firstreply">&larr; back to pending tickets</a></p>
 <div class="ticket">
@@ -3482,9 +3989,11 @@ def _render_confirm_page(ticket_id, draft_text: str, public: bool, reply_check: 
   <p class="flag-alert">This ticket already appears to have {reason_html}.</p>
   <p>Do you still want to post this {html.escape(kind)}?</p>
   <div class="excerpt">{draft_escaped}</div>
+  {mention_line}
   <div class="actions">
     <form method="post" action="/{action_path}/{ticket_id}">
       <input type="hidden" name="draft" value="{draft_escaped}">
+      {mention_hidden}
       <input type="hidden" name="confirm" value="yes">
       <button class="{button_class}" type="submit" data-loading-text="Posting…">{button_icon}<span>Yes, post the {html.escape(kind)} anyway</span></button>
     </form>
@@ -3639,6 +4148,7 @@ def _render_ticket(item: dict) -> str:
   {excerpt_html}
   <form method="post" action="/post_public/{tid}">
     <textarea name="draft" data-shortcut-submit="true" placeholder="{draft_placeholder}">{draft}</textarea>
+    {_tag_picker_html()}
     <div class="actions">
       <button class="approve" type="submit" data-loading-text="Posting…">{_icon("send")}<span>Public Reply</span></button>
       <button class="internal" formaction="/post_internal/{tid}" type="submit" data-loading-text="Posting…">{_icon("lock")}<span>Internal Comment</span></button>
@@ -3811,6 +4321,8 @@ def _sla_charts_html(history: dict) -> str:
 
     data = _common.sla_chart_data(history)
     data["labels"] = [_fmt_sla_history_date(d) for d in data["labels"]]
+    if history.get("live_date") and data["labels"]:
+        data["labels"][-1] += " (live)"
     data["rules_first_label"] = _fmt_sla_history_date(data["rules_first_date"]) if data.get("rules_first_date") else ""
     # "</" -> "<\/" so a literal "</script>" inside e.g. an agent name or
     # ticket subject can never prematurely close this embedded JSON block.
@@ -4340,11 +4852,29 @@ def _render_sla_page(sla_result: dict, history: dict, banner: str = "") -> bytes
         else ""
     )
     as_of = history.get("as_of")
+    source_text = ""
+    if history.get("source") == "github":
+        fetched = str(history.get("fetched_at") or "").replace("T", " ")
+        source_text = f" Fetched from GitHub at {html.escape(fetched)}." if fetched else " Fetched from GitHub."
+    elif as_of:
+        source_text = " From the local checkout."
+    age = _common.sla_history_age_days(as_of)
+    stale_text = (f' <strong class="sla-history-stale">{age} days old.</strong> Use Update history to fetch newer snapshots.'
+                  if age is not None and age >= _common.SLA_STALE_AFTER_DAYS else "")
+    live_day = history.get("live_date") or ""
+    live_text = (f" The last point ({html.escape(_fmt_sla_history_date(live_day))}, live) is counted from the open tickets just now, "
+                 "not from a saved snapshot." if live_day else "")
     history_note = (
-        f'<p class="sla-history-note" title="Only as fresh as the last git pull of the sla-report-slack repo on this machine. This page never writes to that file. A &quot;note&quot; field on a day&#x27;s entry there is shown on the charts.">'
-        f"Trend history as of {html.escape(as_of)}.</p>"
+        f'<p class="sla-history-note" title="Only as fresh as the last git pull of the sla-report-slack repo on this machine, unless Update history fetched a newer copy into this tool&#x27;s own output folder. This page never writes to that repo&#x27;s file. A &quot;note&quot; field on a day&#x27;s entry there is shown on the charts.">'
+        f"Trend history as of {html.escape(as_of)}.{source_text}{stale_text}{live_text}</p>"
         if as_of
         else ""
+    )
+    update_form = (
+        '<form method="post" action="/sla/update" class="sla-update-form">'
+        '<button class="internal" type="submit" data-loading-text="Updating…" '
+        'title="Fetches the sla-report-slack repo&#x27;s newest saved snapshots from GitHub. Nothing in that repo&#x27;s files is changed.">'
+        f'{_icon("refresh", "icon-sm")}<span>Update history</span></button></form>'
     )
 
     body = f"""
@@ -4354,7 +4884,7 @@ def _render_sla_page(sla_result: dict, history: dict, banner: str = "") -> bytes
 {error_html}
 {capped_note}
 <h2 class="column-heading">Queue health over time</h2>
-{history_note}
+<div class="sla-history-bar">{history_note}{update_form}</div>
 {_sla_charts_html(history)}
 """
     return _page(body, banner=banner, current_path="/sla", wide=True)
@@ -4662,7 +5192,8 @@ def _render_overview_page(sla_result: dict, banner: str = "", flagged: dict | No
     board_html = f'<div class="overview-board" role="region" aria-label="Overview board, scrolls sideways" tabindex="0">{"".join(columns)}</div>' if columns else ""
     body = f"""
 <h2>{_topic_icon("overview")}Overview</h2>
-<p class="meta">Open IT-Operations tickets by assignee (new, open, pending and hold; personal tasks excluded), oldest first. Scroll sideways for Discussion and Security.</p>
+<p class="meta">Open IT-Operations tickets by assignee (new, open, pending and hold; personal tasks excluded), oldest first.</p>
+<p class="meta overview-board-hint"><strong>&harr; This board scrolls sideways.</strong> Swipe, drag the scroll bar under the columns, or hold Shift and use the mouse wheel to reach the rest, including Discussion and Security.</p>
 {capped_note}
 {error_html}
 {board_html}
@@ -5325,41 +5856,34 @@ def _render_open_task_row(item: dict) -> str:
 
 
 def _render_recently_completed_tasks() -> str:
-    """"Recently completed" collapsible on /tasks -- mirrors the main
-    queue's "Replied today" pattern (_render_recently_handled): a task
-    marked done shouldn't just vanish from the Open list with nothing to
-    show for it,
-    the same way a posted reply doesn't just disappear from the main
-    queue. Same collapsed-by-default <details> element with its own
-    localStorage key, so this section's open/closed state doesn't fight
-    the main queue's own sections for storage."""
+    """The "Recently completed" column on /tasks, the right-hand column of that
+    page's sideways-scrolling board (see _render_tasks_page): a task marked done
+    shouldn't just vanish from the Open list with nothing to show for it, the
+    same way a posted reply doesn't just disappear from the main queue. Always
+    drawn, with an empty-state line when nothing has been completed yet, so the
+    board keeps the same two-column shape either way."""
     items = _common.completed_personal_tasks(limit=10)
     if not items:
-        return ""
-
-    rows = []
-    for item in items:
-        subject = html.escape(item.get("subject", ""))
-        tid = item.get("ticket_id")
-        url = _common.ticket_url(tid)
-        link = f'<a href="{html.escape(url)}" target="_blank">#{tid}</a>' if url else f"#{tid}"
-        completed_at = item.get("completed_at", "")
-        try:
-            when = datetime.fromisoformat(completed_at).strftime("%b %-d, %-I:%M %p")
-        except Exception:
-            when = ""
-        rows.append(
-            f'<li>{link} — {subject} '
-            f'<span class="handled-time">{html.escape(when)}</span></li>'
-        )
-
-    return f"""
-<details class="recently-handled" data-storage-key="csa-tasks-recently-completed-open">
-  <summary>Recently completed ({len(items)})</summary>
-  <ul>
-    {"".join(rows)}
-  </ul>
-</details>"""
+        body = '<p class="empty">Nothing completed yet.</p>'
+    else:
+        rows = []
+        for item in items:
+            subject = html.escape(item.get("subject", ""))
+            tid = item.get("ticket_id")
+            url = _common.ticket_url(tid)
+            link = f'<a href="{html.escape(url)}" target="_blank" rel="noopener">#{tid}</a>' if url else f"#{tid}"
+            completed_at = item.get("completed_at", "")
+            try:
+                when = datetime.fromisoformat(completed_at).strftime("%b %-d, %-I:%M %p")
+            except Exception:
+                when = ""
+            rows.append(
+                f'<li>{link} &mdash; {subject} '
+                f'<span class="handled-time">{html.escape(when)}</span></li>'
+            )
+        body = f'<ul class="tasks-completed-list">{"".join(rows)}</ul>'
+    return (f'<div class="security-panel tasks-completed" id="tasks-completed">'
+            f'<h2 class="column-heading">Recently completed ({len(items)})</h2>{body}</div>')
 
 
 def _render_tasks_page(draft_tasks: list, banner: str = "") -> bytes:
@@ -5411,6 +5935,9 @@ def _render_tasks_page(draft_tasks: list, banner: str = "") -> bytes:
 <p><a href="/firstreply">&larr; back to pending tickets</a></p>
 <h2>{_topic_icon("tasks")}Tasks</h2>
 <p class="meta" title="Once promoted, each is a self-requested, self-assigned Zendesk ticket tagged &quot;{html.escape(_common.PERSONAL_TASK_TAG)}&quot;.">Personal to-do tickets, separate from the reply queue.</p>
+<p class="meta overview-board-hint">Scrolls sideways: Recently completed is to the right.</p>
+<div class="tasks-board">
+<div class="tasks-main">
 <div class="ticket">
   <p class="ticket-eyebrow">New task</p>
   <form method="post" action="/tasks/new">
@@ -5428,9 +5955,459 @@ def _render_tasks_page(draft_tasks: list, banner: str = "") -> bytes:
   </form>
 </div>
 <div class="security-panel" id="tasks-drafts"><h2 class="column-heading">Not yet in Zendesk ({len(draft_tasks)})</h2>{draft_html}</div>
+</div>
 {completed_html}
+</div>
 """
     return _page(body, banner=banner, current_path="/tasks", wide=True)
+
+
+# --- /projects (Airtable) ----------------------------------------------------------
+#
+# The IT Operations Projects table as a board (one column per Status, projects with no
+# Status first as "Needs triage") or a table. A card shows a short description preview;
+# clicking it opens a side panel with the full description and a small allowlisted edit
+# form (see _projects.FIELD_SLUGS). Reads come from _projects.fetch_projects (cached
+# ~2 minutes); every edit goes through a confirm page that shows the exact before/after,
+# then a conflict-checked, read-back PATCH (see Handler._projects_edit), and the banner
+# offers Undo. The panel works without JavaScript too: a card's link is
+# /projects?open=<record>, which the server renders with the panel already open.
+
+_PROJECT_CLOSED = ("COMPLETE", "CANCELLED")
+_PROJECT_VIEWS = ("board", "table")
+_PROJECT_SORTS = ("status", "name", "workstream", "assignee", "ticket", "blockers")
+_PROJECT_PREVIEW_CHARS = 240
+
+
+def _project_view(value) -> str:
+    return value if value in _PROJECT_VIEWS else "board"
+
+
+def _projects_url(view: str = "board", sort: str = "", open_id: str = "") -> str:
+    """/projects with only the non-default query parameters."""
+    parts = []
+    if view == "table":
+        parts.append("view=table")
+    if sort and sort.lstrip("-") in _PROJECT_SORTS:
+        parts.append(f"sort={quote(sort)}")
+    if open_id and _projects.valid_record_id(open_id):
+        parts.append(f"open={open_id}")
+    return "/projects" + ("?" + "&".join(parts) if parts else "")
+
+
+def _projects_redirect_path(view: str, message: str, undo_path: str = "", fragment: str = "") -> str:
+    base = _projects_url(view)
+    path = f"{base}{'&' if '?' in base else '?'}msg={quote(message)}"
+    if undo_path:
+        path += f"&undo={quote(undo_path)}"
+    return path + (f"#{fragment}" if fragment else "")
+
+
+def _project_date_label(iso: str) -> str:
+    try:
+        d = datetime.strptime(iso, "%Y-%m-%d")
+    except (TypeError, ValueError):
+        return iso
+    return f"{d.strftime('%b')} {d.day}, {d.year}"
+
+
+def _project_status_rank(key: str) -> tuple:
+    """Needs triage first, then the known statuses in workflow order, then any other value A to Z."""
+    if key == "":
+        return (0, 0, "")
+    if key in _projects.STATUS_ORDER:
+        return (1, _projects.STATUS_ORDER.index(key), "")
+    return (2, 0, key.casefold())
+
+
+def _project_sort_key(p: dict):
+    return (p["end"] == "", p["end"], p["name"].casefold())
+
+
+def _project_preview(text: str) -> str:
+    flat = " ".join(text.split())
+    if len(flat) <= _PROJECT_PREVIEW_CHARS:
+        return flat
+    return flat[:_PROJECT_PREVIEW_CHARS].rsplit(" ", 1)[0].rstrip(",.;:") + "…"
+
+
+def _project_ticket_chips(p: dict, limit: int = 3) -> str:
+    out = ""
+    for tid in p["ticket_ids"][:limit]:
+        url = _common.ticket_url(tid)
+        label = f"Zendesk #{html.escape(tid)}"
+        out += (f'<a class="stat-chip" href="{html.escape(url)}" target="_blank" rel="noopener">{label}</a>'
+                if url else f'<span class="stat-chip">{label}</span>')
+    return out
+
+
+def _project_who_html(p: dict) -> str:
+    if p["assignee"]:
+        return f'<span class="project-who">{_avatar_html(p["assignee"])}<span>{html.escape(p["assignee"])}</span></span>'
+    return '<span class="meta project-unassigned">Unassigned</span>'
+
+
+def _project_hidden_fields(p: dict, view: str) -> str:
+    """The values the form was drawn from ("orig_<slug>"): what lets the server tell an
+    edit from an untouched field, and notice a change made in Airtable in the meantime."""
+    shown = _projects.current_values(p)
+    out = "".join(f'<input type="hidden" name="orig_{slug}" value="{html.escape(value)}">' for slug, value in shown.items())
+    if view != "board":
+        out += f'<input type="hidden" name="view" value="{html.escape(view)}">'
+    return out
+
+
+def _project_edit_form_html(p: dict, view: str) -> str:
+    people = _projects.assignees()
+    names = list(people)
+    if p["assignee"] and p["assignee"] not in names:
+        names.append(p["assignee"])          # keep the current person selectable even if not in PROJECTS_ASSIGNEES
+    status_opts = "".join(
+        f'<option value="{s}"{" selected" if s == p["status"] else ""}>{s}</option>' for s in _projects.STATUS_ORDER
+    )
+    if p["status"] and p["status"] not in _projects.STATUS_ORDER:
+        status_opts = f'<option value="{html.escape(p["status"])}" selected>{html.escape(p["status"])} (not editable)</option>' + status_opts
+    if not p["status"]:
+        status_opts = '<option value="" selected>(no status)</option>' + status_opts
+    person_opts = '<option value="">Unassigned</option>' + "".join(
+        f'<option value="{html.escape(n)}"{" selected" if n == p["assignee"] else ""}>{html.escape(n)}</option>' for n in names
+    )
+    note = ""
+    if not people:
+        note = ('<p class="meta">Assignee can be changed once <code>PROJECTS_ASSIGNEES</code> lists the people '
+                "(see .env.example).</p>")
+    return f"""<form method="post" action="/projects/{html.escape(p["id"])}/edit" class="project-edit-form">
+    {_project_hidden_fields(p, view)}
+    <label>Status<select name="status">{status_opts}</select></label>
+    <label>Assignee<select name="assignee"{"" if people else " disabled"}>{person_opts}</select></label>
+    {note}
+    <div class="project-edit-dates">
+      <label>Start<input type="date" name="start" value="{html.escape(p["start"])}"></label>
+      <label>End<input type="date" name="end" value="{html.escape(p["end"])}"></label>
+      <label>Completed<input type="date" name="completed" value="{html.escape(p["completed"])}"></label>
+    </div>
+    <label class="project-check"><input type="checkbox" name="complete_today" value="yes" checked> Fill in today as the completed date when Status becomes COMPLETE</label>
+    <label>Blockers<textarea name="blockers">{html.escape(p["blockers"])}</textarea></label>
+    <label>Sprint notes<textarea name="notes">{html.escape(p["notes"])}</textarea></label>
+    <div class="actions">
+      <button class="approve" type="submit" data-loading-text="Checking…">{_icon("send", "icon-sm")}<span>Review changes</span></button>
+    </div>
+  </form>"""
+
+
+def _project_panel_html(p: dict, view: str, today: str) -> str:
+    link = (f'<a class="ticket-title-link" href="{html.escape(p["url"])}" target="_blank" rel="noopener">{html.escape(p["name"])}</a>'
+            if p["url"] else html.escape(p["name"]))
+    chips = f'<span class="stat-chip project-status project-status-{html.escape(p["status_key"] or "NONE")}">{html.escape(p["status"] or "No status")}</span>'
+    if p["workstream"]:
+        chips += f'<span class="stat-chip">{html.escape(p["workstream"])}</span>'
+    chips += _project_ticket_chips(p, limit=10)
+    if p["end"] and p["end"] < today and p["status_key"] not in _PROJECT_CLOSED:
+        chips += '<span class="sla-chip sla-chip-breached">Past end date</span>'
+    scores = [(label, p[key]) for label, key in (("Urgency", "urgency"), ("Ease", "ease"), ("Importance", "importance")) if p[key]]
+    score_html = (f'<p class="meta">{" &middot; ".join(f"{html.escape(l)} {html.escape(v)}" for l, v in scores)}</p>' if scores else "")
+    desc = (f'<h3 class="project-panel-label">Description</h3><div class="project-panel-desc">{html.escape(p["description"])}</div>'
+            if p["description"] else '<p class="meta">No description.</p>')
+    close_href = _projects_url(view) + f"#project-{p['id']}"
+    return f"""<div class="project-panel-head">
+  <h2 class="project-panel-title">{link}</h2>
+  <a class="project-panel-close" href="{html.escape(close_href)}" data-project-close aria-label="Close panel">&times;</a>
+</div>
+<div class="project-chips">{chips}</div>
+<div class="project-line">{_project_who_html(p)}</div>
+{score_html}
+{desc}
+<h3 class="project-panel-label">Edit</h3>
+{_project_edit_form_html(p, view)}"""
+
+
+def _project_card_html(p: dict, today: str, view: str) -> str:
+    open_href = _projects_url(view, open_id=p["id"])
+    bits = []
+    if p["start"]:
+        bits.append(f'Start {html.escape(_project_date_label(p["start"]))}')
+    if p["end"]:
+        bits.append(f'End {html.escape(_project_date_label(p["end"]))}')
+    if p["completed"]:
+        bits.append(f'Completed {html.escape(_project_date_label(p["completed"]))}')
+    chips = ""
+    if p["end"] and p["end"] < today and p["status_key"] not in _PROJECT_CLOSED:
+        chips += '<span class="sla-chip sla-chip-breached">Past end date</span>'
+    chips += _project_ticket_chips(p)
+    if p["workstream"]:
+        chips += f'<span class="stat-chip">{html.escape(p["workstream"])}</span>'
+    scores = [(label, p[key]) for label, key in (("Urgency", "urgency"), ("Ease", "ease"), ("Importance", "importance")) if p[key]]
+    score_html = (f'<div class="meta project-scores">{" &middot; ".join(f"{html.escape(l)} {html.escape(v)}" for l, v in scores)}</div>'
+                  if scores else "")
+    blockers = (f'<div class="project-blockers"><strong>Blockers:</strong> {html.escape(p["blockers"])}</div>' if p["blockers"] else "")
+    notes = (f'<div class="project-notes"><strong>Sprint notes:</strong> {html.escape(p["notes"])}</div>' if p["notes"] else "")
+    preview = (f'<p class="project-preview">{html.escape(_project_preview(p["description"]))}</p>' if p["description"] else "")
+    dates = f'<span class="meta">{" &middot; ".join(bits)}</span>' if bits else ""
+    return f"""<div class="mini-ticket project-card" id="project-{html.escape(p["id"])}">
+  <div class="mini-ticket-head project-name"><a class="ticket-title-link" href="{html.escape(open_href)}" data-project-open="{html.escape(p["id"])}">{html.escape(p["name"])}</a></div>
+  <div class="project-line">{_project_who_html(p)}{dates}</div>
+  <div class="project-chips">{chips}</div>
+  {preview}{score_html}{blockers}{notes}
+  <a class="project-open" href="{html.escape(open_href)}" data-project-open="{html.escape(p["id"])}">Details &amp; edit</a>
+</div>"""
+
+
+def _project_columns(items: list, today: str, view: str) -> str:
+    keys = sorted({p["status_key"] for p in items} | set(_projects.STATUS_ORDER), key=_project_status_rank)
+    columns = []
+    for key in keys:
+        group = sorted((p for p in items if p["status_key"] == key), key=_project_sort_key)
+        if not group and key not in _projects.STATUS_ORDER:
+            continue
+        if key == "" and not group:
+            continue
+        cards = "".join(_project_card_html(p, today, view) for p in group) or '<p class="empty">None</p>'
+        label = "Needs triage" if key == "" else key
+        title = ' title="Projects with no Status yet"' if key == "" else ""
+        columns.append(
+            f'<div class="security-panel overview-section project-column" data-status="{html.escape(key)}">'
+            f'<div class="overview-section-head"><h2 class="column-heading"{title}>{html.escape(label)}</h2>'
+            f'<span class="stat-chip">{len(group)}</span></div>{cards}</div>'
+        )
+    return f'<div class="overview-board project-board">{"".join(columns)}</div>'
+
+
+def _project_sorted(items: list, sort: str) -> list:
+    key = sort.lstrip("-") if sort.lstrip("-") in _PROJECT_SORTS else "status"
+    desc = sort.startswith("-") and sort.lstrip("-") in _PROJECT_SORTS
+
+    def name(p):
+        return p["name"].casefold()
+
+    def blank_last(value, p):
+        return (value == "", value.casefold(), name(p))
+
+    keys = {
+        "status": lambda p: (_project_status_rank(p["status_key"]), name(p)),
+        "name": name,
+        "workstream": lambda p: blank_last(p["workstream"], p),
+        "assignee": lambda p: blank_last(p["assignee"], p),
+        "ticket": lambda p: (not p["ticket_ids"], int(p["ticket_ids"][0]) if p["ticket_ids"] else 0, name(p)),
+        "blockers": lambda p: blank_last(p["blockers"], p),
+    }
+    return sorted(items, key=keys[key], reverse=desc)
+
+
+def _project_table(items: list, today: str, sort: str) -> str:
+    """A compact sortable table. A date column appears only when some project has that date,
+    so columns that are empty for every project are not drawn."""
+    active = sort.lstrip("-") if sort.lstrip("-") in _PROJECT_SORTS else "status"
+    descending = sort.startswith("-") and sort.lstrip("-") in _PROJECT_SORTS
+    heads = [("name", "Project"), ("status", "Status"), ("workstream", "Workstream"), ("assignee", "Assignee"),
+             ("ticket", "Ticket"), ("blockers", "Blockers")]
+    date_cols = [(k, label) for k, label in (("start", "Start"), ("end", "End"), ("completed", "Completed")) if any(p[k] for p in items)]
+
+    def head(key, label):
+        nxt = f"-{key}" if (active == key and not descending) else key
+        arrow = (" &#9660;" if descending else " &#9650;") if active == key else ""
+        return f'<th scope="col"><a href="{html.escape(_projects_url("table", sort=nxt))}">{html.escape(label)}{arrow}</a></th>'
+
+    thead = "".join(head(k, label) for k, label in heads) + "".join(f'<th scope="col">{label}</th>' for _k, label in date_cols)
+    rows = []
+    for p in _project_sorted(items, sort):
+        open_href = _projects_url("table", open_id=p["id"])
+        status_label = p["status"] or "No status"
+        row = (
+            f'<tr class="project-row" id="project-{html.escape(p["id"])}">'
+            f'<td class="project-cell-name"><a class="ticket-title-link" href="{html.escape(open_href)}" data-project-open="{html.escape(p["id"])}">{html.escape(p["name"])}</a></td>'
+            f'<td><span class="stat-chip project-status project-status-{html.escape(p["status_key"] or "NONE")}">{html.escape(status_label)}</span></td>'
+            f'<td>{html.escape(p["workstream"])}</td>'
+            f'<td>{_project_who_html(p)}</td>'
+            f'<td class="project-cell-tickets">{_project_ticket_chips(p, limit=2)}</td>'
+            f'<td class="project-cell-blockers">{html.escape(_project_preview(p["blockers"])[:90])}</td>'
+        )
+        for k, _label in date_cols:
+            late = k == "end" and p["end"] and p["end"] < today and p["status_key"] not in _PROJECT_CLOSED
+            text = html.escape(_project_date_label(p[k])) if p[k] else ""
+            past = ' <span class="sla-chip sla-chip-breached">Past</span>' if late else ""
+            row += f'<td class="project-cell-date">{text}{past}</td>'
+        rows.append(row + "</tr>")
+    return (f'<div class="project-table-wrap"><table class="project-table"><thead><tr>{thead}</tr></thead>'
+            f'<tbody>{"".join(rows)}</tbody></table></div>')
+
+
+_PROJECT_PANEL_SCRIPT = """<script>
+(function () {
+  var panel = document.getElementById('project-panel');
+  var back = document.getElementById('project-backdrop');
+  if (!panel || !back) { return; }
+  var lastFocus = null;
+  function openPanel(id) {
+    var tpl = document.getElementById('project-tpl-' + id);
+    if (!tpl) { return false; }
+    lastFocus = document.activeElement;
+    panel.innerHTML = '';
+    panel.appendChild(tpl.content.cloneNode(true));
+    panel.hidden = false; back.hidden = false;
+    document.body.classList.add('project-panel-open');
+    var close = panel.querySelector('[data-project-close]');
+    if (close) { close.focus(); }
+    return true;
+  }
+  function closePanel() {
+    panel.hidden = true; back.hidden = true; panel.innerHTML = '';
+    document.body.classList.remove('project-panel-open');
+    try {
+      var u = new URL(location.href);
+      if (u.searchParams.has('open')) { u.searchParams.delete('open'); history.replaceState(null, '', u.pathname + u.search + u.hash); }
+    } catch (e) {}
+    if (lastFocus && lastFocus.focus) { lastFocus.focus(); }
+  }
+  document.addEventListener('click', function (e) {
+    if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) { return; }
+    var opener = e.target.closest('[data-project-open]');
+    if (opener && openPanel(opener.getAttribute('data-project-open'))) { e.preventDefault(); return; }
+    if (e.target.closest('[data-project-close]')) { e.preventDefault(); closePanel(); return; }
+    if (e.target === back) { closePanel(); }
+  });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && !panel.hidden) { closePanel(); }
+  });
+})();
+</script>"""
+
+
+def _render_projects_page(result: dict, banner: str = "", banner_undo_path: str = "", today: str = "",
+                          view: str = "board", sort: str = "", open_id: str = "") -> bytes:
+    today = today or datetime.now().strftime("%Y-%m-%d")
+    view = _project_view(view)
+    cfg = _projects.config()
+    title = f'<h2>{_icon("folder")} Projects</h2>'
+    if not result.get("configured"):
+        body = f"""{title}
+<div class="security-panel"><h2 class="column-heading">Airtable is not set up</h2>
+<p>Add these to this repo&rsquo;s <code>.env</code>, then restart the review server:</p>
+<pre>AIRTABLE_TOKEN=
+AIRTABLE_BASE_ID=
+AIRTABLE_TABLE_ID=
+AIRTABLE_VIEW_ID=
+PROJECTS_ASSIGNEES=Name:email,Name:email</pre>
+<p class="meta">The token is an Airtable personal access token with the <code>data.records:read</code> and <code>data.records:write</code> scopes, limited to the one base. Create it in Airtable under Developer hub, then paste it into <code>.env</code> yourself; it is never shown on any page.</p></div>"""
+        return _page(body, banner=banner, banner_undo_path=banner_undo_path, current_path="/projects", wide=True)
+
+    items = result.get("items") or []
+    problem = ""
+    if result.get("error"):
+        problem = f'<p class="flag-alert">{html.escape(result["error"])}</p>'
+    capped = '<p class="meta">Only the first 1000 projects were loaded.</p>' if result.get("capped") else ""
+    loaded = ""
+    if result.get("fetched_at"):
+        loaded = f"Loaded from Airtable at {datetime.fromtimestamp(result['fetched_at']).strftime('%H:%M')}. "
+    base_link = (f'<a href="https://airtable.com/{html.escape(cfg["base"])}/{html.escape(cfg["table"])}'
+                 f'{"/" + html.escape(cfg["view"]) if cfg["view"] else ""}" target="_blank" rel="noopener">Open in Airtable</a>')
+    aria_current = ' aria-current="page"'
+    toggle = "".join(
+        f'<a class="sla-range-btn{" active" if v == view else ""}" href="{_projects_url(v)}"'
+        f'{aria_current if v == view else ""}>{label}</a>'
+        for v, label in (("board", "Board"), ("table", "Table"))
+    )
+    if view == "table":
+        main = _project_table(items, today, sort) if items else '<p class="empty">No projects.</p>'
+        target, hint = ".project-row", ""
+    else:
+        main = _project_columns(items, today, view)
+        target, hint = ".project-card", '<p class="meta overview-board-hint">Scrolls sideways: one column per status.</p>'
+    filter_html = _filter_box_html(target, "Filter by project, person or description…") if items else ""
+
+    by_id = {p["id"]: p for p in items}
+    opened = by_id.get(open_id) if open_id else None
+    templates = "".join(
+        f'<template id="project-tpl-{html.escape(p["id"])}">{_project_panel_html(p, view, today)}</template>' for p in items
+    )
+    panel = (f'<div id="project-backdrop" class="project-backdrop"{"" if opened else " hidden"}></div>'
+             f'<aside id="project-panel" class="project-panel" role="dialog" aria-label="Project details"{"" if opened else " hidden"}>'
+             f'{_project_panel_html(opened, view, today) if opened else ""}</aside>')
+    body = f"""{title}
+<p class="meta">{loaded}{len(items)} projects. Edits made here are written to Airtable after a review step. {base_link}.</p>
+{problem}{capped}
+<div class="project-toolbar"><div class="standup-subnav">{toggle}</div>{filter_html}</div>
+{hint}
+{main}
+{panel}{templates}
+{_PROJECT_PANEL_SCRIPT}"""
+    return _page(body, banner=banner, banner_undo_path=banner_undo_path, current_path="/projects", wide=True)
+
+
+def _projects_hidden_form_copy(form: dict) -> str:
+    """Re-sends the submitted edit form on the confirm page: only allowlisted slugs
+    (and their orig_ twins), so nothing else the request carried is passed along."""
+    out = []
+    for slug in _projects.FIELD_SLUGS:
+        for key in (slug, f"orig_{slug}"):
+            if key in form:
+                out.append(f'<input type="hidden" name="{key}" value="{html.escape(form[key][0])}">')
+    if form.get("complete_today", [""])[0] == "yes":
+        out.append('<input type="hidden" name="complete_today" value="yes">')
+    view = _project_view(form.get("view", [""])[0])
+    if view != "board":
+        out.append(f'<input type="hidden" name="view" value="{view}">')
+    return "".join(out)
+
+
+def _render_projects_confirm_page(item: dict, plan: dict, form: dict) -> bytes:
+    view = _project_view(form.get("view", [""])[0])
+    back = html.escape(f"{_projects_url(view)}#project-{item['id']}")
+    rows = "".join(
+        f'<tr><th scope="row">{html.escape(c["label"])}</th><td>{html.escape(c["before"] or "(empty)")}</td>'
+        f'<td>&rarr;</td><td><strong>{html.escape(c["after"] or "(empty)")}</strong></td></tr>'
+        for c in plan["changes"]
+    )
+    body = f"""<p><a href="{back}">&larr; back to projects</a></p>
+<h2>{_icon("folder")} Save to Airtable?</h2>
+<div class="security-panel">
+  <h2 class="column-heading">{html.escape(item["name"])}</h2>
+  <table class="project-diff"><tbody>{rows}</tbody></table>
+  <p class="meta">This writes to the live Airtable base. The page confirms the saved values afterwards and offers Undo.</p>
+  <form method="post" action="/projects/{html.escape(item["id"])}/edit">
+    {_projects_hidden_form_copy(form)}
+    <input type="hidden" name="confirm" value="yes">
+    <div class="actions">
+      <button class="approve" type="submit" data-loading-text="Saving…">{_icon("send", "icon-sm")}<span>Save to Airtable</span></button>
+      <a class="meta" href="{back}">Cancel</a>
+    </div>
+  </form>
+</div>"""
+    return _page(body, current_path="/projects", wide=True)
+
+
+def _render_projects_problem_page(item: dict, plan: dict) -> bytes:
+    lines = [f"<li>{html.escape(e)}</li>" for e in plan["errors"]]
+    for c in plan["conflicts"]:
+        lines.append(
+            f'<li>{html.escape(c["label"])} was changed in Airtable after this page loaded '
+            f'(now: {html.escape(c["now"] or "(empty)")}). Reload the page and make the edit again.</li>'
+        )
+    body = f"""<p><a href="/projects">&larr; back to projects</a></p>
+<h2>{_icon("folder")} Nothing was saved</h2>
+<div class="security-panel"><h2 class="column-heading">{html.escape(item["name"])}</h2><ul>{"".join(lines)}</ul></div>"""
+    return _page(body, current_path="/projects", wide=True)
+
+
+_PROJECTS_LOCAL_HOSTS = ("127.0.0.1", "localhost", "[::1]", "::1")
+
+
+def _same_origin_request_allowed(headers) -> bool:
+    """Same-origin guard for the /projects writes and the /sla update. A page on another site can make a browser
+    POST to this local server; the browser still labels such a request with its real Origin,
+    so a mismatch (or a Host that is not this machine, as in DNS rebinding) is refused. A request
+    with no Origin and no Referer cannot come from a cross-site browser form and is allowed."""
+    host = (headers.get("Host") or "").strip().lower()
+    hostname = host[: host.index("]") + 1] if host.startswith("[") and "]" in host else host.rsplit(":", 1)[0]
+    if hostname not in _PROJECTS_LOCAL_HOSTS:
+        return False
+    for name in ("Origin", "Referer"):
+        value = (headers.get(name) or "").strip()
+        if value:
+            return (urlparse(value).netloc or "").lower() == host
+    return True
+
+
+_projects_request_allowed = _same_origin_request_allowed
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -5617,6 +6594,16 @@ class Handler(BaseHTTPRequestHandler):
             self._send_html(_render_reconnect_page(banner=banner))
             return
 
+        if parsed.path == "/projects":
+            view = _project_view(qs.get("view", [""])[0])
+            sort = qs.get("sort", [""])[0]
+            sort = sort if sort.lstrip("-") in _PROJECT_SORTS else ""
+            open_id = qs.get("open", [""])[0]
+            self._send_html(_render_projects_page(_projects.fetch_projects(), banner=banner,
+                                                  banner_undo_path=banner_undo_path, view=view, sort=sort,
+                                                  open_id=open_id if _projects.valid_record_id(open_id) else ""))
+            return
+
         if parsed.path == "/tasks":
             # Reconciles against live Zendesk status first (catches a task
             # solved/closed directly in Zendesk rather than via this page's
@@ -5662,7 +6649,7 @@ class Handler(BaseHTTPRequestHandler):
             # _render_sla_page.
             client = _common.make_client()
             sla_result = _common.fetch_sla_tickets(client, log_fn=_log)
-            history = _common.sla_history_snapshot()
+            history = _common.sla_history_with_live_point(_common.sla_history_snapshot(), sla_result)
             self._send_html(_render_sla_page(sla_result, history, banner=banner))
             return
 
@@ -5830,10 +6817,30 @@ class Handler(BaseHTTPRequestHandler):
             # wherever it says would be an open redirect.
             form = self._parse_form_body()
             return_to = form.get("return_to", ["/firstreply"])[0]
-            if return_to not in ("/firstreply", "/overview", "/tasks", "/standup", "/flagged", "/security", "/solved", "/reconnect"):
+            if return_to not in ("/firstreply", "/overview", "/tasks", "/standup", "/flagged", "/security", "/solved", "/reconnect", "/projects"):
                 return_to = "/firstreply"
+            if return_to == "/projects":
+                # Projects come from Airtable, not Zendesk: Refresh just drops the
+                # in-memory copy so the next load reads Airtable again.
+                _projects.reset_cache()
+                self._redirect(f"/projects?msg={quote('Reloaded projects from Airtable.')}")
+                return
             message = self._refresh()
             self._redirect(f"{return_to}?msg={quote(message)}")
+            return
+
+        if parts and parts[0] == "projects":
+            self._projects_post(parts)
+            return
+
+        if parts == ["sla", "update"]:
+            # Body read first, refusals included (HTTP/1.1 keep-alive; see _projects_post).
+            self._parse_form_body()
+            if not _same_origin_request_allowed(self.headers):
+                self._send_html(_page('<p class="empty">Refused: this request did not come from this tool\'s own pages.</p>'), status=403)
+                return
+            result = _common.update_sla_history()
+            self._redirect(f"/sla?msg={quote(result['message'])}")
             return
 
         if parts == ["tasks", "new"]:
@@ -5963,7 +6970,10 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         confirmed = form.get("confirm", [""])[0] == "yes"
-        result = self._post(ticket_id, edited_draft, public=(action == "post_public"), confirmed=confirmed)
+        result = self._post(
+            ticket_id, edited_draft, public=(action == "post_public"), confirmed=confirmed,
+            mention_keys=form.get("mention", []),
+        )
         if isinstance(result, tuple):
             # Needs a human decision before posting -- render the confirm
             # interstitial directly (200) instead of redirecting, so the
@@ -5972,6 +6982,55 @@ class Handler(BaseHTTPRequestHandler):
             self._send_html(result[1])
             return
         self._redirect(f"/firstreply?msg={quote(result)}")
+
+    def _projects_post(self, parts: list) -> None:
+        """POST /projects/<rec>/edit and /projects/undo/<id>. Everything here writes to
+        Airtable, so each request first passes the same-origin guard."""
+        # The body is read first on every path, refusals included: this server speaks
+        # HTTP/1.1 keep-alive, and an unread body would be parsed as the next request.
+        form = self._parse_form_body()
+        if not _projects_request_allowed(self.headers):
+            self._send_html(_page('<p class="empty">Refused: this request did not come from this tool\'s own pages.</p>'), status=403)
+            return
+        if len(parts) == 3 and parts[2] == "edit" and _projects.valid_record_id(parts[1]):
+            self._projects_edit(parts[1], form)
+            return
+        if len(parts) == 3 and parts[1] == "undo" and re.fullmatch(r"[0-9a-f]{12}", parts[2]):
+            self._redirect(f"/projects?msg={quote(_projects.undo_edit(parts[2]))}")
+            return
+        self._send_html(_page('<p class="empty">Not found.</p>'), status=404)
+
+    def _projects_edit(self, record_id: str, form: dict) -> None:
+        if not _projects.config()["configured"]:
+            self._redirect(_projects_redirect_path("board", "Airtable is not set up."))
+            return
+        view = _project_view(form.get("view", [""])[0])
+        confirmed = form.get("confirm", [""])[0] == "yes"
+        if confirmed and not _projects.begin_action(record_id):
+            self._redirect(_projects_redirect_path(view, "Another change to this project is in progress. Try again in a moment."))
+            return
+        try:
+            try:
+                item = _projects.fetch_record(record_id)
+            except _projects.AirtableError as exc:
+                self._redirect(_projects_redirect_path(view, f"Nothing was saved: {exc}."))
+                return
+            plan = _projects.plan_edit(form, item)
+            if plan["errors"] or plan["conflicts"]:
+                self._send_html(_render_projects_problem_page(item, plan), status=409 if plan["conflicts"] else 400)
+                return
+            if not plan["changes"]:
+                self._redirect(_projects_redirect_path(view, "No changes, so nothing was sent to Airtable.", fragment=f"project-{record_id}"))
+                return
+            if not confirmed:
+                self._send_html(_render_projects_confirm_page(item, plan, form))
+                return
+            result = _projects.commit_edit(record_id, plan)
+        finally:
+            if confirmed:
+                _projects.end_action(record_id)
+        undo_path = f"/projects/undo/{result['undo_id']}" if result.get("undo_id") else ""
+        self._redirect(_projects_redirect_path(view, result["message"], undo_path, f"project-{record_id}"))
 
     def _reconnect_start(self) -> str:
         client = _common.make_client()
@@ -6402,7 +7461,7 @@ class Handler(BaseHTTPRequestHandler):
         _common.mark_auth_ok()
         return f"Claimed #{ticket_id} -- now assigned to you in Zendesk."
 
-    def _post(self, ticket_id: str, draft_text: str, public: bool, confirmed: bool = False):
+    def _post(self, ticket_id: str, draft_text: str, public: bool, confirmed: bool = False, mention_keys=()):
         """Posts the (possibly edited) draft as either a public reply, visible
         to the requester, or an internal comment, visible only to agents --
         same `public` flag Zendesk's own comment composer uses. The only way
@@ -6410,6 +7469,13 @@ class Handler(BaseHTTPRequestHandler):
         (see _dismiss(), above) -- there's still no implicit auto-dismiss;
         every candidate stays pending until you explicitly act on it one way
         or another.
+
+        `mention_keys` are the tag-picker choices (see _tag_picker_html). On
+        an internal comment each becomes a real Zendesk @mention anchor in
+        front of the draft, and the comment is read back afterwards to
+        confirm Zendesk kept them. On a public reply they are ignored (and
+        the banner says so): only agents can be mentioned, and a mention in
+        a public reply would CC the agent where the requester can see it.
 
         Returns EITHER a plain string (the redirect banner message, for the
         normal success/failure paths) OR a ("confirm", html_bytes) tuple
@@ -6481,15 +7547,30 @@ class Handler(BaseHTTPRequestHandler):
             # recognize OUR OWN prior reply as "already answered" even on a
             # self-created test ticket where the requester and the replying
             # account are the same Zendesk user -- see resolve_own_agent_id.
+            mention_users = []
+            tag_note = ""
+            clean_keys = []
+            if mention_keys:
+                if public:
+                    tag_note = " Tags apply to internal comments only, so nobody was tagged."
+                else:
+                    try:
+                        clean_keys = _common.clean_mention_keys(mention_keys)
+                    except ValueError as exc:
+                        return f"Could not post the {kind} for #{ticket_id}: {exc} Nothing was posted."
+                    mention_users, tag_error = _common.resolve_mentions(client, clean_keys, log_fn=_log)
+                    if tag_error:
+                        return f"Could not post the {kind} for #{ticket_id}: {tag_error} Nothing was posted; left it pending."
+
             agent_user_id = _common.resolve_own_agent_id(client, log_fn=_log)
             reply_check = _common.check_already_replied(client, ticket_id, requester_id, agent_user_id=agent_user_id, log_fn=_log)
 
             if reply_check["already_replied"] and not confirmed:
                 _log(f"Post ({kind}) for #{ticket_id} needs confirmation: {reply_check['reason']}")
-                return ("confirm", _render_confirm_page(ticket_id, draft_text, public, reply_check, subject, url))
+                return ("confirm", _render_confirm_page(ticket_id, draft_text, public, reply_check, subject, url, mention_keys=clean_keys))
 
             try:
-                client.post_comment(int(ticket_id), draft_text, public=public)
+                client.post_comment(int(ticket_id), _common.mention_html(mention_users) + draft_text, public=public)
             except Exception as exc:
                 _log(f"Post ({kind}) for #{ticket_id} failed: {exc}")
                 return f"Could not post the {kind} for #{ticket_id}: {exc}. Left it pending so nothing is lost."
@@ -6507,13 +7588,24 @@ class Handler(BaseHTTPRequestHandler):
             _log(f"Posted {kind} to #{ticket_id}." + (" (confirmed despite an existing reply)" if reply_check["already_replied"] else ""))
 
             excerpt = draft_text if len(draft_text) <= 300 else draft_text[:297] + "..."
+            tag_result = ""
+            if mention_users:
+                tagged_names = ", ".join(name for _uid, name in mention_users)
+                missing, read_error = _common.mentions_stored(client, ticket_id, mention_users, log_fn=_log)
+                if read_error:
+                    tag_result = f" Tagged: {tagged_names}, but the comment could not be read back to confirm it ({read_error}); check the ticket."
+                elif missing:
+                    tag_result = f" Tagged: {tagged_names}, but Zendesk did not keep the mention for {', '.join(missing)}; check the ticket."
+                else:
+                    tag_result = f" Tagged: {tagged_names} (mention confirmed in Zendesk)."
+                _log(f"Tagged {tagged_names} on #{ticket_id}: " + ("not confirmed" if (read_error or missing) else "confirmed"))
             warning = ""
             if reply_check["already_replied"]:
                 # You explicitly confirmed posting anyway (public or internal) --
                 # still worth flagging in the banner as a record of that choice.
                 warning = f" Note: you confirmed posting despite {reply_check['reason']}."
             return (
-                f"Confirmed: {kind_label} sent to #{ticket_id}{subject_part}{url_part}. "
+                f"Confirmed: {kind_label} sent to #{ticket_id}{subject_part}{url_part}.{tag_result}{tag_note} "
                 f"Text sent to Zendesk: “{excerpt}”{warning}"
             )
         finally:
