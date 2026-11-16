@@ -111,6 +111,19 @@ _TOPIC_ICON_FILES = {
     # /standup -- same conversation glyph as "flagged" (Discussion), own
     # key per the "different things that share a glyph" rule above.
     "standup": "conversation-csa-blue.png",
+    # /projects -- page heading, one badge per status column, and the
+    # panel's dates legend. Keys are "project-<STATUS>" so a column picks
+    # its own badge by status name; a status with no key just renders
+    # without one (_topic_icon returns "").
+    "projects": "folder-csa-blue.png",
+    "project-triage": "error-csa-blue.png",
+    "project-INTAKE": "identify-gap-csa-blue.png",
+    "project-SCOPING": "checklist-csa-blue.png",
+    "project-ACTIVE": "gear-csa-blue.png",
+    "project-BLOCKED": "eye-obstructed-csa-blue.png",
+    "project-COMPLETE": "checkmark-csa-blue.png",
+    "project-CANCELLED": "cancel-csa-blue.png",
+    "dates": "calendar-csa-blue.png",
 }
 
 def _load_icon_data_uris(file_map: dict) -> dict:
@@ -2924,6 +2937,8 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
      above an empty-state's muted text, and inline inside the small
      already-coloured priority pill. */
   .topic-icon {{ width: 24px; height: 24px; flex-shrink: 0; vertical-align: middle; margin-right: 0.45rem; border-radius: 6px; }}
+  .topic-icon-sm {{ width: 20px; height: 20px; flex-shrink: 0; vertical-align: -5px; margin-right: 0.4rem; border-radius: 5px; }}
+  .project-dates-legend {{ display: flex; align-items: center; font-size: 0.85rem; color: var(--muted, #555); margin-top: 0.2rem; }}
   .topic-icon-empty {{ display: block; width: 26px; height: 26px; margin: 0 auto 0.6rem auto; border-radius: 6px; opacity: 0.9; }}
   .badge-priority .topic-icon-inline {{ width: 11px; height: 11px; margin-right: 0.3rem; vertical-align: -1px; border-radius: 0; }}
   /* Confirmation "banner" now renders as a toast: fixed to the corner of
@@ -6081,6 +6096,7 @@ def _project_edit_form_html(p: dict, view: str) -> str:
     <label>Status<select name="status">{status_opts}</select></label>
     <label>Assignee<select name="assignee"{"" if people else " disabled"}>{person_opts}</select></label>
     {note}
+    <div class="project-dates-legend">{_topic_icon("dates", "topic-icon-sm")}Dates</div>
     <div class="project-edit-dates">
       <label>Start<input type="date" name="start" value="{html.escape(p["start"])}"></label>
       <label>End<input type="date" name="end" value="{html.escape(p["end"])}"></label>
@@ -6166,7 +6182,7 @@ def _project_columns(items: list, today: str, view: str) -> str:
         title = ' title="Projects with no Status yet"' if key == "" else ""
         columns.append(
             f'<div class="security-panel overview-section project-column" data-status="{html.escape(key)}">'
-            f'<div class="overview-section-head"><h2 class="column-heading"{title}>{html.escape(label)}</h2>'
+            f'<div class="overview-section-head"><h2 class="column-heading"{title}>{_topic_icon("project-" + (key or "triage"), "topic-icon-sm")}{html.escape(label)}</h2>'
             f'<span class="stat-chip">{len(group)}</span></div>{cards}</div>'
         )
     return f'<div class="overview-board project-board">{"".join(columns)}</div>'
@@ -6277,7 +6293,7 @@ def _render_projects_page(result: dict, banner: str = "", banner_undo_path: str 
     today = today or datetime.now().strftime("%Y-%m-%d")
     view = _project_view(view)
     cfg = _projects.config()
-    title = f'<h2>{_icon("folder")} Projects</h2>'
+    title = f'<h2>{_topic_icon("projects") or _icon("folder") + " "}Projects</h2>'
     if not result.get("configured"):
         body = f"""{title}
 <div class="security-panel"><h2 class="column-heading">Airtable is not set up</h2>

@@ -169,6 +169,29 @@ def test_page_has_a_column_per_status_and_escapes_everything(airtable):
     assert "pat-test-token" not in page
 
 
+def test_projects_page_uses_the_csa_topic_icons(airtable):
+    page = review_server._render_projects_page(_projects.fetch_projects(), today="2026-06-01").decode()
+    body = page.split("</style>")[-1]
+    visible = re.sub(r"<template.*?</template>", "", body, flags=re.S)
+    assert re.search(r"<h2><img src=\"data:image/png;base64,[^\"]+\" alt=\"\" class=\"topic-icon\">Projects</h2>", visible)
+    for status in ("INTAKE", "SCOPING", "ACTIVE", "BLOCKED", "COMPLETE", "CANCELLED"):
+        column = visible.split(f'data-status="{status}"')[1].split("</h2>")[0]
+        assert 'class="topic-icon-sm"' in column, status
+    assert "project-dates-legend" in body                 # panel templates carry the dates legend
+
+
+def test_new_topic_icon_files_are_small_square_pngs():
+    import struct
+    for key in ("projects", "project-triage", "project-INTAKE", "project-SCOPING", "project-ACTIVE",
+                "project-BLOCKED", "project-COMPLETE", "project-CANCELLED", "dates"):
+        name = review_server._TOPIC_ICON_FILES[key]
+        data = (review_server.TOPIC_ICONS_DIR / name).read_bytes()
+        assert data[:8] == b"\x89PNG\r\n\x1a\n" and len(data) < 20_000, name
+        width, height = struct.unpack(">II", data[16:24])
+        assert width == height, name
+        assert key in review_server.TOPIC_ICON_DATA_URIS
+
+
 def test_edit_form_carries_only_allowlisted_fields(airtable):
     body = review_server._render_projects_page(_projects.fetch_projects()).decode().split("</style>")[-1]
     for slug in _projects.FIELD_SLUGS:
@@ -458,7 +481,7 @@ def _board_only(page):
 
 
 def _column_labels(page):
-    return re.findall(r'<h2 class="column-heading"[^>]*>([^<]+)</h2>', _board_only(page))
+    return re.findall(r'<h2 class="column-heading"[^>]*>(?:<img[^>]*>)?([^<]+)</h2>', _board_only(page))
 
 
 def test_projects_without_a_status_come_first_as_needs_triage(airtable):
@@ -478,7 +501,7 @@ def test_spelling_variants_of_a_status_share_one_column(airtable):
     page = _page_for()
     labels = _column_labels(page)
     assert labels.count("ACTIVE") == 1 and len(labels) == len(set(labels))
-    segment = {seg.split("<", 1)[0]: seg for seg in _board_only(page).split('<h2 class="column-heading">')[1:]}
+    segment = {re.sub(r"^<img[^>]*>", "", seg).split("<", 1)[0]: seg for seg in _board_only(page).split('<h2 class="column-heading">')[1:]}
     active = segment["ACTIVE</h2>".split("<")[0]]
     assert '<span class="stat-chip">3</span>' in active
     assert "Laptop refresh" in active and "Old audit" in active and "Rotate" in active
