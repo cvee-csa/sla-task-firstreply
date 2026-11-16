@@ -363,7 +363,7 @@ _ABOUT_TOOL_HTML = """<details class="about-tool" id="about-tool">
     <h3>What it writes to Zendesk</h3>
     <p>Only what you click: <strong>Public Reply</strong>, <strong>Internal Comment</strong> (optionally tagging teammates), <strong>Claim</strong>, and promoting or quick-solving a task. Before a reply is posted, the tool checks the ticket again for someone else&rsquo;s reply.</p>
     <h3>What it writes to Airtable</h3>
-    <p>Only from the Projects page, only after a review step, and only these fields: Status, Assigned to, Blockers, Sprint Notes, Start date, End date and Actual Completion Date. A field changed in Airtable since the page loaded is never overwritten. Each save is read back to confirm it, and the banner offers Undo.</p>
+    <p>Only from the Projects page, only after a review step, and only these fields: Project name, Description, Status, Assigned to, Requester, Urgency Rating, Start date, End date, Actual Completion Date, Blockers and Sprint Notes. A field changed in Airtable since the page loaded is never overwritten. Each save is read back to confirm it, and the banner offers Undo.</p>
   </div>
 </details>"""
 
@@ -2152,7 +2152,19 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
   .sla-history-stale {{ color: var(--flag-alert-color); }}
   /* /projects: columns reuse the Overview board; the card is a .mini-ticket. */
   .project-board > .project-column {{ --board-col-width: 340px; }}
-  .project-card {{ display: block; }}
+  .project-column > summary {{ cursor: pointer; list-style: none; }}
+  .project-column > summary::-webkit-details-marker {{ display: none; }}
+  .project-column > summary::after {{ content: "\\25BE"; color: var(--muted); font-size: 0.8rem; margin-left: 0.1rem; }}
+  .project-board > .project-column:not([open]) {{ --board-col-width: 3.4rem; padding-left: 0.35rem; padding-right: 0.35rem; border-left-width: 0; }}
+  .project-column:not([open]) > summary {{ flex-direction: column; align-items: center; margin-bottom: 0; gap: 0.5rem; }}
+  .project-column:not([open]) > summary::after {{ content: "\\25B8"; order: -1; }}
+  .project-column:not([open]) .column-heading {{ writing-mode: vertical-rl; display: flex; align-items: center; gap: 0.4rem; white-space: nowrap; }}
+  .project-column:not([open]) .column-heading .topic-icon-sm {{ margin: 0; }}
+  .project-card {{ display: block; border-left: 3px solid transparent; padding-left: 0.6rem; }}
+  .project-card-blocked {{ border-left-color: var(--flag-color); }}
+  .project-card-overdue {{ border-left-color: var(--flag-alert-color); }}
+  .project-dates {{ font-size: 0.82rem; margin: 0.15rem 0 0; }}
+  .project-chips .sla-chip {{ margin-right: 0.4rem; }}
   .project-name {{ font-weight: 700; margin-bottom: 0.3rem; }}
   .project-line {{ display: flex; flex-wrap: wrap; align-items: center; gap: 0.2rem 0.6rem; }}
   .project-line:empty {{ display: none; }}
@@ -2195,18 +2207,20 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
   .project-panel-desc {{ white-space: pre-wrap; font-size: 0.9rem; max-height: 18rem; overflow-y: auto; padding-right: 0.3rem; overflow-wrap: anywhere; }}
   .project-edit-form {{ display: grid; gap: 0.5rem; }}
   .project-edit-form label {{ display: grid; gap: 0.2rem; font-size: 0.75rem; font-weight: 600; color: var(--muted); }}
-  .project-edit-form select, .project-edit-form input[type=date] {{
+  .project-edit-form select, .project-edit-form input[type=date], .project-edit-form input[type=text] {{
     font-family: inherit; font-size: 0.85rem; padding: 0.35rem 0.45rem; border-radius: 6px;
     border: 1px solid var(--input-border); background: var(--input-bg); color: var(--text); width: 100%; box-sizing: border-box;
   }}
   .project-edit-form textarea {{ min-height: 3.5rem; font-weight: 400; }}
+  .project-desc-edit > summary {{ cursor: pointer; font-size: 0.78rem; font-weight: 600; color: var(--muted); margin-bottom: 0.3rem; }}
+  .project-edit-form .project-desc-input {{ min-height: 9rem; resize: vertical; }}
   .project-edit-dates {{ display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.4rem; }}
   @media (max-width: 520px) {{ .project-edit-dates {{ grid-template-columns: minmax(0, 1fr); }} }}
   .project-edit-form .project-check {{ display: flex; align-items: flex-start; gap: 0.4rem; font-weight: 400; }}
   body.project-panel-open {{ overflow: hidden; }}
   .project-diff {{ border-collapse: collapse; margin: 0.5rem 0 1rem; }}
   .project-diff th, .project-diff td {{ text-align: left; padding: 0.3rem 0.8rem 0.3rem 0; vertical-align: top; white-space: pre-wrap; }}
-  :is(html.has-bg-image, html.theme-galaxy) :is(.project-edit-form select, .project-edit-form input[type=date]) {{ background: var(--lg-input); border-color: var(--glass-border); }}
+  :is(html.has-bg-image, html.theme-galaxy) :is(.project-edit-form select, .project-edit-form input[type=date], .project-edit-form input[type=text]) {{ background: var(--lg-input); border-color: var(--glass-border); }}
   .person-card .overview-section-head {{ flex-wrap: wrap; row-gap: 0.35rem; }}
   .sla-history-note.person-others-note {{ margin-top: 1.5rem; }}
   .person-card {{ min-width: 0; margin-bottom: 0; }}
@@ -6103,6 +6117,12 @@ def _project_edit_form_html(p: dict, view: str) -> str:
         status_opts = f'<option value="{html.escape(p["status"])}" selected>{html.escape(p["status"])} (not editable)</option>' + status_opts
     if not p["status"]:
         status_opts = '<option value="" selected>(no status)</option>' + status_opts
+    urgency_opts = "".join(
+        f'<option value="{html.escape(o)}"{" selected" if o == p["urgency"] else ""}>{html.escape(o)}</option>' for o in _projects.URGENCY_OPTIONS
+    )
+    if p["urgency"] and p["urgency"] not in _projects.URGENCY_OPTIONS:
+        urgency_opts = f'<option value="{html.escape(p["urgency"])}" selected>{html.escape(p["urgency"])} (not editable)</option>' + urgency_opts
+    urgency_opts = f'<option value=""{"" if p["urgency"] else " selected"}>(none)</option>' + urgency_opts
     person_opts = '<option value="">Unassigned</option>' + "".join(
         f'<option value="{html.escape(n)}"{" selected" if n == p["assignee"] else ""}>{html.escape(n)}</option>' for n in names
     )
@@ -6112,9 +6132,12 @@ def _project_edit_form_html(p: dict, view: str) -> str:
                 "(see .env.example).</p>")
     return f"""<form method="post" action="/projects/{html.escape(p["id"])}/edit" class="project-edit-form">
     {_project_hidden_fields(p, view)}
+    <label>Project name<input type="text" name="name" value="{html.escape(p["raw_name"])}" maxlength="{_projects.LINE_LIMIT}" required></label>
     <label>Status<select name="status">{status_opts}</select></label>
     <label>Assignee<select name="assignee"{"" if people else " disabled"}>{person_opts}</select></label>
     {note}
+    <label>Requester<input type="text" name="requester" value="{html.escape(p["requester"])}" maxlength="{_projects.LINE_LIMIT}"></label>
+    <label>Urgency<select name="urgency">{urgency_opts}</select></label>
     <div class="project-dates-legend">{_topic_icon("dates", "topic-icon-sm")}Dates</div>
     <div class="project-edit-dates">
       <label>Start<input type="date" name="start" value="{html.escape(p["start"])}"></label>
@@ -6124,6 +6147,9 @@ def _project_edit_form_html(p: dict, view: str) -> str:
     <label class="project-check"><input type="checkbox" name="complete_today" value="yes" checked> Fill in today as the completed date when Status becomes COMPLETE</label>
     <label>Blockers<textarea name="blockers">{html.escape(p["blockers"])}</textarea></label>
     <label>Sprint notes<textarea name="notes">{html.escape(p["notes"])}</textarea></label>
+    <details class="project-desc-edit"><summary>Edit description</summary>
+      <label>Description<textarea name="description" class="project-desc-input">{html.escape(p["description"])}</textarea></label>
+    </details>
     <div class="actions">
       <button class="approve" type="submit" data-loading-text="Checking…">{_icon("send", "icon-sm")}<span>Review changes</span></button>
     </div>
@@ -6141,6 +6167,8 @@ def _project_panel_html(p: dict, view: str, today: str) -> str:
         chips += '<span class="sla-chip sla-chip-breached">Past end date</span>'
     scores = [(label, p[key]) for label, key in (("Urgency", "urgency"), ("Ease", "ease"), ("Importance", "importance")) if p[key]]
     score_html = (f'<p class="meta">{" &middot; ".join(f"{html.escape(l)} {html.escape(v)}" for l, v in scores)}</p>' if scores else "")
+    if p["requester"]:
+        score_html = f'<p class="meta">Requested by {html.escape(p["requester"])}</p>' + score_html
     desc = (f'<h3 class="project-panel-label">Description</h3><div class="project-panel-desc">{html.escape(p["description"])}</div>'
             if p["description"] else '<p class="meta">No description.</p>')
     close_href = _projects_url(view) + f"#project-{p['id']}"
@@ -6177,17 +6205,27 @@ def _project_card_html(p: dict, today: str, view: str) -> str:
     blockers = (f'<div class="project-blockers"><strong>Blockers:</strong> {html.escape(p["blockers"])}</div>' if p["blockers"] else "")
     notes = (f'<div class="project-notes"><strong>Sprint notes:</strong> {html.escape(p["notes"])}</div>' if p["notes"] else "")
     preview = (f'<p class="project-preview">{html.escape(_project_preview(p["description"]))}</p>' if p["description"] else "")
-    dates = f'<span class="meta">{" &middot; ".join(bits)}</span>' if bits else ""
-    return f"""<div class="mini-ticket project-card" id="project-{html.escape(p["id"])}">
+    dates = f'<div class="project-dates meta">{" &middot; ".join(bits)}</div>' if bits else ""
+    # A coloured left edge so a column can be scanned without reading the chips:
+    # red = past its end date (wins), amber = BLOCKED.
+    overdue = bool(p["end"] and p["end"] < today and p["status_key"] not in _PROJECT_CLOSED)
+    edge = " project-card-overdue" if overdue else (" project-card-blocked" if p["status_key"] == "BLOCKED" else "")
+    return f"""<div class="mini-ticket project-card{edge}" id="project-{html.escape(p["id"])}">
   <div class="mini-ticket-head project-name"><a class="ticket-title-link" href="{html.escape(open_href)}" data-project-open="{html.escape(p["id"])}">{html.escape(p["name"])}</a></div>
-  <div class="project-line">{_project_who_html(p)}{dates}</div>
+  <div class="project-line">{_project_who_html(p)}</div>
+  {dates}
   <div class="project-chips">{chips}</div>
   {preview}{score_html}{blockers}{notes}
   <a class="project-open" href="{html.escape(open_href)}" data-project-open="{html.escape(p["id"])}">Details &amp; edit</a>
 </div>"""
 
 
-def _project_columns(items: list, today: str, view: str) -> str:
+def _project_columns(items: list, today: str, view: str, open_id: str = "") -> str:
+    """One <details> per status. COMPLETE, CANCELLED and any empty column start collapsed
+    to a narrow strip (heading and count only) so the working columns fit on screen; a
+    heading click opens or closes one, and the browser remembers the choice (see
+    _PROJECT_COLUMNS_SCRIPT). The column holding the project named by ?open= is always
+    drawn open."""
     keys = sorted({p["status_key"] for p in items} | set(_projects.STATUS_ORDER), key=_project_status_rank)
     columns = []
     for key in keys:
@@ -6199,10 +6237,13 @@ def _project_columns(items: list, today: str, view: str) -> str:
         cards = "".join(_project_card_html(p, today, view) for p in group) or '<p class="empty">None</p>'
         label = "Needs triage" if key == "" else key
         title = ' title="Projects with no Status yet"' if key == "" else ""
+        holds_open = bool(open_id) and any(p["id"] == open_id for p in group)
+        collapsed = (not group or key in _PROJECT_CLOSED) and not holds_open
         columns.append(
-            f'<div class="security-panel overview-section project-column" data-status="{html.escape(key)}">'
-            f'<div class="overview-section-head"><h2 class="column-heading"{title}>{_topic_icon("project-" + (key or "triage"), "topic-icon-sm")}{html.escape(label)}</h2>'
-            f'<span class="stat-chip">{len(group)}</span></div>{cards}</div>'
+            f'<details class="security-panel overview-section project-column" data-status="{html.escape(key)}"'
+            f'{" data-pinned" if holds_open else ""}{"" if collapsed else " open"}>'
+            f'<summary class="overview-section-head"><h2 class="column-heading"{title}>{_topic_icon("project-" + (key or "triage"), "topic-icon-sm")}{html.escape(label)}</h2>'
+            f'<span class="stat-chip">{len(group)}</span></summary>{cards}</details>'
         )
     return f'<div class="overview-board project-board">{"".join(columns)}</div>'
 
@@ -6265,6 +6306,48 @@ def _project_table(items: list, today: str, sort: str) -> str:
     return (f'<div class="project-table-wrap"><table class="project-table"><thead><tr>{thead}</tr></thead>'
             f'<tbody>{"".join(rows)}</tbody></table></div>')
 
+
+# Board columns: restore each column's remembered open/closed state, remember a click on a
+# heading, and while the filter box has text open every column holding a match (undone when
+# the box is emptied). Plain string, not an f-string, so no brace doubling.
+_PROJECT_COLUMNS_SCRIPT = """<script>
+(function () {
+  var cols = document.querySelectorAll('details.project-column');
+  if (!cols.length) { return; }
+  function keyFor(c) { return 'csa-projects-col-' + c.dataset.status; }
+  cols.forEach(function (c) {
+    if (!c.hasAttribute('data-pinned')) {
+      try {
+        var saved = localStorage.getItem(keyFor(c));
+        if (saved === '1') { c.open = true; } else if (saved === '0') { c.open = false; }
+      } catch (e) {}
+    }
+    var summary = c.querySelector('summary');
+    if (summary) {
+      summary.addEventListener('click', function () {
+        delete c.dataset.auto;
+        setTimeout(function () {
+          try { localStorage.setItem(keyFor(c), c.open ? '1' : '0'); } catch (e) {}
+        }, 0);
+      });
+    }
+  });
+  var input = document.querySelector('.project-toolbar .filter-input');
+  if (input) {
+    input.addEventListener('input', function () {
+      // The shared filter handler runs after this one; wait for it to hide the non-matches.
+      setTimeout(function () {
+        var active = input.value.trim() !== '';
+        cols.forEach(function (c) {
+          var hit = Array.prototype.some.call(c.querySelectorAll('.project-card'), function (el) { return el.style.display !== 'none'; });
+          if (active && hit && !c.open) { c.open = true; c.dataset.auto = '1'; }
+          else if ((!active || !hit) && c.dataset.auto === '1') { c.open = false; delete c.dataset.auto; }
+        });
+      }, 0);
+    });
+  }
+})();
+</script>"""
 
 _PROJECT_PANEL_SCRIPT = """<script>
 (function () {
@@ -6345,8 +6428,10 @@ PROJECTS_ASSIGNEES=Name:email,Name:email</pre>
         main = _project_table(items, today, sort) if items else '<p class="empty">No projects.</p>'
         target, hint = ".project-row", ""
     else:
-        main = _project_columns(items, today, view)
-        target, hint = ".project-card", '<p class="meta overview-board-hint">Scrolls sideways: one column per status.</p>'
+        main = _project_columns(items, today, view, open_id) + _PROJECT_COLUMNS_SCRIPT
+        target = ".project-card"
+        hint = ('<p class="meta overview-board-hint">Scrolls sideways: one column per status. Complete, Cancelled and empty '
+                'columns start collapsed (click a heading to open or close one). Red edge: past end date. Amber edge: blocked.</p>')
     filter_html = _filter_box_html(target, "Filter by project, person or description…") if items else ""
 
     by_id = {p["id"]: p for p in items}

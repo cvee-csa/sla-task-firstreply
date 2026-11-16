@@ -1,5 +1,6 @@
 """The Airtable "Projects" table: a read for the /projects page, and a small
-allowlisted write-back (Status, assignee, blockers, notes, dates).
+allowlisted write-back (name, description, Status, assignee, requester, urgency,
+blockers, notes, dates).
 
 Everything here talks to Airtable's REST API with a personal access token that
 lives in .env (AIRTABLE_TOKEN; never logged or rendered). Reads are cached in
@@ -31,25 +32,37 @@ CACHE_TTL_SECONDS = 120
 MAX_PAGES = 10            # 100 records a page; a base this size never needs more
 REQUEST_TIMEOUT_SECONDS = 20
 TEXT_LIMIT = 10000
+LINE_LIMIT = 255          # one-line text fields (project name, requester)
 
 STATUS_ORDER = ("INTAKE", "SCOPING", "ACTIVE", "BLOCKED", "COMPLETE", "CANCELLED")
+
+# The options of the single-select "Urgency Rating" field, exactly as Airtable spells them (writes
+# run with typecast off, so any other text is refused rather than creating a new option). Empty clears it.
+URGENCY_OPTIONS = ("5 - Critical / SLA Breach", "4 - Overdue", "3 - Hard Deadline", "2 - Soft Deadline", "1 - No Deadline")
 
 # The Airtable fields the page reads (names as they appear in the base).
 READ_FIELDS = (
     "Project name", "Description", "Status", "Assigned to", "Start date", "End date",
     "Actual Completion Date", "Blockers", "Sprint Notes", "Source Zendesk Ticket ID",
     "Source Zendesk Ticket URL", "Workstream", "Urgency Rating", "Ease Score", "Resource Importance",
+    "Requester",
 )
 
 # slug -> (Airtable field name, kind, label shown to people). The ONLY fields that can be written.
+# Kinds: "line" = one-line text, "text" = long text, "select" = Status, "choice" = a single select
+# that may be cleared (urgency), "collaborator", "date".
 FIELD_SLUGS = {
+    "name": ("Project name", "line", "Project name"),
     "status": ("Status", "select", "Status"),
     "assignee": ("Assigned to", "collaborator", "Assignee"),
-    "blockers": ("Blockers", "text", "Blockers"),
-    "notes": ("Sprint Notes", "text", "Sprint notes"),
+    "requester": ("Requester", "line", "Requester"),
+    "urgency": ("Urgency Rating", "choice", "Urgency"),
     "start": ("Start date", "date", "Start date"),
     "end": ("End date", "date", "End date"),
     "completed": ("Actual Completion Date", "date", "Completed on"),
+    "blockers": ("Blockers", "text", "Blockers"),
+    "notes": ("Sprint Notes", "text", "Sprint notes"),
+    "description": ("Description", "text", "Description"),
 }
 
 _RECORD_ID_RE = re.compile(r"^rec[A-Za-z0-9]{14}$")
@@ -164,6 +177,8 @@ def normalize(record: dict, cfg: dict | None = None) -> dict:
     return {
         "id": record.get("id", ""),
         "name": _text(f.get("Project name")) or "(untitled project)",
+        "raw_name": _text(f.get("Project name")),      # what an edit compares against, without the placeholder
+        "requester": _text(f.get("Requester")),
         "description": str(f.get("Description") or "").strip(),
         "status": _text(f.get("Status")),
         "status_key": _status_key(_text(f.get("Status"))),
@@ -253,8 +268,10 @@ def fetch_record(record_id: str) -> dict:
 
 def current_values(item: dict) -> dict:
     """slug -> the text the edit form shows and compares."""
-    return {"status": item["status"], "assignee": item["assignee"], "blockers": item["blockers"],
-            "notes": item["notes"], "start": item["start"], "end": item["end"], "completed": item["completed"]}
+    return {"name": item["raw_name"], "status": item["status"], "assignee": item["assignee"],
+            "requester": item["requester"], "urgency": item["urgency"], "start": item["start"],
+            "end": item["end"], "completed": item["completed"], "blockers": item["blockers"],
+            "notes": item["notes"], "description": item["description"]}
 
 
 def _clean_text(value: str) -> str:
@@ -311,6 +328,20 @@ def plan_edit(form: dict, item: dict, today: str | None = None) -> dict:
         if kind == "select":
             if new not in STATUS_ORDER:
                 errors.append(f"{label}: \"{new}\" is not one of {', '.join(STATUS_ORDER)}.")
+                continue
+        elif kind == "choice":
+            if new and new not in URGENCY_OPTIONS:
+                errors.append(f"{label}: \"{new}\" is not one of the Urgency Rating options.")
+                continue
+        elif kind == "line":
+            if "\n" in new:
+                errors.append(f"{label}: must be a single line.")
+                continue
+            if slug == "name" and not new:
+                errors.append(f"{label}: cannot be empty.")
+                continue
+            if len(new) > LINE_LIMIT:
+                errors.append(f"{label}: longer than {LINE_LIMIT} characters.")
                 continue
         elif kind == "collaborator":
             if new and new not in people:

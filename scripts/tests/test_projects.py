@@ -180,10 +180,26 @@ def test_projects_page_uses_the_csa_topic_icons(airtable):
     assert "project-dates-legend" in body                 # panel templates carry the dates legend
 
 
+def test_nav_links_use_badges_and_fall_back_to_line_glyphs():
+    nav = review_server._top_nav_html("/projects")
+    links = re.findall(r'<a class="top-nav-link[^>]*>.*?</a>', nav, flags=re.S)
+    assert len(links) == 7
+    for link in links:
+        assert ('class="topic-icon-nav"' in link) != ("<svg" in link)       # exactly one kind of icon
+    with_badge = [lk for lk in links if 'class="topic-icon-nav"' in lk]
+    assert len(with_badge) == 7                                       # every link, Overview included
+    assert "First Reply" in links[0] and 'class="topic-icon-nav"' in links[0]
+
+
+def test_overview_heading_has_its_badge():
+    assert review_server._topic_icon("overview") != ""
+    assert review_server._TOPIC_ICON_FILES["overview"] == "matrix-csa-blue.png"
+
+
 def test_new_topic_icon_files_are_small_square_pngs():
     import struct
     for key in ("projects", "project-triage", "project-INTAKE", "project-SCOPING", "project-ACTIVE",
-                "project-BLOCKED", "project-COMPLETE", "project-CANCELLED", "dates"):
+                "project-BLOCKED", "project-COMPLETE", "project-CANCELLED", "dates", "nav-firstreply", "overview"):
         name = review_server._TOPIC_ICON_FILES[key]
         data = (review_server.TOPIC_ICONS_DIR / name).read_bytes()
         assert data[:8] == b"\x89PNG\r\n\x1a\n" and len(data) < 20_000, name
@@ -324,6 +340,102 @@ def test_undo_refuses_when_the_record_moved_on(airtable):
 
 def test_undo_of_unknown_id(airtable):
     assert "not in the local log" in _projects.undo_edit("0123456789ab")
+
+
+# --- name, requester, urgency, description ------------------------------------------
+
+URGENT = "5 - Critical / SLA Breach"
+
+
+def test_plan_covers_name_requester_urgency_and_description(airtable):
+    rec = _records()[REC1]
+    plan = _projects.plan_edit(
+        _form(rec, name="Rotate API keys", requester="Dana Example", urgency=URGENT,
+              description="Rotate all keys.\nThen verify."), _projects.normalize(rec))
+    assert plan["errors"] == []
+    assert plan["payload"] == {"Project name": "Rotate API keys", "Requester": "Dana Example",
+                               "Urgency Rating": URGENT, "Description": "Rotate all keys.\nThen verify."}
+    assert plan["restore"]["Project name"] == "Rotate <b>keys</b>"
+
+
+def test_urgency_unknown_current_value_is_left_untouched(airtable):
+    rec = _records()[REC1]                                 # fixture holds 4, not an option string
+    plan = _projects.plan_edit(_form(rec, notes="Changed"), _projects.normalize(rec))
+    assert "Urgency Rating" not in plan["payload"] and plan["errors"] == []
+
+
+def test_urgency_can_be_set_and_cleared(airtable):
+    rec = _records()[REC1]
+    rec["fields"]["Urgency Rating"] = "3 - Hard Deadline"
+    item = _projects.normalize(rec)
+    assert _projects.plan_edit(_form(rec, urgency="1 - No Deadline"), item)["payload"] == {
+        "Urgency Rating": "1 - No Deadline"}
+    cleared = _projects.plan_edit(_form(rec, urgency=""), item)
+    assert cleared["payload"] == {"Urgency Rating": None}
+    assert cleared["restore"] == {"Urgency Rating": "3 - Hard Deadline"}
+
+
+def test_requester_can_be_cleared(airtable):
+    rec = _records()[REC1]
+    rec["fields"]["Requester"] = "Dana Example"
+    plan = _projects.plan_edit(_form(rec, requester=""), _projects.normalize(rec))
+    assert plan["payload"] == {"Requester": None} and plan["restore"] == {"Requester": "Dana Example"}
+
+
+@pytest.mark.parametrize("changes,fragment", [
+    ({"urgency": "9 - Whenever"}, "Urgency Rating options"),
+    ({"name": ""}, "cannot be empty"),
+    ({"name": "Line one\nLine two"}, "single line"),
+    ({"requester": "x" * (_projects.LINE_LIMIT + 1)}, "longer than"),
+    ({"description": "x" * (_projects.TEXT_LIMIT + 1)}, "longer than"),
+])
+def test_invalid_name_requester_urgency_description(airtable, changes, fragment):
+    rec = _records()[REC1]
+    plan = _projects.plan_edit(_form(rec, **changes), _projects.normalize(rec))
+    assert plan["changes"] == [] and any(fragment in e for e in plan["errors"])
+
+
+def test_description_edited_in_airtable_meanwhile_is_a_conflict(airtable):
+    rec = _records()[REC1]
+    rec["fields"]["Description"] = "Original"
+    form = _form(rec, description="Mine")
+    rec["fields"]["Description"] = "Theirs"
+    plan = _projects.plan_edit(form, _projects.normalize(rec))
+    assert plan["changes"] == [] and plan["conflicts"][0]["slug"] == "description"
+
+
+def test_commit_sends_exact_airtable_field_names_for_the_new_fields(airtable):
+    _projects.fetch_projects()
+    result = _commit(airtable, REC1, name="Rotate API keys", requester="Dana Example",
+                     urgency=URGENT, description="New text")
+    assert result["ok"] and "(confirmed)" in result["message"]
+    _method, _path, _params, body = airtable.patches()[0]
+    assert body == {"fields": {"Project name": "Rotate API keys", "Requester": "Dana Example",
+                               "Urgency Rating": URGENT, "Description": "New text"}, "typecast": False}
+
+
+def test_undo_restores_name_requester_urgency_and_description(airtable):
+    airtable.records[REC1]["fields"].update({"Requester": "Dana Example", "Description": "Old text",
+                                             "Urgency Rating": "2 - Soft Deadline"})
+    result = _commit(airtable, REC1, name="Renamed", requester="", urgency="", description="")
+    fields = airtable.records[REC1]["fields"]
+    assert fields["Project name"] == "Renamed" and "Requester" not in fields and "Urgency Rating" not in fields
+    assert _projects.undo_edit(result["undo_id"]).startswith("Undone")
+    fields = airtable.records[REC1]["fields"]
+    assert fields["Project name"] == "Rotate <b>keys</b>" and fields["Requester"] == "Dana Example"
+    assert fields["Description"] == "Old text" and fields["Urgency Rating"] == "2 - Soft Deadline"
+
+
+def test_edit_form_and_panel_show_the_new_fields(airtable):
+    rec = _records()[REC1]
+    rec["fields"].update({"Requester": "Dana <i>Example</i>", "Description": "Line <b>one</b>",
+                          "Urgency Rating": "3 - Hard Deadline"})
+    body = _page_for(records={REC1: rec, REC2: _records()[REC2], REC3: _records()[REC3]})
+    assert 'name="name"' in body and 'name="requester"' in body
+    assert '<select name="urgency"' in body and '<option value="3 - Hard Deadline" selected' in body
+    assert '<textarea name="description"' in body and "project-desc-edit" in body
+    assert "Requested by Dana &lt;i&gt;Example&lt;/i&gt;" in body and "<i>Example</i>" not in body
+    assert "Line <b>one</b>" not in body
 
 
 def test_record_guard_is_exclusive():
@@ -634,6 +746,55 @@ def test_an_unknown_view_in_the_form_falls_back_to_the_board(airtable, server):
     form["view"] = ["javascript:alert(1)"]
     status, loc, _ = _http(server, "POST", f"/projects/{REC1}/edit", form)
     assert status == 303 and loc.startswith("/projects?msg=")
+
+
+def _columns(page):
+    """data-status -> the opening <details ...> tag of each board column."""
+    return {m.group(1): m.group(0) for m in re.finditer(r'<details class="[^"]*project-column"[^>]*data-status="([^"]*)"[^>]*>', _board_only(page))}
+
+
+def test_complete_cancelled_and_empty_columns_start_collapsed(airtable):
+    cols = _columns(_page_for())
+    assert set(cols) >= {"INTAKE", "ACTIVE", "COMPLETE", "CANCELLED"}
+    for key in ("INTAKE", "ACTIVE", "SCOPING", "BLOCKED"):
+        # SCOPING and BLOCKED have no project in this data, so they are empty: collapsed.
+        assert (" open" in cols[key]) == (key in ("INTAKE", "ACTIVE")), key
+    assert " open" not in cols["COMPLETE"] and " open" not in cols["CANCELLED"]   # closed status
+    # the count and heading stay visible in the summary of a collapsed column
+    page = _board_only(_page_for())
+    complete = page.split('data-status="COMPLETE"')[1].split("</details>")[0]
+    assert "<summary" in complete and '<span class="stat-chip">1</span>' in complete
+
+
+def test_a_column_holding_the_opened_project_is_drawn_open_and_pinned(airtable):
+    cols = _columns(_page_for(open_id=REC3))                       # REC3 is COMPLETE
+    assert " open" in cols["COMPLETE"] and "data-pinned" in cols["COMPLETE"]
+    assert " open" not in _columns(_page_for())["COMPLETE"]
+    assert "data-pinned" not in "".join(_columns(_page_for()).values())
+
+
+def test_cards_get_an_edge_for_overdue_or_blocked_and_dates_on_their_own_line(airtable):
+    records = _records()
+    records[REC2]["fields"]["Status"] = "BLOCKED"                  # future end date, blocked
+    page = _board_only(_page_for(records=records))
+    by_id = {rec: classes for classes, rec in re.findall(r'<div class="mini-ticket project-card([^"]*)" id="project-(rec\w+)"', page)}
+    assert "project-card-overdue" in by_id[REC1]                   # ACTIVE, ended in January 2026
+    assert "project-card-blocked" in by_id[REC2] and "overdue" not in by_id[REC2]
+    assert by_id[REC3].strip() == ""                               # COMPLETE: no edge
+    card1 = page.split(f'id="project-{REC1}"')[1].split("Details &amp; edit")[0]
+    assert '<div class="project-dates meta">End Jan 15, 2026</div>' in card1
+    assert "project-line" in card1 and "End Jan" not in card1.split("project-dates")[0]
+
+
+def test_columns_script_is_on_the_board_only_and_valid_javascript(airtable):
+    assert "details.project-column" in _page_for()
+    assert "details.project-column" not in _page_for(view="table")
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    src = review_server._PROJECT_COLUMNS_SCRIPT.removeprefix("<script>").removesuffix("</script>")
+    result = subprocess.run([node, "--check", "-"], input=src, text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
 
 
 def test_panel_script_is_valid_javascript():
