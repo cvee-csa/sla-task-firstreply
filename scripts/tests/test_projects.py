@@ -202,12 +202,13 @@ def test_projects_page_uses_the_csa_topic_icons(airtable):
 def test_nav_links_use_badges_and_fall_back_to_line_glyphs():
     nav = review_server._top_nav_html("/projects")
     links = re.findall(r'<a class="top-nav-link[^>]*>.*?</a>', nav, flags=re.S)
-    assert len(links) == 7
+    assert len(links) == 9
     for link in links:
         assert ('class="topic-icon-nav tb tbg-' in link) != ("<svg" in link)       # exactly one kind of icon
     with_badge = [lk for lk in links if 'class="topic-icon-nav tb tbg-' in lk]
-    assert len(with_badge) == 7                                       # every link, Overview included
-    assert "First Reply" in links[0] and 'class="topic-icon-nav tb tbg-email"' in links[0]
+    assert len(with_badge) == 9                                       # every link, Overview included
+    assert "Home" in links[0] and 'class="topic-icon-nav tb tbg-key"' in links[0]
+    assert "First Reply" in links[1] and 'class="topic-icon-nav tb tbg-email"' in links[1]
 
 
 def test_overview_heading_has_its_badge():

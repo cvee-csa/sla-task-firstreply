@@ -225,7 +225,8 @@ def test_env_example_lists_every_required_zendesk_setting():
 
 def test_env_example_names_are_all_read_by_the_code():
     code = (SCRIPTS_DIR / "_common.py").read_text() + (SCRIPTS_DIR / "review_server.py").read_text() \
-        + (SCRIPTS_DIR / "first_reply_check.py").read_text() + (SCRIPTS_DIR / "_projects.py").read_text()
+        + (SCRIPTS_DIR / "first_reply_check.py").read_text() + (SCRIPTS_DIR / "_projects.py").read_text() \
+        + (SCRIPTS_DIR / "_ops_tasks.py").read_text()
     for name in _example_names():
         assert f'"{name}"' in code, f"{name} in .env.example is not read anywhere"
 

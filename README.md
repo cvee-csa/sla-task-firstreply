@@ -171,7 +171,7 @@ After changing a script, reload it the same way. For just the review server, see
 
 ## Day to day
 
-Open **http://127.0.0.1:8765/** to see what's waiting on you. The header nav links to every page below; the active page is highlighted. The links carry no count badges.
+Open **http://127.0.0.1:8765/** for the home page of admin links (see **Home page** below). The queue of tickets waiting on you is **First Reply**. The sidebar nav links to every page; the active page is highlighted. The links carry no count badges.
 
 ### The main queue (`/firstreply`)
 
@@ -271,6 +271,8 @@ The old `/standup/actions` and `/standup/people` URLs redirect to Action items a
 
 **Links into the rest of the tool.** **Add to My tasks** saves an open action item as a local My tasks draft (`_common.add_standup_action_to_tasks`); nothing reaches Zendesk until you promote it. For a teammate's item the draft's notes say whose it is. The draft records its source, so the button becomes an **In My tasks** chip and a second click can't duplicate it. Its notes name only the standup, so promoting it doesn't carry the meeting notes into Zendesk. Ticket numbers in the notes ("ticket 123456", "#123456") link to the ticket when `ZENDESK_SUBDOMAIN` is set.
 
+**Update standup.** Every `/standup` page has an **Update standup** button beside the "Built from N Operations Standup notes" line, like **Update history** on `/sla` but doing something different. It runs `meetingnotestool`'s own `build.py` on this Mac (60-second limit, one at a time, no network, no Google Drive) to rebuild `dist/standup_data.json` from the notes that repository already holds, then reloads the view and says how many standups it holds and the newest date. Use it after the scheduled refresh has added notes or after editing `topics.json` or `triage.json` there. It does **not** fetch new standups: those are parsed from Google Drive by a scheduled task inside the Claude app, and `meetingnotestool` is private and never pushed, so there is no GitHub copy to fetch (unlike the SLA history). If the build stops, the banner shows only the build's own first line (for example "Build stopped: 2 privacy finding(s)") and leaves the current view in place; run `python3 build.py` in that repository to see the details, which this tool never displays or logs because they can quote the notes. The button only runs a script named `build.py` that sits beside a `dist/` folder holding `STANDUP_DATA_FILE`, and only if the script mentions `standup_data.json`.
+
 **What was removed.** This tool no longer records Done/Dropped decisions, bulk resolve, a decision log or backups. `meetingnotestool`'s build still applies a `decisions.json` if one exists, but nothing here writes it; any leftover `decisions.log.jsonl` and `decisions_backups/` there can be deleted.
 
 ### Projects (`/projects`)
@@ -286,6 +288,18 @@ Clicking a project's name or **Details & edit** opens a side panel (Escape, the 
 **Setup.** Create an Airtable personal access token yourself (Developer hub, Personal access tokens) with the scopes `data.records:read` and `data.records:write`, limited to the one base, and put it in `.env` as `AIRTABLE_TOKEN` along with `AIRTABLE_BASE_ID`, `AIRTABLE_TABLE_ID` and optionally `AIRTABLE_VIEW_ID` (see `.env.example`). Without them `/projects` shows these instructions. Airtable's API cannot list a base's collaborators, so the people who can be picked as Assignee are listed in `PROJECTS_ASSIGNEES` as `Name:email` pairs; without it the Assignee select is disabled and everything else still works. Reads are cached in memory for about 2 minutes, and a failed reload keeps showing the last copy with a note.
 
 **Protection on these routes.** Every POST route in the app, not only the Projects ones, sits behind one guard at the top of `Handler.do_POST` (`_same_origin_request_allowed`): a request whose `Origin` or `Referer` is another site, or whose `Host` is not this machine, gets HTTP 403 before any route code runs, so a web page you happen to have open cannot make your browser post a Zendesk reply, create a task or edit Airtable through this local server. A request with neither header (curl, a script) is allowed, since a cross-site browser form always carries one. The refused request's body is read and dropped so the connection stays in step. A test lists every POST route and fails if one is missing the guard.
+
+### Home page (`/`)
+
+The root URL is a page of admin links an IT Operations member reaches for: identity and email, the help desk, collaboration, developer and AI platforms, business and training platforms, the website CMS, and IT Operations resources. Each link opens in a new tab and shows its host, a one-line note and chips naming the workflow that uses it (onboarding, offboarding, role-change). The **Filter links** box narrows the list as you type. Nothing on the page calls Zendesk or Airtable. **Home** is the first sidebar link and the logo at the bottom of the sidebar; the queue itself is **First Reply** (`/firstreply`).
+
+The links are data, not code. Because this repository is public, the real list (admin URLs with organisation ids, internal folders, trigger ids) lives in **`scripts/home_links.local.json`**, which is git-ignored. The committed **`scripts/home_links.example.json`** holds only generic examples and is shown, with a banner, until the local file exists. To set up: copy the example to `home_links.local.json` and edit it. The shape is `{"groups": [{"title": "...", "links": [{"name": "...", "url": "https://...", "note": "...", "workflows": ["onboarding"]}]}]}`; `note` and `workflows` are optional, and only `http` and `https` URLs are accepted. A bad entry is dropped and listed on the page rather than breaking it; an unreadable local file falls back to the example with a notice. The page reads the file on every load, so edits show on refresh with no server restart.
+
+### Ops Tasks (`/ops-tasks`)
+
+A read-only list of the **Operations** group of the Airtable "Recurring IT Tasks" table (the recurring work IT Operations owns). Tasks are split into Enabled and Disabled sections, each showing frequency, method, assignee and last run (in this machine's local time); clicking a task opens its notes, ticket subject and ticket body (the HTML body shown as plain text) and a link to the record in Airtable. The **Filter** box narrows by task, person or text, and **Reload from Airtable** bypasses the two-minute cache. Nothing on this page writes to Airtable, and there is no POST route.
+
+Setup: add `OPS_TASKS_BASE_ID` and `OPS_TASKS_TABLE_ID` to `.env` (optionally `OPS_TASKS_VIEW_ID`, and `OPS_TASKS_GROUP` if the group is not "Operations"; the ids are the `app...`, `tbl...` and `viw...` parts of the Airtable URL), then restart the review server. The page reuses `AIRTABLE_TOKEN`, so that personal access token must be allowed to read this base: in Airtable, Developer hub, open the token, and add the base. `data.records:read` is enough for this page. Until the settings exist the page shows these steps; Diagnostics has an **Ops tasks** section. If Airtable answers 403 the token cannot see the base.
 
 ### Diagnostics (`/diagnostics`)
 
@@ -387,6 +401,9 @@ scripts/
   review_server.py                            the review/approve web server + OAuth reconnect
   _projects.py                                the Airtable Projects read, allowlisted edits, create, snapshots, write test and undo log for /projects
   _diagnostics.py                             the local health checks behind /diagnostics
+  _home.py                                    loads and validates the admin links shown on the home page
+  _ops_tasks.py                               the read-only Airtable read behind /ops-tasks (Recurring IT Tasks, Operations group)
+  home_links.example.json                     generic example links (committed); copy to home_links.local.json (git-ignored) for the real ones
   watchdog.py                                 standalone health check for the services above
   com.csa.zendesk-first-reply-check.plist     launchd config for the cron job
   com.csa.zendesk-review-server.plist         launchd config for the web server
@@ -425,8 +442,9 @@ The suite runs in seconds with no real Zendesk credentials, no network and no si
 - **"Refused: this request did not come from this tool's own pages" (HTTP 403):** the POST guard saw a cross-site `Origin`/`Referer` or a `Host` that is not `127.0.0.1`/`localhost`. Open the tool at `http://127.0.0.1:8765/` (not through a tunnel, proxy or another hostname) and try again.
 - **Airtable errors on `/projects` or in Diagnostics:** `401` or `403` means the token is wrong, expired, lacks `data.records:read`/`data.records:write`, or does not include the base; `404` means a wrong base or table ID; `422` means a value Airtable would not accept (the tool never lets Airtable create new select options). Fix `.env`, restart the review server, and use Diagnostics to retest.
 - **A write test failed and may have left a record:** the result page names the record. Search the Projects table for "[Smoke test]" and delete it in Airtable.
+- **"Update standup" says the build stopped:** `build.py` found data errors or privacy findings in `meetingnotestool`. Run `python3 build.py` in that checkout for the details, fix the entries it names (see its `PRIVACY.md`), then press the button again. "No build.py next to ..." means `STANDUP_DATA_FILE` does not point at that checkout's `dist/standup_data.json`.
 - **`reload_launchd.sh` details:** it isn't executable in git, so run `zsh scripts/reload_launchd.sh`. If it prints `Bootstrap failed: 5: Input/output error` for one service, the service may have been mid-restart and be running fine: check `launchctl list | grep com.csa` (a PID in the first column means running) and `curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8765/`.
-- **Restarting just the review server** (needed after changing `review_server.py`, `_projects.py`, `_diagnostics.py` or `_common.py`, or any `.env` value; `watchdog.py` changes need no reload because `launchd` re-runs it): kill whatever holds the port first, since `bootout` can race with a hung process, then wait a few seconds before the port accepts connections.
+- **Restarting just the review server** (needed after changing `review_server.py`, `_projects.py`, `_ops_tasks.py`, `_diagnostics.py` or `_common.py`, or any `.env` value; `watchdog.py` changes need no reload because `launchd` re-runs it): kill whatever holds the port first, since `bootout` can race with a hung process, then wait a few seconds before the port accepts connections.
 
   ```
   lsof -ti :8765 | xargs kill -9 2>/dev/null; launchctl bootout gui/$(id -u)/com.csa.zendesk-review-server 2>/dev/null; sleep 2; launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.csa.zendesk-review-server.plist

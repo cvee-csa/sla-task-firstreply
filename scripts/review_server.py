@@ -36,6 +36,8 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _common  # noqa: E402
 import _diagnostics  # noqa: E402
+import _home  # noqa: E402
+import _ops_tasks  # noqa: E402
 import _projects  # noqa: E402
 
 BIND_HOST = "127.0.0.1"  # do not change to 0.0.0.0 -- see module docstring
@@ -117,6 +119,10 @@ _TOPIC_ICON_FILES = {
     # its own badge by status name; a status with no key just renders
     # without one (_topic_icon returns "").
     "projects": "folder-csa-blue.png",
+    # /ops-tasks -- calendar glyph (recurring work), own key.
+    "ops-tasks": "calendar-csa-blue.png",
+    # / (home, the admin links) -- same key glyph as "reconnect", own key.
+    "home": "key-csa-blue.png",
     # /diagnostics -- same gear glyph as an ACTIVE project, own key.
     "diagnostics": "gear-csa-blue.png",
     "project-triage": "error-csa-blue.png",
@@ -314,6 +320,7 @@ _ICONS = {
     # Added for the /sla nav link -- a plain clock face reads as "time
     # thresholds," distinct from Overview's "grid" (several things pulled
     # into one view) and Tasks'/Security's own topic icons.
+    "home": '<path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path><polyline points="9 22 9 12 15 12 15 22"></polyline>',
     "clock": '<circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline>',
 }
 
@@ -386,7 +393,7 @@ _ABOUT_TOOL_HTML = """<details class="about-tool" id="about-tool">
       <li><strong>Zendesk, live.</strong> The queue, Overview, Discussion, Recently Solved and Recently worked on read IT-Operations tickets and their comments, and Security reads the IT-Security group, all through the Zendesk API using the credentials in this repo&rsquo;s <code>.env</code>. Both groups are chosen in <code>.env</code> (<code>ZENDESK_IT_OPERATIONS_GROUP_ID</code>, <code>ZENDESK_IT_SECURITY_GROUP_ID</code>). Zendesk cannot filter some of these (for example by tag), so the tool pages through the group and filters locally, within a set limit; a note appears when a scan stopped early. Results are kept in memory for about 2 minutes, and <strong>Refresh data</strong> reads again on demand.</li>
       <li><strong>The first-reply check.</strong> A background job runs every 2 minutes, Monday to Friday, 9am to 4pm local time. It looks back up to 72 hours, keeps tickets with no public reply yet, drafts the acknowledgment, and saves the candidates to a local file (<code>pending_drafts.json</code>). The main queue is drawn from that file, so it loads without waiting on Zendesk. <strong>Last checked</strong> and <strong>Pending Refresh</strong> in the sidebar report that job.</li>
       <li><strong>SLA charts.</strong> Daily snapshots from the separate <code>sla-report-slack</code> project (<code>data/sla_history.json</code>), which its scheduled job updates on weekdays. They are only as fresh as the last <code>git pull</code> of that project, unless <strong>Update history</strong> on that page fetches the newest snapshots from GitHub into this tool&rsquo;s own output folder (nothing in that project&rsquo;s files is changed); the page shows the newest snapshot date and where it came from. When the newest snapshot is older than today, the last point on the charts is a live count of the open tickets. The live ticket scan adds the SLA breach count in the nav.</li>
-      <li><strong>Standup.</strong> Read-only, from <code>dist/standup_data.json</code> built by the separate <code>meetingnotestool</code> project from the Operations Standup notes. This tool displays that view and stores none of it.</li>
+      <li><strong>Standup.</strong> Read-only, from <code>dist/standup_data.json</code> built by the separate <code>meetingnotestool</code> project from the Operations Standup notes. This tool displays that view and stores none of it. <strong>Update standup</strong> on those pages runs that project&rsquo;s own <code>build.py</code> on this Mac to rebuild the view from the notes it already holds (no network). It does not fetch new standups: the scheduled refresh in the Claude app reads Google Drive, and that repository is private and never pushed, so there is no GitHub copy to fetch.</li>
       <li><strong>My tasks.</strong> Drafts live in a local file (<code>personal_tasks.json</code>) until you promote one, which is the only moment a Zendesk ticket is created. Each page load checks promoted tasks against their live ticket status.</li>
       <li><strong>Projects.</strong> Read from the IT Operations Projects table in Airtable through its API, using the token in this repo&rsquo;s <code>.env</code>. Results are kept in memory for about 2 minutes, and <strong>Refresh data</strong> on that page reads again. Two things from Airtable are stored on disk: a local log of the changes made here (<code>projects_edits.jsonl</code>), which powers Undo, and a full snapshot of the table (<code>projects_snapshots/</code>, newest 30) taken before the first save in each 6-hour stretch, as a backup.</li>
       <li><strong>This browser.</strong> The theme, any Background image and which sections are open or closed are kept in this browser&rsquo;s local storage and never leave it.</li>
@@ -464,10 +471,8 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
     handful of callers that don't pass anything explicit (the confirm
     interstitial, 404s) are effectively reached from/related to the main
     queue anyway, so that's the reasonable default rather than requiring
-    every call site to specify it. (The main queue's own real URL used to
-    just be "/" -- bare "/" is now a redirect to /firstreply, kept alive
-    for old bookmarks/muscle memory rather than removed outright, see
-    do_GET.)
+    every call site to specify it. (The main queue's own real URL is
+    /firstreply; "/" is the home page of admin links, see _render_home_page.)
 
     banner_undo_path is an optional extra: when a caller's confirmation
     message describes a reversible action (right now, just a dismissed
@@ -2276,6 +2281,28 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
     .diag-table td:first-child, .diag-table td:nth-child(2) {{ width: auto; display: inline-block; vertical-align: middle; }}
     .diag-table td {{ padding: 0.1rem 0.6rem 0.1rem 0; }}
   }}
+  .ops-section {{ margin: 0 0 1.25rem; }}
+  .ops-task {{ background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 12px; margin: 0 0 0.5rem; }}
+  .ops-task > summary {{ display: flex; flex-wrap: wrap; align-items: center; gap: 0.25rem 0.6rem; padding: 0.6rem 0.9rem; cursor: pointer; }}
+  .ops-name {{ font-weight: 600; overflow-wrap: anywhere; }}
+  .ops-state {{ font-size: 0.7rem; font-weight: 700; padding: 0.02rem 0.5rem; border-radius: 999px; border: 1px solid currentColor; }}
+  .ops-on .ops-state {{ color: var(--accent); }}
+  .ops-off .ops-state, .ops-off .ops-name {{ color: var(--muted); }}
+  .ops-chip {{ font-size: 0.68rem; font-weight: 700; padding: 0.02rem 0.45rem; border-radius: 999px; border: 1px solid var(--card-border); color: var(--muted); }}
+  .ops-meta {{ color: var(--muted); font-size: 0.8rem; flex-basis: 100%; }}
+  .ops-detail {{ padding: 0 0.9rem 0.8rem; border-top: 1px solid var(--card-border); }}
+  .ops-label {{ margin: 0.7rem 0 0.15rem; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }}
+  .ops-text {{ margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }}
+  .home-grid {{ columns: 22rem; column-gap: 1rem; }}
+  .home-group {{ break-inside: avoid; margin: 0 0 1rem; }}
+  .home-links {{ list-style: none; margin: 0; padding: 0; }}
+  .home-link {{ display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.1rem 0.6rem; padding: 0.45rem 0; border-top: 1px solid var(--card-border); }}
+  .home-link:first-child {{ border-top: 0; }}
+  .home-link > a {{ font-weight: 600; overflow-wrap: anywhere; }}
+  .home-link-note {{ color: var(--muted); font-size: 0.85rem; flex-basis: 100%; }}
+  .home-link-meta {{ display: flex; flex-wrap: wrap; gap: 0.3rem; align-items: center; flex-basis: 100%; }}
+  .home-host {{ color: var(--muted); font-size: 0.75rem; overflow-wrap: anywhere; }}
+  .home-chip {{ font-size: 0.68rem; font-weight: 700; padding: 0.02rem 0.45rem; border-radius: 999px; border: 1px solid var(--card-border); color: var(--muted); }}
   .diag-chip {{ display: inline-block; min-width: 4.2rem; text-align: center; padding: 0.05rem 0.5rem; border-radius: 999px; font-size: 0.72rem; font-weight: 700; border: 1px solid var(--border, currentColor); }}
   .diag-ok {{ color: var(--accent); }}
   .diag-warn {{ color: #c58a00; }}
@@ -3420,7 +3447,7 @@ def _page(body: str, banner: str = "", banner_undo_path: str = "", auto_refresh:
   </div>
   <div class="side-sky" id="side-sky" aria-hidden="true"></div>
   <div class="brand-footer">
-    <a class="brand-home-link" href="/firstreply">
+    <a class="brand-home-link" href="/">
       {logo_html}
       <h1>Workflow Asset</h1>
       {pending_badge_html}
@@ -3571,7 +3598,9 @@ def _top_nav_html(current_path: str = "") -> str:
     # working page, so there's no second category left to separate from
     # the first.
     nav_links = (
-        _link("/firstreply", "reply", "First Reply", "nav-firstreply")
+        # Home is the admin-links page served at "/" (see _render_home_page).
+        _link("/", "home", "Home", "home")
+        + _link("/firstreply", "reply", "First Reply", "nav-firstreply")
         # Overview sits second -- it's the "check this before anything
         # else" glance across all four of the pages below it (see
         # _render_overview_page), so it goes near the top of the list
@@ -3589,6 +3618,8 @@ def _top_nav_html(current_path: str = "") -> str:
         # Projects sits next to Standup: the Airtable project board, which
         # standup items often point at (see _render_projects_page).
         + _link("/projects", "folder", "Projects", "projects")
+        # Ops Tasks: the Operations group of the Recurring IT Tasks table (read-only).
+        + _link("/ops-tasks", "clock", "Ops Tasks", "ops-tasks")
         + _link("/solved", "check-circle", "Recently Solved", "solved")
     )
     return f'<div class="top-nav">{nav_links}</div>'
@@ -5577,6 +5608,19 @@ def _standup_subnav_html(view: dict, current: str) -> str:
     )
 
 
+def _standup_update_form(return_to: str) -> str:
+    """The Update standup button: runs meetingnotestool's build.py locally (see _common.rebuild_standup_view).
+    It rebuilds the view from the notes already parsed; new standups come from the scheduled refresh in the Claude app."""
+    return (
+        '<form method="post" action="/standup/update" class="sla-update-form">'
+        f'<input type="hidden" name="return_to" value="{html.escape(_standup_return_path(return_to))}">'
+        '<button class="internal" type="submit" data-loading-text="Rebuilding…" '
+        'title="Runs meetingnotestool&#x27;s build.py on this Mac (no network) to rebuild this view from the notes it already holds. '
+        'It does not fetch new standups; the scheduled refresh in the Claude app does that.">'
+        f'{_icon("refresh", "icon-sm")}<span>Update standup</span></button></form>'
+    )
+
+
 def _standup_frame(ctx_view: dict, current: str, body: str, banner: str, banner_undo_path: str = "") -> bytes:
     """Shared /standup chrome: heading, freshness line, and the sub-nav
     between the three lists. Every page passes current_path="/standup"
@@ -5585,7 +5629,7 @@ def _standup_frame(ctx_view: dict, current: str, body: str, banner: str, banner_
     latest = _standup_date(ctx_view.get("latest_standup"))
     page = f"""
 <h2>{_topic_icon("standup")}Standup</h2>
-<p class="meta" title="Built by the separate meetingnotestool project. These pages only read it; the one thing they write is a local My tasks draft.">Built from {ctx_view.get("standup_count", 0)} Operations Standup notes (built {html.escape(str(ctx_view.get("generated_at", ""))[:16].replace("T", " "))}; {_standup_notes_link(ctx_view.get("latest_doc_url"), f"latest notes, {latest}")}).</p>
+<div class="sla-history-bar"><p class="meta sla-history-note" title="Built by the separate meetingnotestool project. These pages only read it; the one thing they write is a local My tasks draft.">Built from {ctx_view.get("standup_count", 0)} Operations Standup notes (built {html.escape(str(ctx_view.get("generated_at", ""))[:16].replace("T", " "))}; {_standup_notes_link(ctx_view.get("latest_doc_url"), f"latest notes, {latest}")}).</p>{_standup_update_form(current)}</div>
 <nav class="standup-subnav" aria-label="Standup pages">{subnav}</nav>
 {body}
 <p class="meta" title="Owners with a dotted underline were inferred rather than stated in the notes. A check tag marks a guessed name or detail (hover it for why). Statuses, resolutions and waiting-on are AI judgments from the notes.">Dotted-underline owners were inferred; &quot;check&quot; marks a guess. Statuses are AI judgments, so confirm in the linked notes.</p>
@@ -5598,6 +5642,7 @@ def _standup_error_page(snapshot: dict, banner: str = "") -> bytes:
 <h2>{_topic_icon("standup")}Standup</h2>
 <p class="flag-alert">{html.escape(snapshot.get("error") or "Standup data isn't available.")}</p>
 <p class="meta">These pages read the standup view built by the separate meetingnotestool project. Set <code>STANDUP_DATA_FILE</code> if that checkout isn't at the default path.</p>
+{_standup_update_form("/standup")}
 """
     return _page(body, banner=banner, current_path="/standup", wide=True)
 
@@ -6527,6 +6572,111 @@ PROJECTS_ASSIGNEES=Name:email,Name:email</pre>
 _DIAG_LABELS = {"ok": "OK", "warn": "Check", "fail": "Problem", "info": "Info"}
 
 
+def _ops_task_html(task: dict) -> str:
+    esc = html.escape
+    chips = "".join(f'<span class="ops-chip">{esc(v)}</span>' for v in (task["frequency"], task["method"]) if v)
+    meta = " &middot; ".join(esc(v) for v in (
+        task["assignee"], f'Last run {task["last_run"]}' if task["last_run"] else "") if v)
+    status = esc(task["status"] or "No status")
+    state = "on" if task["status_key"] == "Enabled" else "off"
+    parts = []
+    if task["notes"]:
+        parts.append(f'<h4 class="ops-label">Notes</h4><p class="ops-text">{esc(task["notes"])}</p>')
+    if task["subject"]:
+        parts.append(f'<h4 class="ops-label">Ticket subject</h4><p class="ops-text">{esc(task["subject"])}</p>')
+    if task["body"]:
+        parts.append(f'<h4 class="ops-label">Ticket body</h4><p class="ops-text">{esc(task["body"])}</p>')
+    if not parts:
+        parts.append('<p class="meta">No notes, subject or body.</p>')
+    link = (f'<p class="meta"><a href="{esc(task["url"], quote=True)}" target="_blank" rel="noopener noreferrer">Open in Airtable</a></p>'
+            if task["url"] else "")
+    return (f'<details class="ops-task ops-{state}"><summary>'
+            f'<span class="ops-name">{esc(task["name"])}</span>'
+            f'<span class="ops-state">{status}</span>{chips}'
+            f'<span class="ops-meta">{meta}</span></summary>'
+            f'<div class="ops-detail">{"".join(parts)}{link}</div></details>')
+
+
+def _render_ops_tasks_page(result: dict) -> bytes:
+    """The Operations group of the Recurring IT Tasks table, read-only (see _ops_tasks)."""
+    cfg = _ops_tasks.config()
+    title = f'<h2>{_topic_icon("ops-tasks") or _icon("clock") + " "}Ops Tasks</h2>'
+    if not result.get("configured"):
+        body = f"""{title}
+<div class="security-panel"><h2 class="column-heading">Ops tasks are not set up</h2>
+<p>Add these to this repo&rsquo;s <code>.env</code>, then restart the review server:</p>
+<pre>OPS_TASKS_BASE_ID=
+OPS_TASKS_TABLE_ID=
+OPS_TASKS_VIEW_ID=
+OPS_TASKS_GROUP=Operations</pre>
+<p class="meta">The view and the group are optional. This page uses the same <code>AIRTABLE_TOKEN</code> as Projects, so that token must be allowed to read this base (Airtable, Developer hub, edit the token, add the base). The scope <code>data.records:read</code> is enough; nothing here writes to Airtable.</p></div>"""
+        return _page(body, current_path="/ops-tasks", wide=True)
+
+    items = result.get("items") or []
+    problem = f'<p class="flag-alert">{html.escape(result["error"])}</p>' if result.get("error") else ""
+    capped = '<p class="meta">Only the first 1000 tasks were loaded.</p>' if result.get("capped") else ""
+    loaded = ""
+    if result.get("fetched_at"):
+        loaded = f"Loaded from Airtable at {datetime.fromtimestamp(result['fetched_at']).strftime('%H:%M')}. "
+    open_link = f'<a href="{html.escape(_ops_tasks.table_url(cfg), quote=True)}" target="_blank" rel="noopener noreferrer">Open in Airtable</a>'
+    groups: dict = {}
+    for task in items:
+        groups.setdefault(task["status_key"] or "No status", []).append(task)
+    sections = "".join(
+        f'<section class="ops-section"><h3 class="project-panel-label">{html.escape(label)} ({len(tasks)})</h3>'
+        f'{"".join(_ops_task_html(t) for t in tasks)}</section>'
+        for label, tasks in groups.items())
+    filter_html = _filter_box_html(".ops-task", "Filter by task, person or text…") if items else ""
+    main = sections or f'<p class="empty">No tasks in the {html.escape(cfg["group"])} group.</p>'
+    body = f"""{title}
+<p class="meta">{loaded}{len(items)} {html.escape(cfg["group"])} tasks, read-only. {open_link}. <a href="/ops-tasks?refresh=1">Reload from Airtable</a>.</p>
+{problem}{capped}
+{filter_html}
+{main}"""
+    return _page(body, current_path="/ops-tasks", wide=True)
+
+
+def _render_home_page() -> bytes:
+    """Admin links an IT Operations member reaches for, grouped, from _home.load(). Plain links that open in
+    a new tab; nothing here calls Zendesk or Airtable."""
+    data = _home.load()
+    notes = []
+    if data["notice"]:
+        notes.append(data["notice"])
+    if data["source"] == "example":
+        notes.append(
+            f"Showing the generic example links. Copy {_home.HOME_LINKS_EXAMPLE_FILE.name} to "
+            f"{_home.HOME_LINKS_FILE.name} (git-ignored) and edit it to list the real ones.")
+    if data["source"] == "none":
+        notes.append(f"No links file found. Create {_home.HOME_LINKS_FILE.name} next to {_home.HOME_LINKS_EXAMPLE_FILE.name}.")
+    notes.extend(data["problems"][:10])
+    if len(data["problems"]) > 10:
+        notes.append(f"{len(data['problems']) - 10} more problems not shown.")
+    notes_html = "".join(f'<div class="banner">{html.escape(n)}</div>' for n in notes)
+    cards = []
+    for group in data["groups"]:
+        items = []
+        for link in group["links"]:
+            host = urlparse(link["url"]).netloc
+            chips = "".join(f'<span class="home-chip">{html.escape(w)}</span>' for w in link["workflows"])
+            note = f'<span class="home-link-note">{html.escape(link["note"])}</span>' if link["note"] else ""
+            items.append(
+                f'<li class="home-link"><a href="{html.escape(link["url"], quote=True)}" target="_blank" rel="noopener noreferrer">'
+                f'{html.escape(link["name"])}</a>{note}'
+                f'<span class="home-link-meta"><span class="home-host">{html.escape(host)}</span>{chips}</span></li>')
+        cards.append(
+            f'<section class="security-panel home-group"><h3 class="project-panel-label">{html.escape(group["title"])}</h3>'
+            f'<ul class="home-links">{"".join(items)}</ul></section>')
+    grid = f'<div class="home-grid">{"".join(cards)}</div>' if cards else '<p class="empty">No links to show.</p>'
+    filter_box = _filter_box_html(".home-link", "Filter links…") if cards else ""
+    body = f"""<h2>{_topic_icon("home")}Admin links</h2>
+<p class="meta">Consoles used for onboarding, offboarding and role changes. Links open in a new tab. The chips show which workflow uses a link.</p>
+{notes_html}
+{filter_box}
+{grid}"""
+    return _page(body, current_path="/", wide=True)
+
+
 def _render_diagnostics_page() -> bytes:
     rows_by_section = []
     for title, checks in _diagnostics.run_checks():
@@ -6928,6 +7078,10 @@ class Handler(BaseHTTPRequestHandler):
             self._send_html(_render_project_new_page())
             return
 
+        if parsed.path == "/ops-tasks":
+            self._send_html(_render_ops_tasks_page(_ops_tasks.fetch_tasks(force=qs.get("refresh", [""])[0] == "1")))
+            return
+
         if parsed.path == "/projects":
             view = _project_view(qs.get("view", [""])[0])
             sort = qs.get("sort", [""])[0]
@@ -7045,13 +7199,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/":
-            # The main queue's real URL, below -- kept alive as a redirect
-            # (not removed, not still rendering the page itself) so an old
-            # bookmark or muscle-memory "/" still lands somewhere useful
-            # rather than a 404. Drops the query string on purpose (a
-            # ?sort=priority from an old link isn't worth preserving
-            # through the extra hop for something this rare).
-            self._redirect("/firstreply")
+            self._send_html(_render_home_page())
             return
 
         if parsed.path != "/firstreply":
@@ -7139,6 +7287,12 @@ class Handler(BaseHTTPRequestHandler):
             return
         parsed = urlparse(self.path)
         parts = parsed.path.strip("/").split("/")
+
+        if parts == ["standup", "update"]:
+            form = self._parse_form_body()
+            return_to = _standup_return_path(form.get("return_to", [""])[0])
+            self._redirect(_standup_with_msg(return_to, _common.rebuild_standup_view()["message"]))
+            return
 
         if parts == ["standup", "add-task"]:
             # A local My tasks draft only (see _common.add_standup_action_to_tasks)

@@ -69,13 +69,19 @@ def isolated_output_dir(tmp_path, monkeypatch):
     # standup notes (and the Standup nav badge starts cold like the rest).
     monkeypatch.setattr(_common, "STANDUP_DATA_FILE", tmp_path / "standup_data.json")
     # The made-up owners the standup fixtures use, not the real filter list.
+    # The home page's admin links: never read this machine's real home_links.local.json.
+    import _home
+    monkeypatch.setattr(_home, "HOME_LINKS_FILE", tmp_path / "home_links.local.json")
     monkeypatch.setattr(_common, "STANDUP_PEOPLE", ["Alex", "Sam"])
     monkeypatch.setattr(_common, "_standup_cache", {})
     monkeypatch.setattr(_common, "STANDUP_TRACKED_PERSON", "Sam")
     # /projects: no real Airtable settings or cached projects in any test, and no
     # leftover per-record locks. Tests that need Airtable set the env vars themselves.
-    for name in ("AIRTABLE_TOKEN", "AIRTABLE_BASE_ID", "AIRTABLE_TABLE_ID", "AIRTABLE_VIEW_ID", "PROJECTS_ASSIGNEES"):
+    for name in ("AIRTABLE_TOKEN", "AIRTABLE_BASE_ID", "AIRTABLE_TABLE_ID", "AIRTABLE_VIEW_ID", "PROJECTS_ASSIGNEES",
+                 "OPS_TASKS_BASE_ID", "OPS_TASKS_TABLE_ID", "OPS_TASKS_VIEW_ID", "OPS_TASKS_GROUP"):
         monkeypatch.delenv(name, raising=False)
     _projects.reset_cache()
+    import _ops_tasks
+    _ops_tasks.reset_cache()
     monkeypatch.setattr(_projects, "_in_progress", set())
     yield

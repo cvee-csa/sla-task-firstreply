@@ -13,6 +13,7 @@ import subprocess
 from datetime import datetime
 
 import _common
+import _ops_tasks
 import _projects
 
 LAUNCH_LABELS = (
@@ -91,6 +92,23 @@ def check_airtable() -> list:
     return out
 
 
+def check_ops_tasks() -> list:
+    cfg = _ops_tasks.config()
+    missing = [n for n, key in (("AIRTABLE_TOKEN", "token"), ("OPS_TASKS_BASE_ID", "base"), ("OPS_TASKS_TABLE_ID", "table")) if not cfg[key]]
+    if missing:
+        return [_check("Ops tasks settings", "info", f"Not set: {', '.join(missing)}. The Ops Tasks page shows setup instructions until they are.")]
+    out = [_check("Ops tasks settings", "ok", f"Token, base ID and table ID are set; listing the {cfg['group']} group.")]
+    cached = _ops_tasks._cache["result"]
+    if cached is None:
+        out.append(_check("Ops tasks data", "info", "Not loaded yet in this server process. Open Ops Tasks."))
+    elif cached.get("error"):
+        out.append(_check("Ops tasks data", "warn", f"Last load problem: {cached['error']}"))
+    else:
+        when = datetime.fromtimestamp(cached["fetched_at"]).strftime("%H:%M") if cached.get("fetched_at") else "unknown time"
+        out.append(_check("Ops tasks data", "ok", f"{len(cached.get('items', []))} tasks loaded at {when}."))
+    return out
+
+
 def check_sla_history() -> list:
     snap = _common.sla_history_snapshot()
     if snap.get("error"):
@@ -150,6 +168,7 @@ def run_checks() -> list:
         ("This machine", [check_env_file(), check_output_folder()]),
         ("Zendesk", check_zendesk()),
         ("Airtable", check_airtable()),
+        ("Ops tasks", check_ops_tasks()),
         ("SLA history", check_sla_history() + [check_sla_checkout()]),
         ("Background services", check_launch_agents()),
     ]
